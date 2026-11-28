@@ -86,46 +86,58 @@ impl MediaAdapter {
     fn receive(
         &self,
         control: &RawCancellation,
-        call: impl FnOnce(*mut RawStream) -> i32,
+        call: impl FnOnce(*mut *mut c_void) -> i32,
     ) -> Result<PreparedAudio, MediaError> {
-        let mut raw = RawStream {
-            handle: ptr::null_mut(),
-            sample_rate_hz: 0,
-        };
-        let result = call(&mut raw);
+        let mut handle = ptr::null_mut();
+        let result = call(&mut handle);
         let close = StreamOwner {
-            handle: raw.handle,
+            handle,
             close: self.descriptor.close_stream.unwrap(),
         };
         status(result)?;
-        if raw.handle.is_null() || raw.sample_rate_hz == 0 {
+        if handle.is_null() {
             return Err(MediaError::InvalidOutput);
         }
+        let mut rate = None;
         let mut samples = Vec::new();
         let mut chunk = [0.0; 2048];
         loop {
-            let mut count = 0;
+            let mut event = RawStep::default();
             // SAFETY: stream, control, and bounded output remain live for the call.
             status(unsafe {
-                self.descriptor.read_stream.unwrap()(
-                    raw.handle,
+                self.descriptor.step_stream.unwrap()(
+                    handle,
                     control,
                     chunk.as_mut_ptr(),
                     chunk.len(),
-                    &mut count,
+                    &mut event,
                 )
             })?;
-            if count > chunk.len() {
-                return Err(MediaError::InvalidOutput);
+            match event.kind {
+                STEP_PENDING if event == RawStep::default() => {
+                    std::thread::sleep(std::time::Duration::from_millis(2));
+                }
+                STEP_FORMAT_READY
+                    if rate.is_none() && event.sample_rate_hz != 0 && event.samples == 0 =>
+                {
+                    rate = Some(event.sample_rate_hz);
+                }
+                STEP_SAMPLES
+                    if rate.is_some()
+                        && event.sample_rate_hz == 0
+                        && (1..=chunk.len()).contains(&event.samples) =>
+                {
+                    samples
+                        .try_reserve(event.samples)
+                        .map_err(|_| MediaError::Io)?;
+                    samples.extend_from_slice(&chunk[..event.samples]);
+                }
+                STEP_EOF if event.sample_rate_hz == 0 && event.samples == 0 => break,
+                _ => return Err(MediaError::InvalidOutput),
             }
-            if count == 0 {
-                break;
-            }
-            samples.try_reserve(count).map_err(|_| MediaError::Io)?;
-            samples.extend_from_slice(&chunk[..count]);
         }
         drop(close);
-        PreparedAudio::new(raw.sample_rate_hz, samples)
+        PreparedAudio::new(rate.ok_or(MediaError::InvalidOutput)?, samples)
     }
 }
 

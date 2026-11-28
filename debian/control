@@ -3,20 +3,21 @@ Section: hamradio
 Priority: optional
 Maintainer: Chris Peterson <cpeter1207@users.noreply.github.com>
 Build-Depends: debhelper-compat (= 13), cargo (>= 1.88), rustc (>= 1.88),
- libclang-dev, libspeexdsp-dev, libgpiod-dev (>= 2.2), libsensors-dev, pkg-config, dh-sequence-asterisk <!standalone>,
- librate-adjusting-pcm-ring3-dev (>= 3.0.0~alpha5),
+ libsofia-sip-ua-dev (>= 1.13.19),
+ libclang-dev, libspeexdsp-dev, libgpiod-dev (>= 2.2), libsensors-dev, libssl-dev, pkg-config, dh-sequence-asterisk <!standalone>,
+ librate-adjusting-pcm-ring3-dev (>= 3.0.0~alpha6),
  librptadv-samplerate-adapter-dev (>= 0.2.0~alpha3),
- librptadv-codec-dev (>= 0.1.0~alpha1),
+ librptadv-codec-dev (>= 0.1.0~alpha2),
  librptadv-iax2-client-dev (>= 0.1.0~alpha9),
  librptadvtone-dev (>= 0.1.0~alpha1),
  librptadvmorse-dev (>= 0.1.0~alpha1-1),
  librptadvdtmf-dev (>= 0.1.0~alpha3-1),
  librptadvtemplate-dev (>= 0.1.0~alpha1-1),
- librptadvschedule-dev (>= 0.1.0~alpha2-1),
- libusbradioplus-product-dev (>= 0.1.0~alpha34-1),
- librptadvradio-dev (>= 0.1.0~alpha11),
+ librptadvschedule-dev (>= 0.1.0~alpha3-1),
+ libusbradioplus-product-dev (>= 0.1.0~alpha38-1),
+ librptadvradio-dev (>= 0.1.0~alpha13),
  librptadv-portaudio-alsa-adapter-dev (>= 0.2.0~alpha4),
- librptadv-gpio-adapter-dev (>= 0.1.0~alpha4),
+ librptadv-gpio-adapter-dev (>= 0.1.0~alpha5),
  librptadv-ffmpeg-adapter-dev (>= 0.1.0~alpha2), ffmpeg
 Standards-Version: 4.7.2
 Homepage: https://github.com/cpeter1207/rpt_advanced
@@ -25,30 +26,32 @@ Rules-Requires-Root: no
 Package: rpt-advanced
 Architecture: amd64 arm64
 Depends: ${misc:Depends}, ${shlibs:Depends}, adduser,
- librate-adjusting-pcm-ring3 (>= 3.0.0~alpha5),
+ rpt-advanced-cli (= ${binary:Version}),
+ libsofia-sip-ua0 (>= 1.13.19),
+ librate-adjusting-pcm-ring3 (>= 3.0.0~alpha6),
  librptadv-samplerate-adapter2 (>= 0.2.0~alpha3),
- librptadv-product2 (= ${binary:Version}),
+ librptadv-product3 (= ${binary:Version}),
  librptadvecholink1 (>= 0.1.0~alpha1),
- libusbradioplus-product1 (>= 0.1.0~alpha34-1),
- librptadv-file-adapter1 (= ${binary:Version}),
- librptadv-speech-adapter1 (= ${binary:Version}),
+ libusbradioplus-product1 (>= 0.1.0~alpha38-1),
+ librptadv-file-adapter2 (= ${binary:Version}),
+ librptadv-speech-adapter2 (= ${binary:Version}),
  librptadv-control-standalone-adapter1 (= ${binary:Version}),
  librptadv-resolver-adapter1 (= ${binary:Version}),
  librptadv-jitter-adapter1 (= ${binary:Version}),
- librptadvradio5 (>= 0.1.0~alpha11),
+ librptadvradio5 (>= 0.1.0~alpha13),
  librptadv-portaudio-alsa-adapter2 (>= 0.2.0~alpha4),
- librptadv-gpio-adapter1 (>= 0.1.0~alpha4),
+ librptadv-gpio-adapter1 (>= 0.1.0~alpha5),
  librptadv-ffmpeg-adapter1 (>= 0.1.0~alpha2),
- librptadv-codec-g7111 (>= 0.1.0~alpha1),
- librptadv-codec-pcm1 (>= 0.1.0~alpha1),
- librptadv-codec-gsm1 (>= 0.1.0~alpha1),
- librptadv-codec-speex1 (>= 0.1.0~alpha1),
- librptadv-codec-opus1 (>= 0.1.0~alpha1),
- librptadv-codec-ffmpeg1 (>= 0.1.0~alpha1),
- librptadv-codec-bcg7291 (>= 0.1.0~alpha1),
- librptadv-codec-ilbc1 (>= 0.1.0~alpha1),
- librptadv-codec-spandsp1 (>= 0.1.0~alpha1),
- librptadv-codec-dialogic1 (>= 0.1.0~alpha1),
+ librptadv-codec-g7111 (>= 0.1.0~alpha2),
+ librptadv-codec-pcm1 (>= 0.1.0~alpha2),
+ librptadv-codec-gsm1 (>= 0.1.0~alpha2),
+ librptadv-codec-speex1 (>= 0.1.0~alpha2),
+ librptadv-codec-opus1 (>= 0.1.0~alpha2),
+ librptadv-codec-ffmpeg1 (>= 0.1.0~alpha2),
+ librptadv-codec-bcg7291 (>= 0.1.0~alpha2),
+ librptadv-codec-ilbc1 (>= 0.1.0~alpha2),
+ librptadv-codec-spandsp1 (>= 0.1.0~alpha2),
+ librptadv-codec-dialogic1 (>= 0.1.0~alpha2),
  librptadv-iax2-client2 (>= 0.1.0~alpha9)
 Description: standalone Rust-owned radio controller
  Standalone controller service for configured radio nodes. It has no runtime
@@ -58,29 +61,33 @@ Description: standalone Rust-owned radio controller
 Package: app-rpt-advanced
 Architecture: amd64 arm64
 Depends: ${misc:Depends}, ${shlibs:Depends}, ${asterisk:Depends},
- librate-adjusting-pcm-ring3 (>= 3.0.0~alpha5),
+ librate-adjusting-pcm-ring3 (>= 3.0.0~alpha6),
  librptadv-samplerate-adapter2 (>= 0.2.0~alpha3),
- librptadv-product2 (= ${binary:Version}),
+ librptadv-product3 (= ${binary:Version}),
  librptadvecholink1 (>= 0.1.0~alpha1),
- librptadv-file-adapter1 (= ${binary:Version}),
- librptadv-speech-adapter1 (= ${binary:Version}),
+ librptadv-file-adapter2 (= ${binary:Version}),
+ librptadv-speech-adapter2 (= ${binary:Version}),
  librptadv-control-asterisk-adapter1 (= ${binary:Version})
+Suggests: usbradioplus (>= 0.1.0~alpha38-1)
 Description: optional Asterisk adapter for the RPT Advanced controller
  Deprecated Asterisk module adapter for RadioPlusAdvanced channels. It may be
  installed independently of the standalone controller package.
 
-Package: librptadv-product2
+Package: librptadv-product3
 Architecture: amd64 arm64
 Multi-Arch: same
 Depends: ${misc:Depends}, ${shlibs:Depends},
- libusbradioplus-product1 (>= 0.1.0~alpha34-1),
- librate-adjusting-pcm-ring3 (>= 3.0.0~alpha5),
+ libusbradioplus-product1 (>= 0.1.0~alpha38-1),
+ librptadvradio5 (>= 0.1.0~alpha13),
+ librate-adjusting-pcm-ring3 (>= 3.0.0~alpha6),
  librptadv-samplerate-adapter2 (>= 0.2.0~alpha3),
  librptadvtone1 (>= 0.1.0~alpha1),
  librptadvmorse1 (>= 0.1.0~alpha1-1),
  librptadvdtmf1 (>= 0.1.0~alpha3-1),
+ librptadv-codec-opus1 (>= 0.1.0~alpha2),
+ librptadv-jitter-adapter1 (= ${binary:Version}),
  librptadvtemplate1 (>= 0.1.0~alpha1-1),
- librptadvschedule1 (>= 0.1.0~alpha2-1)
+ librptadvschedule1 (>= 0.1.0~alpha3-1)
 Description: portable controller product for rpt_advanced
  Versioned Rust C-ABI product that owns configuration, controller policy,
  workers, and portable host-service clients.
@@ -88,12 +95,12 @@ Description: portable controller product for rpt_advanced
 Package: librptadv-product-dev
 Architecture: amd64 arm64
 Multi-Arch: same
-Depends: ${misc:Depends}, librptadv-product2 (= ${binary:Version}), librptadv-codec-dev,
- libusbradioplus-product-dev (>= 0.1.0~alpha34-1)
+Depends: ${misc:Depends}, librptadv-product3 (= ${binary:Version}), librptadv-codec-dev,
+ libusbradioplus-product-dev (>= 0.1.0~alpha38-1)
 Description: development files for the rpt_advanced product
  Public C header and unversioned linker name for the versioned product.
 
-Package: librptadv-file-adapter1
+Package: librptadv-file-adapter2
 Architecture: amd64 arm64
 Multi-Arch: same
 Depends: ${misc:Depends}, ${shlibs:Depends}, ffmpeg
@@ -104,11 +111,11 @@ Description: local-file preparation adapter for rpt_advanced
 Package: librptadv-file-adapter-dev
 Architecture: amd64 arm64
 Multi-Arch: same
-Depends: ${misc:Depends}, librptadv-file-adapter1 (= ${binary:Version})
+Depends: ${misc:Depends}, librptadv-file-adapter2 (= ${binary:Version})
 Description: development files for the rpt_advanced file adapter
  Public C headers and unversioned linker name for the versioned file adapter.
 
-Package: librptadv-speech-adapter1
+Package: librptadv-speech-adapter2
 Architecture: amd64 arm64
 Multi-Arch: same
 Depends: ${misc:Depends}, ${shlibs:Depends}
@@ -119,7 +126,7 @@ Description: offline speech preparation adapter for rpt_advanced
 Package: librptadv-speech-adapter-dev
 Architecture: amd64 arm64
 Multi-Arch: same
-Depends: ${misc:Depends}, librptadv-speech-adapter1 (= ${binary:Version})
+Depends: ${misc:Depends}, librptadv-speech-adapter2 (= ${binary:Version})
 Description: development files for the rpt_advanced speech adapter
  Public C headers and unversioned linker name for the versioned speech adapter.
 
@@ -212,3 +219,10 @@ Multi-Arch: same
 Depends: ${misc:Depends}, librptadv-hwmon-adapter1 (= ${binary:Version})
 Description: development files for the rpt_advanced Linux sensor adapter
  Public C header and unversioned linker name for the Linux sensor adapter.
+
+Package: rpt-advanced-cli
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}, adduser
+Description: local operator client for RPT Advanced
+ Discover and edit controller resources, inspect status and submit operations
+ through the mutually authenticated loopback management API.

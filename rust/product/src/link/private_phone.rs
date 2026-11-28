@@ -1,0 +1,655 @@
+//! Private call transport on its native registered executor. Only its exact
+//! reply queue reaches this encoder. Authentication and command execution own
+//! the other endpoints on ordinary product control.
+#[cfg(target_os = "linux")]
+use super::session::status::ReceiveStatus;
+use super::{
+    dispatcher::PeerWake,
+    outbound::Outbound,
+    private_radio::Radio,
+    ring::InboundObserver,
+    status_audio::{DecodedMeter, PeerMeasurements, PeerReaders},
+};
+use crate::{Error, phone::PrivatePhoneReply, services::PeerIo};
+use rpt_advanced_core::{
+    audio::{AudioSpan, LinkAudioProducer, LinkAudioQueue, PlaybackOutcome},
+    link::PeerReply,
+};
+use rtrb::{Consumer, Producer, RingBuffer};
+use std::{
+    ffi::c_void,
+    panic::{AssertUnwindSafe, catch_unwind},
+    sync::{
+        Arc, Mutex, TryLockError,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Instant,
+};
+
+#[path = "private_receive.rs"]
+mod receive;
+pub(crate) use receive::Digit;
+use receive::Receive;
+use std::sync::atomic::AtomicU64;
+
+const GENERATED_FRAMES: usize = 960;
+const GENERATED_NS: u64 = 20_000_000;
+
+/// Map the immutable station source time from the engine epoch to the call clock.
+fn station_birth(born: Option<u64>, host_now: u64, call_now: u64) -> Option<u64> {
+    // A predicted callback time or queued suffix can be ahead of this owner.
+    // Preserve that time so Outbound can wait without losing the span.
+    let translated = i128::from(born?) + i128::from(call_now) - i128::from(host_now);
+    u64::try_from(translated).ok()
+}
+
+/// The redirected route and observer share the private serial owner's handoff.
+#[derive(Default)]
+pub(super) struct RedirectSlot {
+    pub(super) pending: Option<Radio>,
+    installed: Option<(InboundObserver, Arc<AtomicBool>)>,
+}
+
+impl RedirectSlot {
+    fn take_next(slot: &Mutex<Self>) -> Result<(Option<Radio>, bool), Error> {
+        let mut redirect = match slot.try_lock() {
+            Ok(redirect) => redirect,
+            Err(TryLockError::WouldBlock) => return Ok((None, true)),
+            Err(TryLockError::Poisoned(_)) => return Err(Error::Operation),
+        };
+        let new = redirect.pending.take();
+        if let Some(route) = &new {
+            redirect.installed = Some((route.incoming.observer(), Arc::clone(&route.installed)));
+        }
+        Ok((new, false))
+    }
+
+    fn observation(&self) -> Option<InboundObserver> {
+        let (observer, installed) = self.installed.as_ref()?;
+        // The callback releases the redirect lock before activating the route.
+        installed.load(Ordering::Acquire).then(|| observer.clone())
+    }
+}
+
+pub(crate) struct Control {
+    pub(crate) rate: u32,
+    pub(super) redirect: Arc<Mutex<RedirectSlot>>,
+    replies: Producer<PrivatePhoneReply>,
+    digits: Consumer<Digit>,
+    last_processed: u64,
+    settled: Arc<AtomicU64>,
+    pub(crate) wake: PeerWake,
+    stop: Arc<AtomicBool>,
+    meters: PeerReaders,
+    #[cfg(target_os = "linux")]
+    pub(super) receive_status: Arc<ReceiveStatus>,
+}
+impl Control {
+    pub(crate) fn status_meters(&self, call_generation: u64) -> PeerMeasurements {
+        let observer = self
+            .redirect
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .observation();
+        PeerMeasurements {
+            native_ingress: observer
+                .filter(|observer| !observer.signals().ended())
+                .and_then(|observer| observer.native_ingress()),
+            ..self.meters.readings(Some(call_generation))
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn next_receive_status(&self) -> Option<(u64, bool)> {
+        self.receive_status.next()
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn receive_status_lost(&self) -> bool {
+        self.receive_status.lost()
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn discard_receive_status(&self) {
+        self.receive_status.discard();
+    }
+
+    pub(crate) fn send(&mut self, reply: PrivatePhoneReply) -> Result<(), Error> {
+        self.replies.push(reply).map_err(|_| Error::Allocation)?;
+        self.wake.notify();
+        Ok(())
+    }
+    pub(crate) fn collection_ended(&self) {
+        if self.settled.swap(self.last_processed, Ordering::AcqRel) != self.last_processed {
+            self.wake.notify();
+        }
+    }
+    pub(crate) fn pending_digits(&self) -> usize {
+        self.digits.slots()
+    }
+    pub(crate) fn digit(&mut self) -> Option<Digit> {
+        let digit = self.digits.pop().ok()?;
+        self.last_processed = digit.revision;
+        Some(digit)
+    }
+}
+impl Drop for Control {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        self.wake.notify();
+        #[cfg(test)]
+        if crate::fixture::WATCH_PHONE_PCM.load(Ordering::Relaxed) {
+            eprintln!("private PHONE retirement: control stop published and owner notified");
+        }
+    }
+}
+
+pub(super) struct Session {
+    pub(super) io: PeerIo,
+    pub(super) reply: PeerReply,
+    pub(crate) wake: PeerWake,
+    pub(super) stop: Arc<AtomicBool>,
+    pub(super) epoch: Instant,
+    redirect: Arc<Mutex<RedirectSlot>>,
+    radio: Option<Radio>,
+    incoming: Consumer<PrivatePhoneReply>,
+    current: Option<PrivatePhoneReply>,
+    playing_revision: Option<u64>,
+    prompt_losses: Option<u64>,
+    receive: Receive,
+    decoded_meter: DecodedMeter,
+    output: LinkAudioProducer,
+    outbound: Outbound,
+    samples: [f32; GENERATED_FRAMES],
+    next_position: u64,
+    next_ns: u64,
+}
+impl Session {
+    pub(super) fn new(
+        io: PeerIo,
+        reply: PeerReply,
+        epoch: Instant,
+        capacity: usize,
+    ) -> Result<(Self, Control), Error> {
+        if io.async_owner().is_none()
+            || !io.source_media()
+            || reply.phone_source().is_none()
+            || capacity == 0
+        {
+            return Err(Error::Admission);
+        }
+        let (output, input) = LinkAudioQueue::new(GENERATED_FRAMES, 1)
+            .map_err(|_| Error::Allocation)?
+            .into_endpoints();
+        let rate = io.rate();
+        let mut outbound = Outbound::private(rate, input, reply.clone())?;
+        let egress_meters = outbound.status_meters(io.prepared_media());
+        let (decoded_meter, decoded_reader) = DecodedMeter::new(rate);
+        let (replies, incoming) = RingBuffer::new(capacity);
+        let (digits, received) = RingBuffer::new(64);
+        let settled = Arc::new(AtomicU64::new(0));
+        let receive = Receive::new(
+            io.rate(),
+            io.phone_digits().ok_or(Error::Admission)?,
+            digits,
+            Arc::clone(&settled),
+        )?;
+        let stop = Arc::new(AtomicBool::new(false));
+        let wake = PeerWake::default();
+        let redirect = Arc::new(Mutex::new(RedirectSlot::default()));
+        let control = Control {
+            rate: io.rate(),
+            redirect: Arc::clone(&redirect),
+            replies,
+            digits: received,
+            last_processed: 0,
+            settled,
+            wake: wake.clone(),
+            stop: Arc::clone(&stop),
+            meters: PeerReaders::new(rate, decoded_reader, egress_meters),
+            #[cfg(target_os = "linux")]
+            receive_status: Arc::new(ReceiveStatus::default()),
+        };
+        Ok((
+            Self {
+                io,
+                reply,
+                wake,
+                stop,
+                epoch,
+                incoming,
+                redirect,
+                radio: None,
+                current: None,
+                playing_revision: None,
+                prompt_losses: None,
+                receive,
+                decoded_meter,
+                output,
+                outbound,
+                samples: [0.; GENERATED_FRAMES],
+                next_position: 0,
+                next_ns: 0,
+            },
+            control,
+        ))
+    }
+    fn queue_generated(&mut self, now: u64, count: usize) -> Result<(), Error> {
+        let start = if self.next_ns == 0 { now } else { self.next_ns };
+        // Advance on the same native timeline, including intervals without
+        // PCM. Skip missed slots without trying to send a burst to catch up.
+        let skipped = now.saturating_sub(start) / GENERATED_NS;
+        let slot = start + skipped * GENERATED_NS;
+        let position = self
+            .next_position
+            .checked_add(skipped * GENERATED_FRAMES as u64)
+            .ok_or(Error::Write)?;
+        let frames = if count == 0 { GENERATED_FRAMES } else { count } as u64;
+        self.next_position = position.checked_add(frames).ok_or(Error::Write)?;
+        self.next_ns = slot.saturating_add(frames * 1_000_000_000 / 48_000);
+        if count != 0 {
+            let source = self.reply.phone_source().ok_or(Error::Admission)?;
+            let span = AudioSpan {
+                generation: source.call_generation(),
+                burst: 0,
+                source_start: position,
+                stream: source.ingress(),
+                born_ns: Some(slot),
+            };
+            if self.output.write(span, &self.samples[..count]) != 0 {
+                #[cfg(test)]
+                if crate::fixture::WATCH_PHONE_PCM.load(Ordering::Relaxed) {
+                    eprintln!("private PHONE write rejected: generated audio queue");
+                }
+                return Err(Error::Write);
+            }
+        }
+        Ok(())
+    }
+
+    fn step(&mut self) -> Result<(), Error> {
+        if self.stop.load(Ordering::Acquire) || self.reply.ended() {
+            return Err(Error::Hangup);
+        }
+        let now_ms = self.epoch.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+        #[cfg(target_os = "linux")]
+        if let Some(radio) = &mut self.radio {
+            radio.observe_at(now_ms);
+        }
+        let (new, retry_redirect) = RedirectSlot::take_next(&self.redirect)?;
+        if let Some(new) = new {
+            self.decoded_meter.discontinuity();
+            #[cfg(target_os = "linux")]
+            let new = {
+                let mut new = new;
+                new.observe_at(now_ms);
+                new
+            };
+            new.activate();
+            self.radio = Some(new);
+        } else if retry_redirect
+            && self
+                .radio
+                .as_ref()
+                .is_some_and(|old| old.incoming.signals().ended())
+        {
+            self.decoded_meter.discontinuity();
+            self.radio = None;
+        }
+        self.receive.settle(self.radio.as_mut());
+        let now = self.io.private_now()?;
+        let radio = &mut self.radio;
+        let receipt = radio.as_mut().map_or(0, |route| route.begin(now));
+        let mut failure = None;
+        let outgoing = self.reply.outgoing_phone();
+        let closed = self.io.read_private(&mut |input| {
+            if failure.is_some() {
+                return 0;
+            }
+            use crate::services::phone_media::Input;
+            let offered = match &input {
+                Input::Audio { start, pcm, .. } => Some((*start, *pcm)),
+                Input::Discontinuity | Input::Gap { .. } => {
+                    self.decoded_meter.discontinuity();
+                    None
+                }
+                _ => None,
+            };
+            let accepted = if outgoing {
+                match (radio.as_mut(), input) {
+                    (_, Input::Digit(_)) => Ok(1),
+                    (Some(radio), input) => radio.input(input, now, receipt),
+                    (None, Input::Audio { pcm, .. }) => Ok(pcm.len()),
+                    (None, Input::Gap { count, .. }) => Ok(count as usize),
+                    (None, _) => Ok(1),
+                }
+            } else {
+                self.receive
+                    .input(input, radio.as_mut(), now, receipt, now_ms)
+            };
+            let meter_credit = radio.as_mut().and_then(Radio::take_meter_credit);
+            match accepted {
+                Ok(credit) => {
+                    if let Some(((start, pcm), (metered_start, graph, source))) =
+                        offered.zip(meter_credit)
+                        && start == metered_start
+                        && let Some(consumed) = pcm.get(..credit)
+                    {
+                        self.decoded_meter
+                            .accept(graph, source, Some(start), now_ms, consumed);
+                    }
+                    credit
+                }
+                Err(error) => {
+                    failure = Some(error);
+                    0
+                }
+            }
+        })?;
+        if let Some(error) = failure {
+            return Err(error);
+        }
+        if closed || self.reply.ended() {
+            return Err(Error::Hangup);
+        }
+        let revision = self.receive.revision();
+        if self
+            .playing_revision
+            .is_some_and(|started| Some(started) != revision)
+        {
+            self.outbound.cancel_private_prompt(&mut self.io)?;
+            self.current = None;
+            self.playing_revision = None;
+            self.prompt_losses = None;
+        }
+        if self.current.is_none() {
+            self.current = self.incoming.pop().ok();
+        }
+        if self
+            .current
+            .as_ref()
+            .is_some_and(|item| item.obsolete_before_output(revision))
+        {
+            self.current = None;
+            self.prompt_losses = None;
+        }
+        let now = self.io.private_now()?;
+        if now >= self.next_ns
+            && self.outbound.ready_for_private_input()
+            && let Some(item) = &mut self.current
+            && item.outcome() == PlaybackOutcome::Active
+        {
+            self.outbound.private_stream(None)?;
+            if item.tracks_login_prompt() {
+                self.prompt_losses
+                    .get_or_insert_with(|| self.outbound.private_losses());
+            }
+            let count = item.render(false, &mut self.samples);
+            let active = item.outcome() == PlaybackOutcome::Active;
+            if count != 0 {
+                self.playing_revision = revision;
+            }
+            if count != 0 || active {
+                self.queue_generated(now, count)?;
+            }
+        }
+        if self.current.is_none() && self.outbound.ready_for_private_input() {
+            let mut station_queued = false;
+            if let Some(radio) = &mut self.radio {
+                if let Some(mut item) = radio.outgoing.read_span(&mut self.samples) {
+                    let host_now =
+                        u64::try_from(self.epoch.elapsed().as_nanos()).unwrap_or(u64::MAX);
+                    item.span.born_ns = station_birth(item.span.born_ns, host_now, now);
+                    if let Some(clock) = radio
+                        .clock
+                        .as_ref()
+                        .filter(|clock| clock.stream() == item.span.stream)
+                    {
+                        if self.reply.phone_media_allowed() && item.span.born_ns.is_some() {
+                            self.outbound.private_stream(Some(clock))?;
+                            if self.output.write(item.span, &self.samples[..item.frames]) != 0 {
+                                #[cfg(test)]
+                                if crate::fixture::WATCH_PHONE_PCM.load(Ordering::Relaxed) {
+                                    eprintln!(
+                                        "private PHONE write rejected: attached programme queue"
+                                    );
+                                }
+                                return Err(Error::Write);
+                            }
+                            station_queued = true;
+                        }
+                    }
+                }
+            }
+            if outgoing && !station_queued && now >= self.next_ns && self.outbound.private_idle() {
+                self.outbound.private_stream(None)?;
+                self.samples.fill(0.0);
+                self.queue_generated(now, GENERATED_FRAMES)?;
+            }
+        }
+        let send = self.outbound.step(&mut self.io, now_ms)?;
+        // Keep every prompt's ownership through its last native packet interval.
+        if send.is_none()
+            && let Some(item) = self
+                .current
+                .take_if(|item| item.outcome() != PlaybackOutcome::Active)
+        {
+            self.playing_revision = None;
+            if self.prompt_losses.take() == Some(self.outbound.private_losses())
+                && item.outcome() == PlaybackOutcome::Succeeded
+            {
+                let played = self.epoch.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+                item.played_login_prompt(played, revision);
+            }
+        }
+        let ready = self.outbound.ready_for_private_input();
+        let render = (ready
+            && (self
+                .current
+                .as_ref()
+                .is_some_and(|item| item.outcome() == PlaybackOutcome::Active)
+                || (self.current.is_none() && !self.incoming.is_empty())
+                || (outgoing && self.outbound.private_idle())))
+        .then_some(self.next_ns);
+        let now = self.io.private_now()?;
+        // Revisit queued station PCM one span at a time after a prompt or an
+        // expired send. Every span keeps the existing birth and permit checks.
+        let station = (ready
+            && self.current.is_none()
+            && self
+                .radio
+                .as_mut()
+                .is_some_and(|radio| radio.outgoing.peek_span().is_some()))
+        .then_some(now);
+        // A notification may have led to this conflicted turn. Retry on the
+        // existing media cadence even if the call otherwise has no pending work.
+        let redirect = retry_redirect.then_some(now.saturating_add(GENERATED_NS));
+        self.io.set_deadline(
+            send.into_iter()
+                .chain(render)
+                .chain(station)
+                .chain(redirect)
+                .chain(self.radio.as_ref().and_then(|radio| radio.deadline(now)))
+                .min()
+                .map_or(u64::MAX, |at| at.saturating_sub(now)),
+        )
+    }
+}
+pub(super) unsafe extern "C" fn step(context: *mut c_void) -> i32 {
+    let Some(owner) = (unsafe { context.cast::<Session>().as_mut() }) else {
+        return -1;
+    };
+    let result = catch_unwind(AssertUnwindSafe(|| owner.step()));
+    if matches!(result, Ok(Ok(()))) {
+        return 0;
+    }
+    #[cfg(test)]
+    if crate::fixture::WATCH_PHONE_PCM.load(Ordering::Relaxed) {
+        match result {
+            Ok(Err(error)) => eprintln!("private PHONE callback terminal category {error:?}"),
+            Err(_) => eprintln!("private PHONE callback terminal category panic"),
+            Ok(Ok(())) => unreachable!(),
+        }
+    }
+    owner.reply.retire();
+    owner.stop.store(true, Ordering::Release);
+    -1
+}
+
+#[cfg(test)]
+mod cadence_tests {
+    use super::*;
+    use crate::link::source_clock::SourceClock;
+
+    #[test]
+    fn contended_redirect_keeps_media_live_until_the_next_turn_installs() {
+        use crate::{
+            link::ring::{InboundPolicy, InboundRing},
+            services::phone_media::Input,
+        };
+        use rpt_advanced_core::{
+            config::resources::profiles::{PhoneLatencyTiming, PhoneVadSettings, VadMode},
+            link::{PeerSignals, PhoneAccountId, PhoneCallId, PhoneSource},
+        };
+
+        let source = PhoneSource::new(
+            PhoneAccountId::new("native-account").unwrap(),
+            3,
+            PhoneCallId::new([7; 16]).unwrap(),
+            5,
+            9,
+        )
+        .unwrap();
+        let activity = Arc::new(PeerSignals::for_phone(source));
+        assert!(activity.authenticate_phone());
+        let route = || {
+            let (writer, reader) =
+                InboundRing::redirected(8000, InboundPolicy::Phone, &activity.reply_target())
+                    .unwrap();
+            let (_, egress) = LinkAudioQueue::new(960, 2).unwrap().into_endpoints();
+            let route = Radio::new(
+                writer,
+                egress,
+                Arc::clone(&activity),
+                PhoneVadSettings {
+                    enabled: false,
+                    mode: VadMode::Continuous,
+                    hang_ms: 100,
+                },
+                PhoneLatencyTiming {
+                    target_latency_ms: 250,
+                    maximum_latency_ms: 500,
+                },
+                Arc::new(AtomicBool::new(true)),
+            )
+            .unwrap();
+            (route, reader)
+        };
+        let (mut current, _current_reader) = route();
+        let (replacement, _replacement_reader) = route();
+        let replacement_observer = replacement.incoming.observer();
+        let installed = Arc::clone(&replacement.installed);
+        current.activate();
+        let slot = Mutex::new(RedirectSlot {
+            pending: Some(replacement),
+            installed: Some((current.incoming.observer(), Arc::clone(&current.installed))),
+        });
+
+        let held = slot.lock().unwrap();
+        let (next, retry) = RedirectSlot::take_next(&slot).unwrap();
+        assert!(next.is_none() && retry);
+        assert!(!installed.load(Ordering::Acquire));
+        let now = 1_000_000_000;
+        let receipt = current.begin(now);
+        assert_eq!(
+            current.input(
+                Input::Audio {
+                    start: 0,
+                    pcm: &[0.25; 160],
+                    born_ns: Some(now),
+                    concealed: false,
+                },
+                now,
+                receipt,
+            ),
+            Ok(160)
+        );
+        drop(held);
+
+        let (next, retry) = RedirectSlot::take_next(&slot).unwrap();
+        assert!(!retry);
+        let replacement = next.unwrap();
+        assert!(!installed.load(Ordering::Acquire));
+        assert!(slot.lock().unwrap().observation().is_none());
+        replacement.activate();
+        assert!(installed.load(Ordering::Acquire));
+        assert!(
+            slot.lock()
+                .unwrap()
+                .observation()
+                .unwrap()
+                .same_generation(&replacement_observer)
+        );
+    }
+
+    #[test]
+    fn retains_the_birth_of_station_audio_read_ahead_of_its_clock() {
+        let clock = SourceClock::new(Instant::now());
+        clock.restart();
+        // Install a real mapping for a previous 10 ms output callback.
+        assert!(clock.advance(480).born_ns.is_none());
+        clock.observe();
+
+        let (mut producer, mut consumer) = LinkAudioQueue::new(1920, 2).unwrap().into_endpoints();
+        let mut buffer = [0.0; GENERATED_FRAMES];
+        let stamp = clock.advance(480);
+        let first_birth = stamp.born_ns.unwrap();
+        let span = AudioSpan {
+            stream: stamp.stream,
+            source_start: stamp.sample,
+            born_ns: stamp.born_ns,
+            ..AudioSpan::default()
+        };
+        assert_eq!(producer.write(span, &[0.25; 480]), 0);
+        let first = consumer.read_span(&mut buffer).unwrap();
+        let first_call_birth =
+            station_birth(first.span.born_ns, first_birth - 1_000_000, 10_000_000_000);
+
+        // A variable-size 40 ms callback is consumed in two 20 ms pieces.
+        let stamp = clock.advance(1920);
+        let second_birth = stamp.born_ns.unwrap();
+        let span = AudioSpan {
+            stream: stamp.stream,
+            source_start: stamp.sample,
+            born_ns: stamp.born_ns,
+            ..AudioSpan::default()
+        };
+        assert_eq!(producer.write(span, &[0.5; 1920]), 0);
+        let prefix = consumer.read_span(&mut buffer).unwrap();
+        let suffix = consumer.read_span(&mut buffer).unwrap();
+        assert_eq!(
+            prefix.span.source_start,
+            first.span.source_start + first.frames as u64
+        );
+        assert_eq!(
+            suffix.span.source_start,
+            prefix.span.source_start + prefix.frames as u64
+        );
+        let host_now = second_birth + 1_000_000;
+        let call_now = 10_011_000_000;
+        let prefix_call_birth = station_birth(prefix.span.born_ns, host_now, call_now);
+        let suffix_call_birth = station_birth(suffix.span.born_ns, host_now, call_now);
+        assert_eq!(
+            (first_call_birth, prefix_call_birth, suffix_call_birth),
+            (
+                Some(10_001_000_000),
+                Some(10_010_000_000),
+                Some(10_030_000_000)
+            ),
+            "the call owner needs original births for both elapsed and upcoming station audio"
+        );
+        assert_eq!(station_birth(None, host_now, call_now), None);
+        assert_eq!(station_birth(Some(1), 3, 1), None);
+        assert_eq!(station_birth(Some(3), 1, u64::MAX), None);
+    }
+}

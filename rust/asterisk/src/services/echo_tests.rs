@@ -4,11 +4,10 @@ use rptadv_peer_support::echolink::{abi as echo, host::Provider};
 #[path = "../../../peer-support/tests/support/mod.rs"]
 pub(crate) mod support;
 use crate::bindings as host_abi;
+#[path = "../../../peer-support/tests/support/host_accounts.rs"]
+pub(crate) mod accounts;
 #[path = "../../../peer-support/tests/support/host_media.rs"]
 mod media;
-
-#[path = "../../../peer-support/tests/support/host_accounts.rs"]
-mod accounts;
 
 #[path = "../../../peer-support/tests/support/peer_metadata.rs"]
 mod peer_metadata;
@@ -72,11 +71,6 @@ fn peer_metadata_writes_only_the_supported_caller_prefix_for_both_protocols() {
 }
 
 #[test]
-fn echo_accounts_prepare_before_activation_and_dial_from_the_stable_context() {
-    accounts::check(HostServicesOwner::new());
-}
-
-#[test]
 fn echo_media_and_registration_dispatch_preserves_the_provider_contract() {
     unsafe { media::check(ptr::null_mut()) };
 }
@@ -99,6 +93,7 @@ fn echo_binding_rejects_a_quiesced_radio_reservation() {
     assert_eq!(crate::fixture::host(|state| state.channels), 1);
     unsafe { radio_destroy(ptr::null_mut(), live) };
     let mut reservation = ReservedRadio {
+        binding: None,
         metadata: None,
         radio: None,
         name: CString::new("quiesced fixture").unwrap(),

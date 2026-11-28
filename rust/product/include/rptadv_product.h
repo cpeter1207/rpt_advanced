@@ -22,13 +22,13 @@ struct UrpAstSiteRequest;
 struct UrpAstSiteSnapshot;
 
 /** Exact incompatible product ABI revision. */
-#define RPTADV_PRODUCT_ABI_VERSION 7U
+#define RPTADV_PRODUCT_ABI_VERSION 8U
 /** Product capability name stored in its fixed-width descriptor field. */
-#define RPTADV_PRODUCT_CAPABILITY "rptadv.prod7"
+#define RPTADV_PRODUCT_CAPABILITY "rptadv.prod8"
 /** Exact incompatible host-services ABI revision. */
-#define RPTADV_HOST_ABI_VERSION 10U
+#define RPTADV_HOST_ABI_VERSION 11U
 /** Host-services capability name stored in its fixed-width descriptor field. */
-#define RPTADV_HOST_CAPABILITY "rptadv.hst10"
+#define RPTADV_HOST_CAPABILITY "rptadv.hst11"
 /** Peer event carrying borrowed text bytes. */
 #define RPTADV_PEER_EVENT_TEXT 1U
 /** Peer event carrying one DTMF digit byte. */
@@ -64,6 +64,10 @@ struct UrpAstSiteSnapshot;
 /** Call-addressed control/reply lifetime, independent of RF attachment.
  * This does not advertise remote call-origin or legacy-D isolation support. */
 #define RPTADV_PEER_PRIVATE_CALL 32U
+/** Private source has no negotiated digit events. Analyze original PCM for caller digits. */
+#define RPTADV_PEER_PHONE_INBAND_DIGITS 64U
+/** Private source receives negotiated digit events but cannot send them on this media clock. */
+#define RPTADV_PEER_PHONE_RECEIVE_ONLY_DIGITS 512U
 
 /** Borrowed immutable bytes. Null is valid only with zero length. */
 struct rptadv_peer_bytes_v1 {
@@ -115,6 +119,32 @@ typedef uint32_t (*rptadv_peer_source_gap_v1)(void *context, uint64_t source_sta
 /** Borrowed human text, separate from protocol control and claimed sender authority. */
 typedef void (*rptadv_peer_source_text_v1)(void *context, struct rptadv_peer_bytes_v1 sender,
                                            struct rptadv_peer_bytes_v1 body);
+/** Original packet receipt in the supplied host clock. Retain unchanged through
+ * rejected offers, partial credit, conversion and retries; never stamp at playout. */
+struct rptadv_source_birth_v1 {
+    uint32_t struct_size;      /**< At least this complete revision. */
+    uint32_t abi_version;      /**< Exactly 1. */
+    uint64_t host_clock_epoch; /**< Exact nonzero sink clock identity. */
+    uint64_t born_ns;          /**< No later than sink reference_now_ns. */
+};
+/** Timed source PCM. A null birth is explicitly unqualified. */
+typedef size_t (*rptadv_peer_source_audio_timed_v1)(void *context, uint64_t source_start,
+                                                    const float *pcm, size_t count,
+                                                    uint32_t concealed,
+                                                    const struct rptadv_source_birth_v1 *birth);
+/** Request actual media retirement. Zero completes, one means retry pending,
+ * negative is terminal. Retain the reset and offer no new PCM until complete. */
+typedef int32_t (*rptadv_peer_source_discontinuity_v1)(void *context);
+/** A proved native adaptive source cut, never permission to transmit.
+ * Nonzero count and nonoverflowing [source_start, source_start + count).
+ * Zero completes retirement, one retries the identical cause/range, negative
+ * is terminal. No later PCM or gap credit before completion. */
+typedef int32_t (*rptadv_peer_source_adaptation_v1)(void *context, uint64_t source_start,
+                                                    uint32_t count);
+/** One private telephone digit. Exactly one of 0123456789ABCD*# is valid.
+ * Zero accepts it once, one retains it for retry before later source events,
+ * and negative is terminal. Provider retries preserve the same symbol. */
+typedef int32_t (*rptadv_peer_source_digit_v1)(void *context, uint32_t symbol);
 /** Synchronous source sink; callbacks cannot reenter the same peer. */
 struct rptadv_peer_source_sink_v1 {
     uint32_t struct_size;              /**< Complete readable size. */
@@ -122,7 +152,28 @@ struct rptadv_peer_source_sink_v1 {
     void *context;                     /**< Borrowed during one source-read call. */
     rptadv_peer_source_audio_v1 audio; /**< Accept a leading PCM prefix. */
     rptadv_peer_source_gap_v1 gap;     /**< Accept a leading missing-sample prefix. */
+    /** Optional tail; require struct_size through the field being accessed. */
+    uint64_t host_clock_epoch; /**< Stable controller I/O lifecycle, zero unqualified. */
+    uint64_t reference_now_ns; /**< Captured before entering the provider. */
+    rptadv_peer_source_audio_timed_v1 audio_timed;            /**< Retains original age. */
+    rptadv_peer_source_discontinuity_v1 source_discontinuity; /**< Actual reset receipt. */
+    /** Optional private-phone-only tail. Check struct_size through this field
+     * and a nonnull callback before use. Source-capable phones use this one
+     * ordered stream, never a second legacy peer_read for digits. */
+    rptadv_peer_source_digit_v1 digit;
+    /** Optional exact native adaptation cause; absent/short uses generic reset. */
+    rptadv_peer_source_adaptation_v1 source_adaptation;
 };
+/** Complete original sink prefix, supported by legacy unqualified providers. */
+#define RPTADV_PEER_SOURCE_SINK_PREFIX_SIZE                                                        \
+    offsetof(struct rptadv_peer_source_sink_v1, host_clock_epoch)
+/** Complete old private-digit tail; unchanged by optional later extensions. */
+#define RPTADV_PEER_SOURCE_SINK_DIGIT_SIZE                                                         \
+    (offsetof(struct rptadv_peer_source_sink_v1, digit) + sizeof(rptadv_peer_source_digit_v1))
+/** Minimum readable size for the optional native adaptation callback. */
+#define RPTADV_PEER_SOURCE_SINK_ADAPTATION_SIZE                                                    \
+    (offsetof(struct rptadv_peer_source_sink_v1, source_adaptation) +                              \
+     sizeof(rptadv_peer_source_adaptation_v1))
 /** Copied bounded source turn, not raw packet or heartbeat receive state. */
 struct rptadv_peer_source_result_v1 {
     uint32_t struct_size;    /**< Complete caller-provided size. */
@@ -243,48 +294,9 @@ typedef int32_t (*rptadv_peer_step_v1)(void *step_context);
 typedef void (*rptadv_text_sink_v1)(void *context, const char *text, size_t length);
 struct UrpNativeStationConfig;
 struct rptadv_echolink_account_config_v1;
-/** Resolved host requirements, borrowed only during the configuration visitor. */
-struct rptadv_node_host_configuration {
-    uint32_t struct_size;           /**< Complete readable record size. */
-    const char *node;               /**< Node identity; not NUL terminated. */
-    size_t node_length;             /**< Node identity byte count. */
-    const char *channel;            /**< Radio channel; not NUL terminated. */
-    size_t channel_length;          /**< Channel byte count. */
-    uint32_t enabled;               /**< Zero for disabled nodes, which are still reported. */
-    uint16_t iax_port;              /**< Effective UDP listener and registration port. */
-    const char *registration_url;   /**< HTTPS endpoint; empty disables registration. */
-    size_t registration_url_length; /**< Endpoint byte count. */
-    uint64_t registration_interval_seconds;     /**< Effective registration interval. */
-    const struct UrpNativeStationConfig *radio; /**< Borrowed native station request. */
-    /** Resolved public EchoLink settings, including disabled accounts. No passwords.
-     * The provider ABI record and its nested spans/lists live only during this visit. */
-    const struct rptadv_echolink_account_config_v1 *echolink;
-    const uint8_t
-        *echolink_secrets_file; /**< Configured host-relative path, or empty for default. */
-    size_t echolink_secrets_file_length; /**< Path byte count; not NUL terminated. */
-};
-/** Copy one node's requirements; return nonzero to abort inspection. */
-typedef int (*rptadv_configuration_sink)(void *context,
-                                         const struct rptadv_node_host_configuration *node);
-/** Copy one validated secret; node is "general" for the shared default.
- * No secret or input text is included in diagnostics. Return nonzero to abort. */
-typedef int (*rptadv_secret_sink)(void *context, const char *node, size_t node_length,
-                                  const char *secret, size_t secret_length);
 /** Borrow one selected DNS SRV target and port for the synchronous backend call. */
 typedef void (*rptadv_directory_srv_sink_v1)(void *context, const char *host, size_t length,
                                              uint16_t port);
-
-/** One uniquely owned native-rate PCM processor, prepared off the audio callback.
- * Processing is serial, bounded, allocation/lock/I/O-free, and fills exactly count
- * samples in place. Zero succeeds; negative rejects that block. Destroy is called
- * only after the audio generation is quiescent, never from its callback. */
-struct rptadv_pcm_processor_v1 {
-    uint32_t struct_size; /**< Complete readable record size. */
-    uint32_t abi_version; /**< Exactly 1. */
-    void *context;        /**< Unique non-null processor owner. */
-    int (*process)(void *context, float *samples, size_t count); /**< Native 48 kHz PCM. */
-    void (*destroy)(void *context); /**< Release the prepared processor once. */
-};
 
 /** Authorized physical-radio operation, executed only on serialized control.
  * STATUS=1, COMMAND=2, TRANSMIT=3, CLEAR_MANUAL=4,
@@ -299,6 +311,29 @@ struct rptadv_radio_control_v1 {
     struct UrpAstChannelCommand command; /**< In/out shared maintenance command. */
     uint32_t keyed;                      /**< Temporary manual transmit request, zero or one. */
     uint32_t forced_ctcss_tenths_hz;     /**< Optional manual transmit tone. */
+};
+
+/** Optional stopped-only physical-feedback registration, with explicit acknowledgment. */
+#define RPTADV_RADIO_CONTROL_BIND_FEEDBACK 8U
+/** Optional native control-owner status copy. It never changes radio settings. */
+#define RPTADV_RADIO_CONTROL_PHYSICAL_STATUS 9U
+
+/** Additive radio_control request; the common prefix advertises this whole record's size.
+ * The radio retains the binding only through successful synchronous retirement.
+ * Acknowledgment accepts the binding; a missing optional hardware source reports no data. */
+struct rptadv_radio_feedback_binding_v1 {
+    struct rptadv_radio_control_v1 request; /**< Operation BIND_FEEDBACK, ABI one. */
+    struct UrpRadioFeedbackPort port;       /**< Borrowed registration copied by the host. */
+    uint32_t accepted_abi_version;          /**< Initialize zero, require one on acceptance. */
+    uint32_t reserved;                      /**< Zero. */
+};
+
+/** Additive radio_control request; only the native station owns the process status. */
+struct rptadv_radio_physical_status_v1 {
+    struct rptadv_radio_control_v1 request; /**< Operation PHYSICAL_STATUS, ABI one. */
+    struct UrpNativePhysicalStatus status;  /**< Caller-initialized writable SDK record. */
+    uint32_t accepted_abi_version;          /**< Initialize zero, require one on success. */
+    uint32_t reserved;                      /**< Zero. */
 };
 
 /** Borrowed UTF-8 result emitted synchronously by a remote operation ticket. */
@@ -317,9 +352,256 @@ struct rptadv_remote_ticket_v1 {
     int (*take)(void *ticket, rptadv_remote_sink_v1 sink, void *context); /**< Copy completion. */
     void (*destroy)(void *ticket); /**< Cancel before releasing, including while pending. */
 };
+/** Prepared physical station passed synchronously from its owning product DSO. */
+struct rptadv_station_request_v1 {
+    uint32_t struct_size;        /**< Complete readable record size. */
+    uint32_t abi_version;        /**< One. */
+    uint8_t port_uuid[16];       /**< Registry UUID in network byte order. */
+    uint64_t candidate_identity; /**< Nonzero, process-unique semantic staging attempt. */
+    const struct UrpAstDescriptor *product; /**< Actual matched product1 descriptor. */
+    const void *prepared; /**< Borrowed physical-preparation1 owner from this product. */
+};
+/** Immutable control-side physical station service, capability rptadv.station-binding1. */
+struct rptadv_station_binding_v1 {
+    uint32_t struct_size;        /**< Complete readable table size. */
+    uint32_t abi_version;        /**< One. */
+    const char *capability_name; /**< Process-lifetime terminated capability name. */
+    /** Copy or retain the provider configuration without reserving hardware or changing live state.
+     * Zero transfers a unique dormant plan. The operation may run on any serialized control owner.
+     */
+    int (*prepare)(void *context, const struct rptadv_station_request_v1 *request, void **plan);
+    /** Open this exact plan after durable publication. Zero transfers the ordinary unique radio.
+     * The live radio independently retains its provider, prepared data and operation context. */
+    int (*open_prepared)(void *context, const void *plan, size_t maximum_frames, void **radio);
+    /** Stage on the matching port. Zero staged, one untouched handoff, two pending (poll same
+     * plan). Any other result requires actual rollback or confirmed retirement before releasing
+     * ownership. */
+    int (*stage_update)(void *context, void *radio, const void *plan);
+    /** Destroy this plan exactly once after its last borrow. No creator-thread affinity. */
+    void (*release_plan)(void *context, void *plan);
+};
+/** Native monotonic source clock shared by the producer and sole serial consumer. */
+struct rptadv_media_clock_reader_v1 {
+    uint32_t struct_size;      /**< Caller capacity; at least the complete known record. */
+    uint32_t abi_version;      /**< Exact version 1. */
+    uint32_t clock_kind;       /**< Output 1 for CLOCK_MONOTONIC, zero for unavailable. */
+    uint32_t reserved;         /**< Output zero. */
+    uint64_t (*read_ns)(void); /**< Current nanoseconds; zero means unavailable/failure. */
+};
+
+/** Borrowed explicit private-account row. Both UUIDs are in network byte order.
+ * Read/copy only during prepare. No text is NUL-terminated or loggable.
+ * An empty account list requests withdrawal of all private accounts. */
+struct rptadv_phone_account_v1 {
+    uint32_t struct_size;     /**< Exact ABI1 array stride. */
+    uint32_t abi_version;     /**< One. */
+    uint8_t port_uuid[16];    /**< Owning registry port. */
+    uint8_t account_uuid[16]; /**< Explicit phone protocol resource. */
+    uint64_t generation; /**< Nonzero identity of this authorized account and credential version. */
+    uint32_t protocol;   /**< One for SIP, two for IAX2. */
+    uint32_t port;       /**< Remote UDP port, 1 through 65535. */
+    struct rptadv_peer_bytes_v1 server;   /**< Validated provider host. */
+    struct rptadv_peer_bytes_v1 username; /**< Exact transport identity. */
+    struct rptadv_peer_bytes_v1
+        credential;             /**< Private bytes lent by final encrypted record owner. */
+    uint32_t jitter_minimum_ms; /**< Lower bound on native packet playout. */
+    uint32_t jitter_initial_ms; /**< Initial native target. */
+    uint32_t jitter_maximum_ms; /**< Upper bound on native packet playout. */
+    uint32_t reserved;          /**< Zero. */
+};
+
+/** Identity of a managed ordinary IAX authority. UUIDs are in network byte order. */
+struct rptadv_asl_identity_v1 {
+    uint8_t station_uuid[16], /**< Owning station UUID. */
+        account_uuid[16];     /**< Selected ASL account UUID. */
+    uint64_t generation,      /**< Nonzero local selection generation. */
+        wire;                 /**< Numeric ASL wire node. */
+    uint32_t udp_port,        /**< UDP port in host byte order. */
+        reserved;             /**< Zero. */
+};
+
+/** Dormant account input. All spans are borrowed only during prepare. */
+struct rptadv_asl_account_v2 {
+    uint32_t struct_size,             /**< Exact account array stride in bytes. */
+        abi_version;                  /**< ABI version 2. */
+    struct rptadv_asl_identity_v1 id; /**< Selected local ASL authority. */
+    uint32_t jitter_min_ms,           /**< Minimum playout delay in milliseconds. */
+        jitter_initial_ms,            /**< Initial playout delay in milliseconds. */
+        jitter_max_ms;                /**< Maximum playout delay in milliseconds. */
+    uint32_t registration_interval_s; /**< Interval between registration requests in seconds. */
+    struct rptadv_peer_bytes_v1 registration_url; /**< Registrar URL, empty when disabled. */
+    uint8_t record_version[16];                   /**< Private. Zero if registration is disabled. */
+    struct rptadv_peer_bytes_v1 registration_credential; /**< Private, never logged. */
+    uint32_t admission_changed; /**< Zero or one. Includes directory and ACL changes. */
+    uint32_t jitter_authored;   /**< One when any selected delay came from a registered profile. */
+};
+
+/** Product callback table retained until the host has drained every admitted poll. */
+struct rptadv_asl_admission_v1 {
+    uint32_t struct_size, /**< Size of this record in bytes. */
+        abi_version;      /**< ABI version 1. */
+    /** Success transfers one proof scoped to this single server poll. */
+    int (*authorize)(const struct rptadv_asl_identity_v1 *id, struct rptadv_peer_bytes_v1 remote,
+                     struct rptadv_peer_bytes_v1 source, void **proof);
+    /** Always consumes proof. A null peer cancels. A positive return leaves a nonnull
+     * wrapper with its caller. Zero or negative consumes the wrapper. */
+    int (*complete)(void *proof, void *host_peer);
+};
+
+/** Optional ordinary IAX provider. No operation runs on an audio callback. */
+struct rptadv_asl_provider_v2 {
+    uint32_t struct_size, /**< Size of this record in bytes. */
+        abi_version;      /**< ABI version 2. */
+    uint32_t media_kind;  /**< 1: frontend asynchronous playout. 2: PBX channel PCM. */
+    uint32_t reserved;    /**< Zero. */
+    /** Prepare copies rows and credentials without network I/O. Zero basis denotes
+     * an initially empty participant. Success transfers a unique dormant transaction. */
+    int (*prepare)(void *host, uint64_t basis, uint64_t attempt,
+                   const struct rptadv_asl_account_v2 *rows, size_t count,
+                   const struct rptadv_asl_admission_v1 *product, void **transaction);
+    /** Apply=1, publish=2, reverse=3, finish=4. Zero acknowledges, one is pending.
+     * Only an acknowledged finish consumes the transaction. */
+    int (*step)(void *host, void *transaction, uint32_t phase);
+    /** Return the published registrar state for the exact live authority. */
+    int (*observe)(void *host, const struct rptadv_asl_identity_v1 *id, uint32_t *registrar_state);
+    /** Dial a verified numeric IP:port. The synchronous currency callback and input
+     * spans expire on return. Success transfers a unique playout-prepared peer. */
+    int (*originate)(void *host, const struct rptadv_asl_identity_v1 *id,
+                     struct rptadv_peer_bytes_v1 remote,
+                     struct rptadv_peer_bytes_v1 numeric_endpoint, size_t maximum_frames,
+                     rptadv_current_v1 current, void *current_context, void **host_peer);
+};
+
+/** Observed participant state for exactly one selected generation. */
+struct rptadv_phone_account_status_v1 {
+    uint32_t struct_size; /**< Size of caller-provided output. */
+    uint32_t abi_version; /**< One. */
+    uint64_t generation;  /**< Confirmed account generation, or zero when inactive. */
+    uint32_t state;       /**< 0 inactive, 1 starting, 2 registered, 3 retiring, 4 failed. */
+    uint32_t reserved;    /**< Zero. */
+};
+
+/** Optional bounded mono progress read. The caller initializes struct_size, abi_version,
+ * reserved (zero), pcm and capacity. A positive capacity requires a separate writable
+ * buffer for that many floats. The output fields ringing, final_status, frames and
+ * sample_rate may be uninitialized. A null record requests signaling completion only.
+ * Original frames exclude concealment. Ringing is enabled by an actual SIP 180
+ * until original early media or a final response. A nonzero final_status is a
+ * final INVITE response code; the ordinary peer still requires confirmed readiness. */
+struct rptadv_phone_progress_v1 {
+    uint32_t struct_size, /**< Size of this record in bytes. */
+        abi_version;      /**< ABI version 1. */
+    uint32_t ringing,     /**< One while SIP ringing is active. */
+        final_status;     /**< Final INVITE response code, or zero before a final response. */
+    float *pcm;           /**< Caller-owned output buffer for original mono early media. */
+    size_t capacity,      /**< Writable capacity of pcm in floats. */
+        frames;           /**< Number of mono frames written by this poll. */
+    uint32_t sample_rate, /**< Sample rate of returned PCM in hertz. */
+        reserved;         /**< Zero. */
+};
+
+/** Private provider group, borrowed until both frontend and product have drained.
+ * Every operation runs outside audio. A partial group cannot activate a phone
+ * account. An unavailable group is valid for configurations without a phone.
+ * No transition or dial callback borrows selectors or credential bytes past its call. */
+struct rptadv_phone_provider_v2 {
+    uint32_t struct_size; /**< Readable size, through the last required slot. */
+    uint32_t abi_version; /**< Two. */
+    /** Validate and copy the bounded final registry selection. No socket, registration,
+     * listener change or active selection. Zero transfers a unique transaction,
+     * negative clears output and leaves the old selection untouched. */
+    int (*prepare)(void *context, const struct rptadv_phone_account_v1 *accounts, size_t count,
+                   void **transaction);
+    /** Apply the retained candidate. Repeated calls poll the same attempt.
+     * Zero confirms native adoption, one is pending, negative requires restore. */
+    int (*apply)(void *context, void *transaction);
+    /** Restore and observe the exact prior participant. A prepared-only token
+     * cancels without native I/O. Zero confirms, one is pending, negative is
+     * indeterminate and retains every possibly live owner. */
+    int (*restore)(void *context, void *transaction);
+    /** Release only after an unused preparation or confirmed selected/reversed
+     * outcome. Zero consumes exactly once. Any other result retains the token. */
+    int (*release)(void *context, void *transaction);
+    /** Read native state for the exact account after commit. Never dial or register. */
+    int (*observe)(void *context, const uint8_t port_uuid[16], const uint8_t account_uuid[16],
+                   uint64_t generation, struct rptadv_phone_account_status_v1 *status);
+    /** Begin a dial under this exact registered generation. Copies all borrowed selectors.
+     * Zero transfers one uniquely owned pending handle. No result waits on a worker. */
+    int (*begin)(void *context, const uint8_t port_uuid[16], const uint8_t account_uuid[16],
+                 uint64_t generation, struct rptadv_peer_bytes_v1 destination,
+                 size_t maximum_frames, void **pending);
+    /** Nonblocking poll on the same owner. One is pending, zero transfers a unique
+     * answered peer, and a negative result ends the attempt. The caller disposes
+     * the pending handle once after every terminal result or cancellation.
+     * The optional progress destination is borrowed for this invocation only. */
+    int (*poll)(void *context, void *pending, struct rptadv_phone_progress_v1 *progress,
+                void **peer);
+    /** Consume one pending handle. Unanswered native dialogs retain their own retirement. */
+    void (*cancel)(void *context, void *pending);
+    /** Send the complete previously prepared encoded unit on its actual provider
+     * clock. Zero accepts, one is WouldBlock, two is Expired without acceptance,
+     * negative is terminal. No partial byte credit. Retries retain the original
+     * timestamp, duration and nonwrapping deadline. */
+    int (*send_prepared_timed)(void *context, void *peer, const uint8_t *bytes, size_t count,
+                               uint32_t frames, uint32_t timestamp_ms, uint32_t deadline_ms);
+    /** Access the actual source receipt clock. A missing/failed clock gives no
+     * timing qualification. Never manufacture birth time when servicing a retry. */
+    int (*media_clock_reader)(void *context, struct rptadv_media_clock_reader_v1 *out);
+};
+
+/** Dormant direct EchoLink account input. All pointers are borrowed during row preparation. */
+struct rptadv_managed_echo_row_v1 {
+    uint32_t struct_size,       /**< Size of this record in bytes. */
+        abi_version;            /**< ABI version 1. */
+    uint8_t station_uuid[16],   /**< Owning station UUID. */
+        account_uuid[16],       /**< Selected EchoLink account UUID. */
+        credential_version[16]; /**< Version UUID of the directory credential. */
+    uint64_t local_label;       /**< Private decimal correlation, independent of wire identity. */
+    uint32_t minimum_ms,        /**< Minimum playout delay in milliseconds. */
+        initial_ms,             /**< Initial playout delay in milliseconds. */
+        maximum_ms;             /**< Maximum playout delay in milliseconds. */
+    uint32_t role; /**< 1 add, 2 live exchange, 3 displaced incumbent backup, 4 replacement. */
+    const struct rptadv_echolink_account_config_v1
+        *settings; /**< Borrowed account configuration. */
+    struct rptadv_peer_bytes_v1
+        directory_password; /**< Borrowed private directory credential bytes. */
+};
+
+/** Public, copied fields for a selected direct account; no borrowed strings. */
+struct rptadv_managed_echo_status_v1 {
+    uint32_t struct_size, /**< Size of this record in bytes. */
+        abi_version;      /**< ABI version 1. */
+    uint64_t generation;  /**< Nonzero generation reported by the selected account. */
+    uint32_t state,       /**< 1 registering, 2 online, 3 retrying. */
+        registered,       /**< One when the account is registered. */
+        fresh,            /**< One when the directory data is fresh. */
+        available;        /**< One when directory data is available. */
+};
+
+/** Optional standalone direct-Echo participant. No operation retains borrowed row bytes.
+ * begin reserves one basis/attempt, row only prepares dormant native owners. step polls
+ * apply (1), publication (2), reversal (3), or release (4) on that same reservation.
+ * shutdown closes admission and drains retained native and callback owners. */
+struct rptadv_managed_echo_provider_v2 {
+    uint32_t struct_size, /**< Size of this record in bytes. */
+        abi_version;      /**< ABI version 2. */
+    /** Reserve an attempt against the supplied basis. */
+    int (*begin)(void *context, uint64_t basis, uint64_t attempt);
+    /** Prepare one dormant account for the reserved attempt. */
+    int (*row)(void *context, uint64_t attempt, const struct rptadv_managed_echo_row_v1 *);
+    /** Poll application, publication, reversal or release of this attempt. */
+    int (*step)(void *context, uint64_t attempt, uint32_t phase);
+    /** Close admission and drain native owners and callbacks. */
+    int (*shutdown)(void *context);
+    /** Off-control read for the exact published port, account and selection label.
+     * Caller initializes status extent and version; no output is valid on failure. */
+    int (*observe)(void *context, const uint8_t port[16], const uint8_t account[16], uint64_t label,
+                   struct rptadv_managed_echo_status_v1 *status);
+};
+
 /** Host I/O primitives consumed by the portable product owner.
  * On supported 64-bit platforms, ABI 10 retains its complete 360-byte prefix
- * through radio_update and appends five optional callbacks for a 400-byte table.
+ * through radio_update and its complete 400-byte prefix through radio_ready.
  * Omitted complete capability tails are copied as null; partial tails are rejected.
  * The immutable table, context and callback code remain valid through successful
  * product stop. The context supports concurrent calls. Each non-null radio/peer
@@ -341,7 +623,7 @@ struct rptadv_remote_ticket_v1 {
  * emit numeric IPs in resolver order. A standalone empty DNS answer is recoverable;
  * Asterisk's empty answer succeeds with no results, preserving its existing diagnosis.
  */
-struct rptadv_host_services_v10 {
+struct rptadv_host_services_v11 {
     uint32_t struct_size;   /**< Complete readable table size. */
     uint32_t abi_version;   /**< Exact RPTADV_HOST_ABI_VERSION. */
     uint8_t capability[16]; /**< Exact NUL-padded RPTADV_HOST_CAPABILITY. */
@@ -370,11 +652,6 @@ struct rptadv_host_services_v10 {
      */
     void (*directory_notice)(void *context, uint32_t reason);
 
-    /** Reserve one uniquely owned radio without starting it. The length-delimited name contains
-     * local-node, NUL, then adapter-selected channel; older single-name test providers may use
-     * the same value for both fields. */
-    int (*radio_open)(void *context, const char *name, size_t name_length, size_t maximum_frames,
-                      void **radio);
     /** Attach both endpoints before starting. Failure may retain a partial owner;
      * radio_quiesce must succeed before callback storage is released. A host without
      * that optional tail must detach/quiesce both endpoints before returning failure.
@@ -498,16 +775,6 @@ struct rptadv_host_services_v10 {
      * zero with no text means no account, negative means unavailable, never offline. */
     int (*echo_account_status)(void *context, const char *local, size_t local_length,
                                rptadv_text_sink_v1 sink, void *sink_context);
-    /** Optional tail: prepare a uniquely owned link processor for one audio generation.
-     * Configuration and local-node UTF-8 spans are borrowed only during this control
-     * call. Zero transfers one complete ABI-1 processor; one bypasses processing;
-     * negative rejects preparation and transfers nothing. Absent means the selected
-     * host already supplies processed peer PCM. A partially present function-pointer
-     * field is invalid. */
-    int (*peer_processing_prepare)(void *context, const char *configuration,
-                                   size_t configuration_length, const char *local,
-                                   size_t local_length, size_t maximum_frames,
-                                   struct rptadv_pcm_processor_v1 *processor);
     /** Optional physical maintenance on this existing radio owner. No callback
      * or hardware handle escapes; old hosts may omit this sized tail. */
     int (*radio_control)(void *context, void *radio, struct rptadv_radio_control_v1 *request,
@@ -537,6 +804,15 @@ struct rptadv_host_services_v10 {
     /** Observe activation without I/O: zero is ready, one is opening, negative
      * is the first failure. Remote compositions require this complete tail. */
     int (*radio_ready)(void *context, void *radio);
+    /** Optional typed physical station operations. A host advertising this must also implement
+     * radio_update phases one/two for commit/rollback; two means the same finish is pending. */
+    const struct rptadv_station_binding_v1 *station_binding;
+    /** Optional complete private phone participant and source-timed media group. */
+    const struct rptadv_phone_provider_v2 *phone_provider;
+    /** Optional retained ordinary-IAX operations. An account-free host may omit this tail. */
+    const struct rptadv_asl_provider_v2 *asl_provider;
+    /** Optional direct EchoLink account participant and status observer. */
+    const struct rptadv_managed_echo_provider_v2 *managed_echo_provider;
 };
 
 /** Exact revision of a typed site control request. */
@@ -589,16 +865,9 @@ struct rptadv_product_descriptor_v1 {
     uint32_t struct_size;   /**< Complete readable table size. */
     uint32_t abi_version;   /**< Exact RPTADV_PRODUCT_ABI_VERSION. */
     uint8_t capability[16]; /**< Exact NUL-padded RPTADV_PRODUCT_CAPABILITY. */
-    /** Start one product owner from copied configuration. */
-    int (*start)(const struct rptadv_host_services_v10 *host,
-                 const struct rptadv_control_descriptor_v1 *control,
-                 const struct rptadv_file_descriptor *file,
-                 const struct rptadv_speech_descriptor *speech, const char *configuration,
-                 size_t configuration_length);
-    int (*reload)(const char *configuration,
-                  size_t configuration_length); /**< Replace configuration: zero
-                    complete, one accepted/pending (call reload_poll), negative failed. */
-    int (*stop)(void);                          /**< Stop and quiesce every product owner. */
+    /** Reload the checked JSON working store: zero complete, one pending, negative failed. */
+    int (*reload_working)(void);
+    int (*stop)(void); /**< Stop and quiesce every product owner. */
     /** Check current incoming policy before answering a channel. */
     int (*authorize_incoming)(const struct rptadv_incoming_peer_v1 *request, void *peer);
     /** Admit one transferred peer. */
@@ -611,17 +880,6 @@ struct rptadv_product_descriptor_v1 {
                        void *sink_context);
     /** Feed one validated DTMF digit. */
     int (*digit)(const char *local, size_t local_length, uint8_t digit, uint32_t *completed);
-    /** Resolve host requirements without starting workers or opening hardware.
-     * Validate the whole document before emitting records. Diagnostics are warnings
-     * on success and a safe error on failure. Null node sink validates only. */
-    int (*inspect_configuration)(const char *configuration, size_t configuration_length,
-                                 rptadv_configuration_sink node, void *node_context,
-                                 rptadv_text_sink_v1 diagnostic, void *diagnostic_context);
-    /** Parse secrets without file I/O; the host still enforces ownership/mode 0600.
-     * Validate the whole document before emitting records. No callback may unwind. */
-    int (*inspect_secrets)(const char *configuration, size_t configuration_length,
-                           rptadv_secret_sink secret, void *secret_context,
-                           rptadv_text_sink_v1 diagnostic, void *diagnostic_context);
     /** Apply site policy on the current serialized control generation.
      * Returns 0 when policy accepts the request (not proof of physical service),
      * -1 when unavailable/reloading/stopping, -2 for unknown node/target,
@@ -630,22 +888,109 @@ struct rptadv_product_descriptor_v1 {
      * neither changes link-command semantics nor emits a spoken CLI reply. */
     int (*site_command)(const char *local, size_t local_length,
                         const struct rptadv_site_command_v1 *request);
-    /** Already-authorized local physical maintenance. Serializes with reload,
-     * stop and radio destruction; returns the shared provider status unchanged.
-     * A sink borrows its result only for this synchronous call. */
-    int (*radio_control)(const char *local, size_t local_length,
-                         struct rptadv_radio_control_v1 *request, rptadv_text_sink_v1 sink,
-                         void *sink_context);
     /** Advance retained activation/rollback: zero completed, one pending,
      * negative failed after safe rollback. Keep host candidate settings until
      * completion. Each call is nonblocking with respect to physical rig I/O. */
     int (*reload_poll)(void);
 };
 
+/** Checked JSON management startup, negotiated independently of the product table.
+ * A successful call retains providers until product.stop succeeds. -1 means startup
+ * was rejected and drained; -2 requires retaining all providers and retrying stop.
+ * A missing or invalid table cannot be replaced by an alternate configuration startup path. */
+struct rptadv_product_management_v1 {
+    uint32_t struct_size;   /**< Complete readable table size. */
+    uint32_t abi_version;   /**< Exactly 1. */
+    uint8_t capability[16]; /**< Fixed-width management capability identity. */
+    /** Start with the host and its control, file and speech providers. The
+     * provisioning JSON is a borrowed span of provisioning_length bytes.
+     * Return 0 on startup, -1 after rejection and drain, or -2 if stop must be retried.
+     */
+    int (*start)(const struct rptadv_host_services_v11 *host,
+                 const struct rptadv_control_descriptor_v1 *control,
+                 const struct rptadv_file_descriptor *file,
+                 const struct rptadv_speech_descriptor *speech, const char *provisioning_json,
+                 size_t provisioning_length);
+};
+/** Return the managed startup capability.
+ * @return Immutable descriptor valid while the product library is loaded.
+ */
+const struct rptadv_product_management_v1 *rptadv_product_management_descriptor_v1(void);
+
+/** Synchronous optional visitor for one registered port. The UUID points to 16 network-order
+ * bytes, and the exact UTF-8 key is a bounded span. Return zero to continue. */
+typedef int (*rptadv_managed_port_sink_v1)(void *context, const uint8_t *uuid, const char *key,
+                                           size_t key_length, uint32_t enabled);
+
+/** Read-only service-document validation and registered port enumeration.
+ * Both sink modes validate the same service TLS credentials, store identity and selected
+ * candidate before any records are emitted. No process writer lease or device is opened.
+ * All callbacks and spans are borrowed for this call; nonzero from a port sink aborts. */
+struct rptadv_product_inspection_v1 {
+    uint32_t struct_size;   /**< Complete readable table size. */
+    uint32_t abi_version;   /**< Exactly 1. */
+    uint8_t capability[16]; /**< Fixed-width inspection capability identity. */
+    /** Validate the provisioning JSON span of the given byte length. A null
+     * port sink validates without visiting ports. An optional diagnostic sink receives
+     * warnings or a safe error. Each sink is called with its supplied context.
+     * Return 0 on success or -1 on validation failure or visitor rejection.
+     */
+    int (*inspect)(const char *provisioning_json, size_t length, rptadv_managed_port_sink_v1 port,
+                   void *port_context, rptadv_text_sink_v1 diagnostic, void *diagnostic_context);
+};
+/** Return the read-only managed inspection capability.
+ * @return Immutable descriptor valid while the product library is loaded.
+ */
+const struct rptadv_product_inspection_v1 *rptadv_product_inspection_descriptor_v1(void);
+
 /** Return immutable process-lifetime product metadata.
  * @return Complete product descriptor retained through successful stop.
  */
 const struct rptadv_product_descriptor_v1 *rptadv_product_descriptor_v1(void);
+
+/** Exact local protected-store maintenance ABI, independent of runtime tables. */
+#define RPTADV_STORE_MAINTENANCE_ABI_VERSION 1U
+/** NUL-padded capability for the optional local-only maintenance descriptor. */
+#define RPTADV_STORE_MAINTENANCE_CAPABILITY "rptadv.store1"
+/** Verify selected graph and report safe hashes/counts. */
+#define RPTADV_STORE_INSPECT 1U
+/** Collect only verified registered unreachable artifacts. */
+#define RPTADV_STORE_GC 2U
+/** Write a verified exact manifest/object backup tree; keys stay separate. */
+#define RPTADV_STORE_BACKUP 3U
+/** Restore a verified backup using a fresh deliberate revision and journal. */
+#define RPTADV_STORE_RESTORE 4U
+/** Re-seal retained graphs using separate delivered old/new key IDs. */
+#define RPTADV_STORE_ROTATE 5U
+/** Explicitly replace bounded physical recovery roots. */
+#define RPTADV_STORE_RETAIN 6U
+/** Select the initial zero-port site or resume its interrupted first publication. */
+#define RPTADV_STORE_INIT 7U
+
+/** Local offline protected-store entry point; never an HTTP/radio API.
+ * The bounded UTF-8 request contains paths, UUIDs, hashes and symbolic key IDs,
+ * never key or plaintext credential bytes. The product owns all graph/crypto
+ * algorithms and acquires the actual same-root writer lifetime for mutations.
+ * Backup capture needs only its consistent edit snapshot. Roots must already
+ * exist with the protected service-owner mode. Strings/sinks are borrowed only
+ * during this synchronous call; callbacks must not unwind. Zero means durable
+ * completion/publication, never current runtime adoption; negative is a
+ * value-free failure also supplied to the optional sink. Keep the product DSO
+ * loaded through the complete call. No installed-service stop is performed.
+ */
+struct rptadv_store_maintenance_v1 {
+    uint32_t struct_size;   /**< Exact complete table size. */
+    uint32_t abi_version;   /**< Exact RPTADV_STORE_MAINTENANCE_ABI_VERSION. */
+    uint8_t capability[16]; /**< Exact padded RPTADV_STORE_MAINTENANCE_CAPABILITY. */
+    /** Execute a bounded local metadata request using the product-owned algorithms. */
+    int (*run)(uint32_t operation, const char *request, size_t request_length,
+               rptadv_text_sink_v1 sink, void *sink_context);
+};
+
+/** Optional checked maintenance getter, independent of the old product table.
+ * @return Immutable descriptor valid while the product library is loaded.
+ */
+const struct rptadv_store_maintenance_v1 *rptadv_product_store_maintenance_descriptor_v1(void);
 
 #ifdef __cplusplus
 }

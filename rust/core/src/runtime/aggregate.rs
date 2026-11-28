@@ -4,26 +4,20 @@ use super::{
     DeviceHandoff, GenerationSettings, GenerationWork, LifecycleState, LifecycleStatus, NodeHost,
     OwnedReceiveOwner, OwnedTransmitOwner, RuntimeGeneration,
     dtmf::{DigitEvent, DigitOperation, DigitOutcome, DtmfDispatcher, DtmfWorker},
-    link_schedule::{LinkScheduler, ReplacementSpec, RouteSpec},
+    link_schedule::{LinkScheduler, RouteSpec},
     links::{LinkEffect, NodeLinkControl},
     prepare::{self, NativeMediaPreparer, RuntimeError},
     render,
-    scheduler::{DispatchContent, EventScheduler, EventSpec, ScheduledDispatch, SchedulerError},
+    scheduler::{CalendarObservation, EventScheduler, EventTerminals},
 };
 use crate::{
     access::AccessPolicy,
     command::{Command, LinkAction},
-    config::{
-        ConfigDocument, ConfigWarning, NodeId, ResolvedEventSettings, ResolvedIdentifierSettings,
-        ResolvedMacroSettings, ResolvedNodeSettings, ResolvedPermanentLinkSettings,
-        ResolvedScheduleSettings, ResolvedSiteSettings, ResolvedTemplateSettings,
-        ResolvedTimeSettings, Schema,
-    },
+    config::{ResolvedIdentifierSettings, ResolvedNodeSettings, ResolvedSiteSettings},
     controller::{ActivitySnapshot, ControllerControl, NodeController, ParrotLevels},
     media::{PreparedAudio, StationMediaSession},
     messages::{Message, MessageArgument, MessageCatalog, MessageForms},
-    schedule::{CivilTime, ScheduledWindow},
-    template::MessageTemplate,
+    schedule::CivilTime,
     time::{TimeAnnouncement, TimeFormat},
 };
 use std::sync::{
@@ -31,9 +25,22 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
+#[path = "command_dispatch.rs"]
+mod command_dispatch;
+#[path = "command_program.rs"]
+mod command_program;
+pub use command_dispatch::CommandRenderers;
+use command_program::CommandPrograms;
+pub use command_program::{CommandCompletion, CommandReceipt, CommandResponse};
+
 #[path = "reload.rs"]
 mod reload;
+use crate::config::resources::generation::RuntimeConfiguration;
 use reload::ReloadTransaction;
+
+#[path = "aggregate_modular.rs"]
+mod modular;
+pub use modular::PreparedConfigurationTransition;
 
 fn queue_status_media(
     telemetry: &mut ControllerControl,
@@ -66,7 +73,7 @@ fn queue_status_media(
 }
 
 /// One externally captured tick; core never reads host clocks or time-zone services.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RuntimeClock {
     /// Monotonic milliseconds.
     pub now_ms: u64,
@@ -116,14 +123,14 @@ struct ControlState<C: Send> {
     activity: ActivitySnapshot,
     started_ms: u64,
     prior_activity_ms: Option<u64>,
-    catalog: MessageCatalog,
+    catalog: Arc<MessageCatalog>,
     messages: super::composition::MessageRecipes,
 }
 struct GroupAnnouncement {
     label: String,
     name: String,
     members: Vec<String>,
-    available: bool,
+    outage_notice: Option<Arc<AtomicBool>>,
 }
 
 fn same_group_configuration(
@@ -159,12 +166,16 @@ impl<C: Send> Drop for ControlState<C> {
 /// Stable per-node control identity, retained across successful generation swaps.
 pub struct RuntimeNode<A: Send, C: Send = ()> {
     name: String,
+    programs: CommandPrograms,
+    command_messages: Option<command_dispatch::CommandMessages>,
     site: crate::site::SiteController,
     settings: ResolvedNodeSettings,
     bounds: GenerationSettings,
     host: NodeHost<DtmfWorker, RuntimeTransmit<A>>,
     device: Box<dyn DeviceHandoff>,
     device_open: bool,
+    handoff_pending: bool,
+    failed_station_replacement: bool,
     pending_peer_cleanup: bool,
     links: NodeLinkControl,
     control: ControlState<C>,
@@ -173,8 +184,163 @@ pub struct RuntimeNode<A: Send, C: Send = ()> {
     time_format: u64,
     group_announcements: Vec<GroupAnnouncement>,
     echo_telemetry: crate::link::EchoTelemetryPolicy,
+    echo_announcement: crate::config::EchoLinkAnnouncement,
 }
+impl crate::config::resources::generation::ScopeConfiguration {
+    /// Render a sensor's public label against this status cut. A site has equipment
+    /// and a clock even when it has no radio identity or link manager.
+    pub fn sensor_display_name<A: Send, C: Send>(
+        &self,
+        name: &str,
+        site: &crate::site::SiteSnapshot,
+        clock: RuntimeClock,
+        node: Option<&RuntimeNode<A, C>>,
+    ) -> Option<String> {
+        use crate::composition::CompositionError;
+        let recipe = self.equipment.labels.get(name)?;
+        let key = node
+            .and_then(|n| n.links.command_profile())
+            .map(|p| p.public_key.as_str());
+        let port = node
+            .and_then(|n| n.command_messages.as_ref())
+            .map(|messages| &messages.port);
+        recipe.status_label(self, site, clock, key, port, || {
+            let node = node.ok_or(CompositionError::Preparation)?;
+            render::direct_status(node.links.manager(), &self.messages.catalog)
+                .map(|(forms, _)| forms)
+                .map_err(|_| CompositionError::Preparation)
+        })
+    }
+}
+
 impl<A: Send, C: Send> RuntimeNode<A, C> {
+    /// Reconcile event group holds before reserving any route operation. Verify this node's
+    /// exact registered port key and link generation at the existing route owner.
+    pub fn apply_event_groups(&mut self, events: &EventScheduler) -> bool {
+        self.links.apply_event_groups(&self.name, events)
+    }
+    fn message_values(
+        &self,
+        clock: RuntimeClock,
+        catalog: &MessageCatalog,
+    ) -> Result<super::MessageValueSnapshot, RuntimeError> {
+        let (civil, _) = clock.civil.ok_or(RuntimeError::Clock)?;
+        let site = self.site.snapshot(clock.now_ms);
+        let (mut links, identity) = render::direct_status(self.links.manager(), catalog)?;
+        links.tts = render::telemetry_speech(&links.tts, &[&identity]);
+        Ok::<_, RuntimeError>(super::MessageValueSnapshot {
+            civil,
+            time_format: TimeFormat::try_from(self.time_format)
+                .map_err(|_| RuntimeError::Preparation)?,
+            node: self
+                .links
+                .command_profile()
+                .map_or(self.name.as_str(), |profile| profile.public_key.as_str())
+                .to_owned(),
+            callsign: self.settings.callsign.clone(),
+            port: self
+                .command_messages
+                .as_ref()
+                .map_or_else(Default::default, |messages| messages.port.clone()),
+            event: None,
+            builtin: Default::default(),
+            links,
+            sensors: site
+                .sensors
+                .into_iter()
+                .map(|(name, sensor)| {
+                    (
+                        name,
+                        crate::site::Observation {
+                            value: sensor.current.value.map(MessageArgument::Number),
+                            observed_at_ms: sensor.current.observed_at_ms,
+                            quality: sensor.current.quality,
+                        },
+                    )
+                })
+                .collect(),
+            inputs: site
+                .inputs
+                .into_iter()
+                .map(|(name, input)| {
+                    (
+                        name,
+                        crate::site::Observation {
+                            value: input
+                                .value
+                                .map(|value| MessageArgument::Number(f64::from(value))),
+                            observed_at_ms: input.observed_at_ms,
+                            quality: input.quality,
+                        },
+                    )
+                })
+                .collect(),
+            time_remaining: None,
+        })
+    }
+    fn command_message_event(
+        &self,
+        reply: &crate::link::PeerReply,
+    ) -> Option<super::MessageEventIdentity> {
+        use crate::link::ProtocolId;
+        let peer = self.links.command_peer(reply);
+        let protocol = match peer.map(crate::link::PeerIdentity::protocol) {
+            Some(ProtocolId::AllStarLink) => "allstarlink",
+            Some(ProtocolId::EchoLink) => "echolink",
+            _ if reply.phone_authenticated() => "phone",
+            _ => return None,
+        };
+        Some(super::MessageEventIdentity {
+            kind: "command".into(),
+            peer_protocol: Some(protocol.into()),
+            peer_number: peer
+                .and_then(crate::link::PeerIdentity::node)
+                .map(str::to_owned),
+            peer_callsign: reply.peer_callsign().map(str::to_owned),
+        })
+    }
+
+    /// Accepted calendar samples from this station's installed command scheduler.
+    pub fn calendar_observation(&self) -> Option<CalendarObservation> {
+        self.programs.scheduler.as_ref()?.calendar_observation()
+    }
+
+    /// Current calendar observations from this station's installed command scheduler.
+    pub fn observed_events(
+        &self,
+    ) -> impl Iterator<
+        Item = (
+            crate::config::resources::candidate::ResourceId,
+            Option<crate::schedule::recurrence::Error>,
+            EventTerminals,
+        ),
+    > + '_ {
+        self.programs
+            .scheduler
+            .iter()
+            .flat_map(EventScheduler::observed_events)
+    }
+
+    /// Capture the local receiver separately from link and telemetry activity.
+    pub fn radio_receive_status(&self) -> super::links::ReceiveStatus {
+        let telemetry = &self.control.telemetry;
+        let muted = telemetry.rx_mute().load(Ordering::Acquire) & 1 != 0;
+        super::links::ReceiveStatus {
+            muted,
+            active: !muted && telemetry.qualified_receive(),
+        }
+    }
+    /// Continuous receive activity for calendar politeness in the same runtime monotonic epoch.
+    pub fn event_activity(&self) -> super::scheduler::ReceiveActivity {
+        super::scheduler::ReceiveActivity {
+            active: self.control.activity.is_active(),
+            last_active_ms: Some(
+                self.control
+                    .activity_ms()
+                    .unwrap_or(self.control.started_ms),
+            ),
+        }
+    }
     /// Station-owned site policy; callers deliver observations/effects off audio.
     pub fn site(&mut self) -> &mut crate::site::SiteController {
         &mut self.site
@@ -187,9 +353,7 @@ impl<A: Send, C: Send> RuntimeNode<A, C> {
         now_ms: u64,
     ) -> Result<Vec<crate::site::SiteEffect>, crate::site::SiteError> {
         let result = self.site.command(command, now_ms);
-        self.control
-            .telemetry
-            .set_site_inhibit(self.site.transmit_inhibited());
+        self.publish_rf_inhibit();
         result
     }
     /// Advance station protection and publish its RF gate independently of media admission.
@@ -197,14 +361,18 @@ impl<A: Send, C: Send> RuntimeNode<A, C> {
         &mut self,
         now_ms: u64,
         observations: &crate::site::SiteObservations,
-        ptt: &std::collections::BTreeMap<NodeId, bool>,
+        ptt: &std::collections::BTreeMap<crate::config::resources::PortKey, bool>,
     ) -> Vec<crate::site::SiteEffect> {
         let effects = self.site.advance(now_ms, observations, ptt);
-        self.control
-            .telemetry
-            .set_site_inhibit(self.site.transmit_inhibited());
+        self.publish_rf_inhibit();
         effects
     }
+    fn publish_rf_inhibit(&self) {
+        self.control
+            .telemetry
+            .set_site_inhibit(self.failed_station_replacement || self.site.transmit_inhibited());
+    }
+
     /// Borrow a current/retiring adapter dispatcher only on control. Once exposed, its generation
     /// requires an explicit `detached` acknowledgment after dispatcher stop/drain before reclaim.
     pub fn adapter_control_mut(&mut self, generation: u64) -> Option<&mut C> {
@@ -241,6 +409,9 @@ impl<A: Send, C: Send> RuntimeNode<A, C> {
     }
     /// Reserve current-generation ownership before submitting external work.
     pub fn work(&mut self) -> Option<GenerationWork> {
+        if self.handoff_pending {
+            return None;
+        }
         self.host.control().work()
     }
     /// Copy lifecycle status without entering an audio owner.
@@ -251,6 +422,19 @@ impl<A: Send, C: Send> RuntimeNode<A, C> {
     pub fn detached(&mut self, generation: u64) -> bool {
         self.host.control().mark_detached(generation).is_ok()
     }
+    /// Drain ordered lifecycle records and the current transmit sample epoch on control.
+    pub fn drain_telemetry_observations(
+        &mut self,
+    ) -> (Vec<crate::controller::TelemetryObservation>, bool, u64) {
+        let telemetry = &mut self.control.telemetry;
+        let events = std::iter::from_fn(|| telemetry.take_telemetry_observation()).collect();
+        (
+            events,
+            telemetry.telemetry_observations_lost(),
+            self.control.activity.current_sample(),
+        )
+    }
+
     /// Reclaim completed telemetry and safely detached generation state only on control.
     pub fn reclaim(&mut self) -> bool {
         self.control.telemetry.reclaim().for_each(drop);
@@ -281,46 +465,13 @@ impl<A: Send, C: Send> RuntimeNode<A, C> {
     }
 }
 
-struct Event {
-    spec: EventSpec,
-    template: Option<MessageTemplate>,
-    operation: Option<Command>,
-    recipe: Option<usize>,
-    delivery: crate::controller::PoliteDelivery,
-    playback: crate::controller::PlaybackPolicy,
-}
-/// Fully copied prepared event text and its private scheduler reservation.
-pub struct RuntimeDispatch {
-    token: ScheduledDispatch,
-    morse: Option<String>,
-    speech: Option<String>,
-    recipe: Option<usize>,
-    delivery: crate::controller::PoliteDelivery,
-    playback: crate::controller::PlaybackPolicy,
-}
-impl RuntimeDispatch {
-    /// Owning local node.
-    pub fn local(&self) -> &str {
-        self.token.local()
-    }
-    /// Morse-safe optional message.
-    pub fn morse(&self) -> Option<&str> {
-        self.morse.as_deref()
-    }
-    /// Expanded speech including punctuation-safe node/callsign pronunciation.
-    pub fn speech(&self) -> Option<&str> {
-        self.speech.as_deref()
-    }
-    /// Optional existing linking command, executed only after successful message admission.
-    pub fn operation(&self) -> Option<&Command> {
-        self.token.content.operation.as_ref()
-    }
-}
-
 struct Candidate<A: Send, C: Send> {
+    scope: Option<crate::config::resources::candidate::ResourceId>,
+    commands: Option<command_dispatch::PreparedCommands>,
+    admin: Option<Arc<super::dtmf::AdminCodes>>,
     dtmf_macros: Vec<crate::dtmf_macro::CompiledDtmfMacro>,
     dtmf_macro_limits: crate::dtmf_macro::DtmfMacroLimits,
-    remote_commands: crate::remote_base_command::RemoteCommandConfiguration,
+    remote_commands: Option<crate::remote_base_command::RemoteCommandConfiguration>,
     name: String,
     settings: ResolvedNodeSettings,
     site: ResolvedSiteSettings,
@@ -329,6 +480,9 @@ struct Candidate<A: Send, C: Send> {
     control: ControlState<C>,
     status: ResolvedIdentifierSettings,
     time_format: u64,
+    station_changed: bool,
+    echo_telemetry: crate::link::EchoTelemetryPolicy,
+    echo_announcement: crate::config::EchoLinkAnnouncement,
     links: LinkScheduler,
     device: Option<Box<dyn DeviceHandoff>>,
 }
@@ -337,6 +491,7 @@ struct Candidate<A: Send, C: Send> {
 struct DisconnectNotice {
     first: String,
     second: String,
+    protocol: crate::link::ProtocolId,
     cancellation: Weak<AtomicBool>,
 }
 
@@ -345,47 +500,45 @@ struct DisconnectNotice {
 pub struct Runtime<A: Send = (), C: Send = ()> {
     revision: u64,
     generation: u64,
-    document: ConfigDocument,
-    warnings: Vec<ConfigWarning>,
+    modular: Option<Arc<RuntimeConfiguration>>,
+    shared_site: Option<modular::SharedSite>,
+    configuration_gate: Arc<AtomicBool>,
     nodes: Vec<RuntimeNode<A, C>>,
     retired: Vec<RuntimeNode<A, C>>,
-    events: Vec<Event>,
-    scheduler: Option<EventScheduler>,
     effects: Vec<(String, LinkEffect)>,
     detaching: Vec<(String, String)>,
     disconnect_notices: Vec<DisconnectNotice>,
     stopping: bool,
     pending_reload: Option<ReloadTransaction<A, C>>,
+    completed_reload_rollback: bool,
 }
 impl<A: Send, C: Send> Runtime<A, C> {
-    /// Prepare every enabled node and schedule before opening/publishing any candidate.
-    /// Pending devices retain revision zero; the control owner must poll_reload
-    /// until activation completes before exposing initial registrations.
-    pub fn start(
-        document: ConfigDocument,
-        media: &dyn NativeMediaPreparer,
-        adapter: impl FnMut(&str, &ResolvedNodeSettings) -> Result<PreparedAdapter<A, C>, RuntimeError>,
-        device: impl FnMut(&str, &ResolvedNodeSettings) -> Result<Box<dyn DeviceHandoff>, RuntimeError>,
-        clock: RuntimeClock,
-    ) -> Result<Self, RuntimeError> {
-        let mut runtime = Self {
+    /// Start with no selected configuration, active generation or radio.
+    /// The first successful adoption uses the ordinary runtime publication path.
+    pub fn idle() -> Self {
+        Self {
             revision: 0,
             generation: 0,
-            document: ConfigDocument::default(),
-            warnings: Vec::new(),
+            modular: None,
+            shared_site: None,
+            configuration_gate: Arc::new(AtomicBool::new(false)),
             nodes: Vec::new(),
             retired: Vec::new(),
-            events: Vec::new(),
-            scheduler: None,
             effects: Vec::new(),
             detaching: Vec::new(),
             disconnect_notices: Vec::new(),
             stopping: false,
             pending_reload: None,
-        };
-        runtime.reload(document, media, adapter, device, clock)?;
-        Ok(runtime)
+            completed_reload_rollback: false,
+        }
     }
+
+    /// Share this aggregate's fail-closed transmit interlock with its service owner.
+    /// Site policy retains an independent gate for each station.
+    pub fn configuration_gate(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.configuration_gate)
+    }
+
     /// Current successful configuration revision, unchanged by any failed candidate.
     pub fn revision(&self) -> u64 {
         self.revision
@@ -400,7 +553,7 @@ impl<A: Send, C: Send> Runtime<A, C> {
         now_ms: u64,
     ) -> Result<u64, RuntimeError> {
         self.reclaim();
-        if self.stopping {
+        if self.stopping || self.reload_pending() {
             return Err(RuntimeError::Busy);
         }
         let generation = self
@@ -454,8 +607,7 @@ impl<A: Send, C: Send> Runtime<A, C> {
             activity,
             started_ms: now_ms,
             prior_activity_ms: None,
-            catalog: MessageCatalog::load(&node.settings.language)
-                .map_err(|_| RuntimeError::Preparation)?,
+            catalog: Arc::clone(&node.control.catalog),
             messages: super::composition::MessageRecipes::default(),
         };
         std::mem::swap(&mut next.telemetry, &mut node.control.telemetry);
@@ -469,20 +621,26 @@ impl<A: Send, C: Send> Runtime<A, C> {
             &mut node.control.prior_activity_ms,
         );
         node.retired_control = Some(std::mem::replace(&mut node.control, next));
+
         self.generation = generation;
         Ok(generation)
-    }
-    /// Active immutable document.
-    pub fn document(&self) -> &ConfigDocument {
-        &self.document
-    }
-    /// Recoverable schema warnings for the published document, without logging from core.
-    pub fn warnings(&self) -> &[ConfigWarning] {
-        &self.warnings
     }
     /// Enabled nodes in configuration order.
     pub fn node_names(&self) -> Vec<&str> {
         self.nodes.iter().map(|node| node.name.as_str()).collect()
+    }
+    /// Resolve the single running port which owns an incoming ASL account.
+    pub fn network_owner(&self, account: &str) -> Option<&str> {
+        if account.is_empty() || !account.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        let account = account.trim_start_matches('0');
+        let mut owners = self.nodes.iter().filter(|node| {
+            node.network_account()
+                .is_some_and(|wire| wire.trim_start_matches('0') == account)
+        });
+        let owner = owners.next()?;
+        owners.next().is_none().then_some(owner.name.as_str())
     }
     /// Exact current settings lookup, excluding removed/disabled nodes.
     pub fn settings(&self, name: &str) -> Option<&ResolvedNodeSettings> {
@@ -513,7 +671,8 @@ impl<A: Send, C: Send> Runtime<A, C> {
         effects
     }
     fn track_detach(&mut self, local: &str, effect: &LinkEffect) {
-        if let LinkEffect::Detach(peers) = effect {
+        if let LinkEffect::Detach(peers) | LinkEffect::PrivateDetach { remotes: peers, .. } = effect
+        {
             for remote in peers {
                 let key = (local.to_owned(), remote.clone());
                 if !self.detaching.contains(&key) {
@@ -544,33 +703,20 @@ impl<A: Send, C: Send> Runtime<A, C> {
             .collect()
     }
 
-    /// Fully prepare a candidate, switch changed devices with rollback, then publish all nodes.
-    /// Success may leave reload_pending true while hardware opens or rolls back.
-    /// Poll on control without discarding the prior configuration or device contexts.
-    /// The adapter must redirect old generation endpoints and report detachment before another reload.
-    pub fn reload(
-        &mut self,
-        document: ConfigDocument,
-        media: &dyn NativeMediaPreparer,
-        mut adapter: impl FnMut(
-            &str,
-            &ResolvedNodeSettings,
-        ) -> Result<PreparedAdapter<A, C>, RuntimeError>,
-        mut device: impl FnMut(
-            &str,
-            &ResolvedNodeSettings,
-        ) -> Result<Box<dyn DeviceHandoff>, RuntimeError>,
-        clock: RuntimeClock,
-    ) -> Result<(), RuntimeError> {
+    fn next_configuration(&mut self, clock: RuntimeClock) -> Result<(u64, u64), RuntimeError> {
         self.reclaim();
-        if self.stopping
-            || self.pending_reload.is_some()
-            || !self.retired.is_empty()
-            || self
-                .nodes
-                .iter_mut()
-                .any(|node| node.status(clock.now_ms).retiring.is_some())
-        {
+        if self.stopping || self.pending_reload.is_some() || !self.retired.is_empty() {
+            return Err(RuntimeError::Busy);
+        }
+        // A failed handoff can stop an incumbent permanently. Keep it reachable
+        // through physical stop and detachment, then prepare a fresh owner.
+        self.nodes.retain_mut(|node| {
+            node.device_open || node.status(clock.now_ms).state != LifecycleState::Stopped
+        });
+        if self.nodes.iter_mut().any(|node| {
+            let status = node.status(clock.now_ms);
+            status.active.is_none() || status.retiring.is_some()
+        }) {
             return Err(RuntimeError::Busy);
         }
         let revision = self
@@ -581,165 +727,18 @@ impl<A: Send, C: Send> Runtime<A, C> {
             .generation
             .checked_add(1)
             .ok_or(RuntimeError::Preparation)?;
-        let mut warnings = Schema::validate(&document)?.warnings;
-        let mut candidates = Vec::new();
-        let mut events = Vec::new();
-        for name in document.nodes() {
-            let id = NodeId::new(name)?;
-            let settings = ResolvedNodeSettings::resolve(&document, &id)?.value;
-            if !settings.enabled {
-                continue;
-            }
-            let catalog =
-                MessageCatalog::load(&settings.language).map_err(|_| RuntimeError::Preparation)?;
-            for issue in catalog.translation_warnings() {
-                warnings.push(ConfigWarning::new(
-                    0,
-                    name,
-                    "language",
-                    &settings.language,
-                    issue,
-                    "en-US",
-                ));
-            }
-            let existing = self.nodes.iter().find(|node| node.name == name);
-            let links = prepare_links(
-                &document,
-                &id,
-                revision,
-                existing.and_then(|node| node.links.schedule()),
-            )?;
-            if links.requires_civil_time() && clock.civil.is_none_or(|(_, second)| second >= 60) {
-                return Err(RuntimeError::Clock);
-            }
-            let (controller, telemetry, status, media_session, mut messages) = prepare::controller(
-                &document,
-                &id,
-                &settings,
-                media,
-                generation_id,
-                &catalog,
-                clock.civil.map(|(civil, _)| civil),
-            )?;
-            warnings.append(&mut messages.warnings);
-            let activity = controller.activity();
-            let (receive, digits) = DtmfWorker::new(generation_id, settings.dtmf_muting)
-                .map_err(|_| RuntimeError::Preparation)?;
-            let prepared = adapter(name, &settings)?;
-            let mut remote_commands = prepared.remote_commands.unwrap_or(
-                crate::remote_base_command::RemoteCommandConfiguration {
-                    prefix: String::new(),
-                    access: crate::remote_base_command::RemoteDtmfAccess::Disabled,
-                },
-            );
-            if !remote_commands.prefix.is_empty() {
-                if let Some(prefix) = settings
-                    .link_commands
-                    .get("link_command_remote_base")
-                    .filter(|prefix| !prefix.is_empty())
-                {
-                    remote_commands.prefix.clone_from(prefix);
-                }
-            }
-            let mut commands = super::dtmf::DtmfCommands::new(
-                settings
-                    .command_map()
-                    .map_err(|_| RuntimeError::Preparation)?,
-            );
-            commands
-                .configure_remote(&remote_commands.prefix, remote_commands.access)
-                .map_err(|_| RuntimeError::Preparation)?;
-            let mut dtmf_macros =
-                crate::config::compile_macros(&document, &id, commands.command_map())?;
-            warnings.append(&mut dtmf_macros.warnings);
-            let dtmf_macro_limits = crate::config::macro_limits(&document, &id);
-            let bounds = GenerationSettings {
-                node: name.into(),
-                device: settings.channel.clone(),
-                receive_maximum: prepared.receive_maximum,
-                transmit_maximum: prepared.transmit_maximum,
-                squelch_delay_ms: settings.squelch_delay_ms,
-                status_snapshot_interval_ms: settings.status_snapshot_interval_ms,
-            };
-            let generation = RuntimeGeneration::prepare(
-                generation_id,
-                bounds.clone(),
-                receive,
-                RuntimeTransmit {
-                    controller,
-                    adapter: prepared.state,
-                    settings: settings.clone(),
-                },
-            )
-            .map_err(|_| RuntimeError::Preparation)?;
-            let fresh_device = if existing.is_none() {
-                Some(device(name, &settings)?)
-            } else {
-                None
-            };
-            events.extend(prepare_events(&document, &id, &messages)?);
-            let control = ControlState {
-                generation: generation_id,
-                adapter: prepared.control,
-                adapter_exposed: false,
-                telemetry,
-                media_session: Some(media_session),
-                digits,
-                activity,
-                started_ms: clock.now_ms,
-                prior_activity_ms: existing.and_then(|node| node.control.activity_ms()),
-                catalog,
-                messages,
-            };
-            candidates.push(Candidate {
-                dtmf_macros: dtmf_macros.value,
-                dtmf_macro_limits,
-                remote_commands,
-                name: name.into(),
-                settings,
-                site: ResolvedSiteSettings::resolve(&document, &id)?.value,
-                bounds,
-                generation,
-                control,
-                status,
-                time_format: ResolvedTimeSettings::resolve(&document, &id)?.value.format,
-                links,
-                device: fresh_device,
-            });
-        }
-        let scheduler = EventScheduler::new(
-            revision,
-            events.iter().map(|event| event.spec.clone()).collect(),
-            self.scheduler.as_ref(),
-        )
-        .map_err(|_| RuntimeError::Preparation)?;
-        // Validate every remaining fallible policy constructor before touching physical leases.
-        for candidate in &candidates {
-            crate::link::LinkManager::new(&candidate.name).map_err(RuntimeError::Link)?;
-            candidate
-                .settings
-                .command_map()
-                .map_err(|_| RuntimeError::Preparation)?;
-            AccessPolicy::new(
-                &candidate.settings.link_allow_nodes,
-                &candidate.settings.link_deny_nodes,
-            )
-            .map_err(|_| RuntimeError::Preparation)?;
-        }
-        self.pending_reload = Some(ReloadTransaction::new(
-            document,
-            warnings,
-            candidates,
-            events,
-            scheduler,
-            (revision, generation_id),
-        ));
-        self.poll_reload(clock).map(|_| ())
+        Ok((revision, generation_id))
     }
 
     /// A prepared configuration still owns opening or rolling-back leases.
     pub fn reload_pending(&self) -> bool {
         self.pending_reload.is_some()
+    }
+
+    /// Whether the last adoption completed every physical rollback step and kept the incumbent.
+    /// Starting an adoption invalidates this receipt before checking its preconditions.
+    pub fn reload_rollback_confirmed(&self) -> bool {
+        self.completed_reload_rollback && !self.stopping
     }
 
     /// Advance every device without waiting for its physical worker. A failed
@@ -764,61 +763,26 @@ impl<A: Send, C: Send> Runtime<A, C> {
         clock: RuntimeClock,
     ) -> Result<(), RuntimeError> {
         let ReloadTransaction {
-            document,
-            warnings,
-            mut candidates,
-            events,
-            scheduler,
+            configuration,
+            site,
+            candidates,
             revision,
             generation_id,
-            changed,
             updated,
-            opened,
             ..
         } = transaction;
-        // Accepted native updates retain their reverse until every device is ready.
-        for name in &updated {
-            let node = self
-                .nodes
-                .iter_mut()
-                .find(|node| &node.name == name)
-                .expect("updated lease");
-            if node.device.finish_update(true).is_err() {
-                // Commit has no remaining preparation or device I/O. A broken
-                // host contract degrades safely instead of publishing mixed state.
-                for (index, node) in self.nodes.iter_mut().enumerate() {
-                    if changed.contains(&index) || updated.contains(&node.name) {
-                        stop_node(node, clock.now_ms, &mut self.effects);
-                    }
-                }
-                for &index in opened.iter().rev() {
-                    candidates[index]
-                        .device
-                        .iter_mut()
-                        .for_each(|device| device.close());
-                }
-                return Err(RuntimeError::Restore);
-            }
-        }
         // No fallible preparation remains: external registration is still gated to these stable hosts.
         let mut next = Vec::with_capacity(candidates.len());
         for mut candidate in candidates {
-            let identity = NodeId::new(&candidate.name).expect("configured station");
-            let echo = crate::config::EchoLinkSettings::resolve(&document, &identity)
-                .expect("validated account settings")
-                .value;
-            let echo_telemetry =
-                crate::link::EchoTelemetryPolicy::new(echo.telemetry, echo.telemetry_dynamic);
+            let command_owner = candidate.commands.take().expect("prepared command owner");
             let policy = AccessPolicy::new(
                 &candidate.settings.link_allow_nodes,
                 &candidate.settings.link_deny_nodes,
             )
             .expect("validated policy");
-            let commands = candidate
-                .settings
-                .command_map()
-                .expect("validated commands");
-            if let Some(index) = self
+            let commands =
+                crate::command::DtmfCommandMap::new(Vec::new()).expect("empty command map");
+            let previous_activity = if let Some(index) = self
                 .nodes
                 .iter()
                 .position(|node| node.name == candidate.name)
@@ -831,8 +795,7 @@ impl<A: Send, C: Send> Runtime<A, C> {
                     .active
                     .expect("active node");
                 let handoff = old.bounds.device != candidate.bounds.device
-                    || (old.settings.radio != candidate.settings.radio
-                        && !updated.contains(&candidate.name));
+                    || (candidate.station_changed && !updated.contains(&candidate.name));
                 let removed = old.links.withdraw_removed(&candidate.links);
                 if !removed.is_empty() {
                     self.effects
@@ -840,34 +803,34 @@ impl<A: Send, C: Send> Runtime<A, C> {
                 }
                 // Seed retained protection before a callback can acquire the replacement.
                 old.site.reconfigure(candidate.site);
-                candidate
-                    .control
-                    .telemetry
-                    .set_site_inhibit(old.site.transmit_inhibited());
+                candidate.control.telemetry.rx_mute().store(
+                    old.control.telemetry.rx_mute().load(Ordering::Acquire),
+                    Ordering::Release,
+                );
+                candidate.control.telemetry.set_site_inhibit(
+                    old.failed_station_replacement || old.site.transmit_inhibited(),
+                );
                 old.host
                     .control()
                     .publish_prepared(candidate.generation, clock.now_ms)
                     .expect("prevalidated serialized publication");
+                old.handoff_pending = false;
                 if handoff && !old.control.adapter_exposed {
                     old.host
                         .control()
                         .mark_detached(prior)
                         .expect("retired handoff");
                 }
+                let activity = old.event_activity();
                 candidate.control.prior_activity_ms = old.control.activity_ms();
                 old.retired_control = Some(std::mem::replace(&mut old.control, candidate.control));
+                old.programs.generation = None;
                 old.links
                     .reconfigure(policy, commands, Some(candidate.links));
-                old.links.configure_admin(
-                    &candidate.settings.dtmf_admin_unlock_hash,
-                    &candidate.settings.dtmf_admin_lock_hash,
-                    candidate.settings.dtmf_admin_timeout_ms,
-                );
                 old.links
-                    .configure_remote(
-                        &candidate.remote_commands.prefix,
-                        candidate.remote_commands.access,
-                    )
+                    .bind_admin(candidate.admin, candidate.settings.dtmf_admin_timeout_ms);
+                old.links
+                    .configure_radio_owner(candidate.remote_commands.as_ref())
                     .expect("prevalidated remote command family");
                 old.links
                     .configure_macros(candidate.dtmf_macros, candidate.dtmf_macro_limits)
@@ -876,27 +839,24 @@ impl<A: Send, C: Send> Runtime<A, C> {
                 old.bounds = candidate.bounds;
                 old.status = candidate.status;
                 old.time_format = candidate.time_format;
-                old.echo_telemetry = echo_telemetry;
+                old.echo_telemetry = candidate.echo_telemetry;
+                old.echo_announcement = candidate.echo_announcement;
                 next.push(old);
+                Some(activity)
             } else {
                 let mut links =
                     NodeLinkControl::new(&candidate.name, policy, commands, Some(candidate.links))
                         .expect("validated node identity");
-                links.configure_admin(
-                    &candidate.settings.dtmf_admin_unlock_hash,
-                    &candidate.settings.dtmf_admin_lock_hash,
-                    candidate.settings.dtmf_admin_timeout_ms,
-                );
+                links.bind_admin(candidate.admin, candidate.settings.dtmf_admin_timeout_ms);
                 links
-                    .configure_remote(
-                        &candidate.remote_commands.prefix,
-                        candidate.remote_commands.access,
-                    )
+                    .configure_radio_owner(candidate.remote_commands.as_ref())
                     .expect("prevalidated remote command family");
                 links
                     .configure_macros(candidate.dtmf_macros, candidate.dtmf_macro_limits)
                     .expect("prevalidated macro namespace");
                 next.push(RuntimeNode {
+                    programs: Default::default(),
+                    command_messages: None,
                     name: candidate.name,
                     site: crate::site::SiteController::new(candidate.site),
                     settings: candidate.settings,
@@ -904,6 +864,8 @@ impl<A: Send, C: Send> Runtime<A, C> {
                     host: NodeHost::new(candidate.generation),
                     device: candidate.device.expect("prepared new lease"),
                     device_open: true,
+                    handoff_pending: false,
+                    failed_station_replacement: false,
                     pending_peer_cleanup: false,
                     links,
                     control: candidate.control,
@@ -911,19 +873,22 @@ impl<A: Send, C: Send> Runtime<A, C> {
                     status: candidate.status,
                     time_format: candidate.time_format,
                     group_announcements: Vec::new(),
-                    echo_telemetry,
+                    echo_telemetry: candidate.echo_telemetry,
+                    echo_announcement: candidate.echo_announcement,
                 });
-            }
+                None
+            };
+            let node = next.last_mut().expect("published candidate");
+            let activity = previous_activity.unwrap_or_else(|| node.event_activity());
+            command_owner.install(node, clock, activity);
         }
         for mut removed in self.nodes.drain(..) {
             stop_node(&mut removed, clock.now_ms, &mut self.effects);
             self.retired.push(removed);
         }
         self.nodes = next;
-        self.events = events;
-        self.scheduler = Some(scheduler);
-        self.document = document;
-        self.warnings = warnings;
+        self.publish_site(site, generation_id);
+        self.modular = Some(configuration);
         self.revision = revision;
         self.generation = generation_id;
         self.tick_links(clock);
@@ -965,7 +930,9 @@ impl<A: Send, C: Send> Runtime<A, C> {
                                 })
                         })
                         .is_some_and(|prepared| {
-                            node.control.telemetry.queue_prepared_parrot(prepared)
+                            node.control
+                                .telemetry
+                                .queue_captured_parrot(&clip, prepared)
                         });
                     let _ = queued;
                     node.control.telemetry.recycle_parrot_capture(clip);
@@ -1034,211 +1001,14 @@ impl<A: Send, C: Send> Runtime<A, C> {
         }
         selected
     }
-    /// Reserve the oldest due event, rendering all dynamic values from its captured trigger minute.
-    pub fn next_event(
-        &mut self,
-        clock: RuntimeClock,
-    ) -> Result<Option<RuntimeDispatch>, RuntimeError> {
-        let (civil, second) = clock
-            .civil
-            .filter(|(_, second)| *second < 60 && clock.wall_subsecond_ms < 1000)
-            .ok_or(RuntimeError::Clock)?;
-        let events = &self.events;
-        let nodes = &self.nodes;
-        let Some(scheduler) = &mut self.scheduler else {
-            return Ok(None);
-        };
-        let token = scheduler
-            .next(
-                clock.wall_seconds,
-                i128::from(clock.now_ms)
-                    - i128::from(second) * 1000
-                    - i128::from(clock.wall_subsecond_ms),
-                civil,
-                |spec, civil| {
-                    let event = events
-                        .iter()
-                        .find(|event| event.spec == *spec)
-                        .ok_or(SchedulerError::Render)?;
-                    let node = nodes
-                        .iter()
-                        .find(|node| node.name == spec.local)
-                        .ok_or(SchedulerError::Render)?;
-                    let message = event
-                        .template
-                        .as_ref()
-                        .map(|template| {
-                            render::message(
-                                template,
-                                *civil,
-                                node.time_format,
-                                &node.name,
-                                &node.settings.callsign,
-                                node.links.manager(),
-                                &node.control.catalog,
-                            )
-                        })
-                        .transpose()
-                        .map_err(|_| SchedulerError::Render)?;
-                    Ok(DispatchContent {
-                        message: message.and_then(|text| render::morse(&text).map(|_| text)),
-                        operation: event.operation.clone(),
-                    })
-                },
-            )
-            .map_err(|_| RuntimeError::Preparation)?;
-        let Some(token) = token else {
-            return Ok(None);
-        };
-        let node = self
-            .nodes
-            .iter()
-            .find(|node| node.name == token.local())
-            .ok_or(RuntimeError::MissingNode)?;
-        let (_, peer) = render::direct_status(node.links.manager(), &node.control.catalog)?;
-        let morse = token.content.message.as_deref().and_then(render::morse);
-        let speech =
-            token.content.message.as_deref().map(|text| {
-                render::scheduled_speech(text, &node.name, &node.settings.callsign, &peer)
-            });
-        let event = self
-            .events
-            .iter()
-            .find(|event| event.spec.local == token.local() && event.spec.name == token.name())
-            .ok_or(RuntimeError::Preparation)?;
-        let recipe = event.recipe;
-        let delivery = event.delivery;
-        let playback = event.playback;
-        Ok(Some(RuntimeDispatch {
-            token,
-            morse,
-            speech,
-            recipe,
-            delivery,
-            playback,
-        }))
-    }
-    /// Queue a reserved event once. Stale reservations cannot synthesize or enqueue into a new node.
-    pub fn queue_event(&mut self, dispatch: &RuntimeDispatch) -> Result<(), RuntimeError> {
-        let scheduler = self.scheduler.as_mut().ok_or(RuntimeError::Rejected)?;
-        if !scheduler.current(&dispatch.token) {
-            return Err(RuntimeError::Rejected);
-        }
-        if scheduler.is_message_queued(&dispatch.token) {
-            return Ok(());
-        }
-        let occurrence = dispatch.token.occurrence();
-        if occurrence
-            .as_ref()
-            .is_some_and(|occurrence| occurrence.cancelled())
-        {
-            scheduler.message_queued(&dispatch.token);
-            return Ok(());
-        }
-        if dispatch.recipe.is_none() && dispatch.morse().is_none() {
-            return Ok(());
-        }
-        let node = self
-            .nodes
-            .iter_mut()
-            .find(|node| node.name == dispatch.local())
-            .ok_or(RuntimeError::MissingNode)?;
-        node.control.telemetry.reclaim().for_each(drop);
-        if !node.control.telemetry.can_queue_status() {
-            return Err(RuntimeError::Rejected);
-        }
-        let prepared = if let Some(index) = dispatch.recipe {
-            node.control
-                .telemetry
-                .prepare_message(index)
-                .map_err(|_| RuntimeError::Preparation)?
-        } else {
-            prepare::streamed_status(
-                node.control
-                    .media_session
-                    .as_mut()
-                    .ok_or(RuntimeError::Preparation)?
-                    .as_mut(),
-                &node.status,
-                dispatch.morse().expect("event has legacy media"),
-                dispatch.speech().unwrap_or(""),
-            )?
-        };
-        let deadline = (dispatch.token.due_ms() + i128::from(dispatch.delivery.maximum_wait_ms)
-            - i128::from(node.control.started_ms))
-        .clamp(0, i128::from(u64::MAX / 48)) as u64
-            * 48;
-        assert!(
-            node.control.telemetry.queue_prepared_status(
-                prepared
-                    .with_delivery(deadline, dispatch.delivery)
-                    .with_playback_policy(dispatch.playback)
-                    .with_occurrence(occurrence)
-            )
-        );
-        scheduler.message_queued(&dispatch.token);
-        Ok(())
-    }
-    /// Settle a reservation only after its message and optional linking operation complete.
-    pub fn complete_event(&mut self, dispatch: &RuntimeDispatch) -> bool {
-        self.scheduler.as_mut().is_some_and(|scheduler| {
-            (dispatch.recipe.is_none() || scheduler.is_message_queued(&dispatch.token))
-                && scheduler.complete(&dispatch.token)
-        })
-    }
-    /// Resolve newly admitted recurring messages on the frequent control pump, never on audio.
+    /// Prepare pending status, ID, and tail media using the current control snapshot.
     pub fn prepare_messages(&mut self, clock: RuntimeClock) {
         for node in &mut self.nodes {
             node.control.telemetry.reclaim().for_each(drop);
             let Some(first) = node.control.telemetry.take_message_request() else {
                 continue;
             };
-            let values = (|| {
-                let (civil, _) = clock.civil.ok_or(RuntimeError::Clock)?;
-                let site = node.site.snapshot(clock.now_ms);
-                let (mut links, identity) =
-                    render::direct_status(node.links.manager(), &node.control.catalog)?;
-                links.tts = render::telemetry_speech(&links.tts, &[&identity]);
-                Ok::<_, RuntimeError>(super::MessageValueSnapshot {
-                    civil,
-                    time_format: TimeFormat::try_from(node.time_format)
-                        .map_err(|_| RuntimeError::Preparation)?,
-                    node: node.name.clone(),
-                    callsign: node.settings.callsign.clone(),
-                    links,
-                    sensors: site
-                        .sensors
-                        .into_iter()
-                        .map(|(name, sensor)| {
-                            (
-                                name,
-                                crate::site::Observation {
-                                    value: sensor.current.value.map(MessageArgument::Number),
-                                    observed_at_ms: sensor.current.observed_at_ms,
-                                    quality: sensor.current.quality,
-                                },
-                            )
-                        })
-                        .collect(),
-                    inputs: site
-                        .inputs
-                        .into_iter()
-                        .map(|(name, input)| {
-                            (
-                                name,
-                                crate::site::Observation {
-                                    value: input
-                                        .value
-                                        .map(|value| MessageArgument::Number(f64::from(value))),
-                                    observed_at_ms: input.observed_at_ms,
-                                    quality: input.quality,
-                                },
-                            )
-                        })
-                        .collect(),
-                    time_remaining: None,
-                })
-            })();
+            let mut values = node.message_values(clock, &node.control.catalog);
             let mut first = Some(first);
             // At most one visit per configured recipe per pump. Fast failed retries
             // cannot monopolize the host's other control work.
@@ -1251,8 +1021,13 @@ impl<A: Send, C: Send> Runtime<A, C> {
                 };
                 let prepared = (|| {
                     let values = values
-                        .as_ref()
+                        .as_mut()
                         .map_err(|_| crate::controller::ControllerError)?;
+                    values.event = node
+                        .control
+                        .telemetry
+                        .message_event(current.attempt)
+                        .cloned();
                     let recipe = node
                         .control
                         .messages
@@ -1281,11 +1056,6 @@ impl<A: Send, C: Send> Runtime<A, C> {
         }
     }
 
-    /// Resolve an already validated site action through the ordinary typed macro contract.
-    pub fn site_macro(&self, local: &str, name: &str) -> Result<Command, RuntimeError> {
-        macro_command(&self.document, &NodeId::new(local)?, name)
-    }
-
     /// Queue a compiled named local notification; false means retry admission, not an action retry.
     pub fn queue_named_message(&mut self, local: &str, name: &str) -> Result<bool, RuntimeError> {
         let node = self
@@ -1299,11 +1069,40 @@ impl<A: Send, C: Send> Runtime<A, C> {
             .names
             .get(name)
             .ok_or(RuntimeError::Preparation)?;
+        Self::queue_local_notification(node, index)
+    }
+
+    /// Queue the alarm transition's compiled recipe for local playback.
+    pub fn queue_alarm_message(
+        &mut self,
+        local: &str,
+        alarm: &str,
+        event: crate::site::AlarmEvent,
+    ) -> Result<bool, RuntimeError> {
+        let node = self.node(local).ok_or(RuntimeError::MissingNode)?;
+        let index = *node
+            .control
+            .messages
+            .alarm_messages
+            .get(&(alarm.to_owned(), event.message_field()))
+            .ok_or(RuntimeError::Preparation)?;
+        Self::queue_local_notification(node, index)
+    }
+
+    fn queue_local_notification(
+        node: &mut RuntimeNode<A, C>,
+        index: usize,
+    ) -> Result<bool, RuntimeError> {
         node.control.telemetry.reclaim().for_each(drop);
         if !node.control.telemetry.can_queue_status() {
             return Ok(false);
         }
-        Self::queue_message_index(node, index, None)?;
+        Self::queue_routed_message(
+            node,
+            index,
+            None,
+            Some(crate::controller::PlaybackDestination::Local),
+        )?;
         Ok(true)
     }
 
@@ -1358,19 +1157,32 @@ impl<A: Send, C: Send> Runtime<A, C> {
         index: usize,
         reply: Option<crate::link::PeerReply>,
     ) -> Result<(), RuntimeError> {
+        Self::queue_routed_message(node, index, reply, None)
+    }
+    fn queue_routed_message(
+        node: &mut RuntimeNode<A, C>,
+        index: usize,
+        reply: Option<crate::link::PeerReply>,
+        destination: Option<crate::controller::PlaybackDestination>,
+    ) -> Result<(), RuntimeError> {
         node.control.telemetry.reclaim().for_each(drop);
         if reply.as_ref().is_some_and(crate::link::PeerReply::ended)
             || !node.control.telemetry.can_queue_status()
         {
             return Err(RuntimeError::Rejected);
         }
+        let event = reply
+            .as_ref()
+            .and_then(|reply| node.command_message_event(reply));
         let mut prepared = node
             .control
             .telemetry
-            .prepare_message(index)
-            .map_err(|_| RuntimeError::Preparation)?
-            .reply_to(reply);
-        if let Some((policy, delivery)) = node.control.messages.items[index].playback() {
+            .prepare_message(index, event)
+            .map_err(|_| RuntimeError::Preparation)?;
+        if let Some((mut policy, delivery)) = node.control.messages.items[index].playback() {
+            if let Some(destination) = destination {
+                policy.destination = destination;
+            }
             let deadline = node
                 .control
                 .activity
@@ -1378,7 +1190,17 @@ impl<A: Send, C: Send> Runtime<A, C> {
                 .saturating_add(delivery.maximum_wait_ms.saturating_mul(48));
             prepared = prepared
                 .with_playback_policy(policy)
-                .with_delivery(deadline, delivery);
+                .with_delivery(deadline, delivery)
+                .wait_for_unkey(reply);
+        } else if let Some(destination) = destination {
+            prepared = prepared
+                .with_playback_policy(crate::controller::PlaybackPolicy {
+                    destination,
+                    ..Default::default()
+                })
+                .wait_for_unkey(reply);
+        } else {
+            prepared = prepared.reply_to(reply);
         }
         // Only this serialized producer can consume the capacity admitted above.
         assert!(node.control.telemetry.queue_prepared_status(prepared));
@@ -1441,6 +1263,47 @@ impl<A: Send, C: Send> Runtime<A, C> {
             .iter_mut()
             .find(|node| node.name == local)
             .ok_or(RuntimeError::MissingNode)?;
+        Self::private_status_stream(node, &text, &spoken)
+    }
+    /// Prepare the originating station's own link announcement for one authenticated call.
+    pub fn prepare_phone_link_event(
+        &mut self,
+        local: &str,
+        remote: &str,
+        connected: bool,
+        echo_callsign: Option<&str>,
+        reply: &crate::link::PeerReply,
+    ) -> Result<Option<Box<dyn crate::audio::PcmStreamReader>>, RuntimeError> {
+        if reply.phone_source().is_none() || !reply.phone_authenticated() {
+            return Err(RuntimeError::Rejected);
+        }
+        let echo_node = echo_callsign
+            .map(|_| crate::link::EchoAlias::parse(remote).map(|node| node.to_string()))
+            .transpose()
+            .map_err(|_| RuntimeError::Rejected)?;
+        let echo = echo_node.as_deref().zip(echo_callsign);
+        let (_, label, wire) = self.link_notice_endpoint(remote, Self::link_notice_protocol(echo));
+        let node = self.node(local).ok_or(RuntimeError::MissingNode)?;
+        if wire && node.links.suppresses_member_notice(&label, connected) {
+            return Ok(None);
+        }
+        let message = if connected {
+            Message::PeerConnectedLocal { peer: &label }
+        } else {
+            Message::PeerDisconnectedLocal { peer: &label }
+        };
+        let forms =
+            Self::link_event_forms(node, &message, echo, &[if wire { &label } else { "" }])?;
+        forms
+            .map(|(morse, spoken)| Self::private_status_stream(node, &morse, &spoken))
+            .transpose()
+    }
+
+    fn private_status_stream(
+        node: &mut RuntimeNode<A, C>,
+        morse: &str,
+        spoken: &str,
+    ) -> Result<Box<dyn crate::audio::PcmStreamReader>, RuntimeError> {
         prepare::status_stream(
             node.control
                 .media_session
@@ -1448,10 +1311,90 @@ impl<A: Send, C: Send> Runtime<A, C> {
                 .ok_or(RuntimeError::Preparation)?
                 .as_mut(),
             &node.status,
-            &text,
-            &spoken,
+            morse,
+            spoken,
         )
     }
+
+    /// Queue a current local station dial failure under the originating command's actual permit.
+    pub fn queue_phone_dial_failure(
+        &mut self,
+        local: &str,
+        status: u32,
+        current: impl Fn() -> bool + Send + 'static,
+    ) -> Result<(), RuntimeError> {
+        use crate::{
+            audio::{PcmRead, PcmStreamReader},
+            controller::{PlaybackPolicy, PreparedMedia},
+        };
+        struct Spoken<F> {
+            stream: Box<dyn PcmStreamReader>,
+            current: F,
+        }
+        impl<F: Fn() -> bool + Send> PcmStreamReader for Spoken<F> {
+            fn start(&mut self) {
+                self.stream.start();
+            }
+            fn rewind(&mut self) {
+                self.stream.rewind();
+            }
+            fn defer_before_output(&mut self) -> bool {
+                self.stream.defer_before_output()
+            }
+            fn cancel(&mut self) {
+                self.stream.cancel();
+            }
+            fn render(&mut self, output: &mut [f32]) -> PcmRead {
+                if !(self.current)() {
+                    self.stream.cancel();
+                    return PcmRead::Finished;
+                }
+                let result = self.stream.render(output);
+                if (self.current)() {
+                    result
+                } else {
+                    output.fill(0.0);
+                    self.stream.cancel();
+                    PcmRead::Finished
+                }
+            }
+        }
+        if !current() {
+            return Err(RuntimeError::Rejected);
+        }
+        let node = self
+            .nodes
+            .iter_mut()
+            .find(|node| node.name == local)
+            .ok_or(RuntimeError::MissingNode)?;
+        node.control.telemetry.reclaim().for_each(drop);
+        if !node.control.telemetry.can_queue_status() {
+            return Err(RuntimeError::Busy);
+        }
+        let forms = node
+            .control
+            .catalog
+            .format(&Message::PhoneDialFailure { status })
+            .map_err(|_| RuntimeError::Preparation)?;
+        let mut source = prepare::status_source(&node.status, &forms.morse, &forms.tts);
+        source.morse = None;
+        let stream = node
+            .control
+            .media_session
+            .as_mut()
+            .ok_or(RuntimeError::Unavailable)?
+            .register_once(source)
+            .map_err(|_| RuntimeError::Preparation)?;
+        let media = PreparedMedia::new_stream(Box::new(Spoken { stream, current }))
+            .map_err(|_| RuntimeError::Preparation)?
+            .with_playback_policy(PlaybackPolicy::default());
+        node.control
+            .telemetry
+            .queue_prepared_status(media)
+            .then_some(())
+            .ok_or(RuntimeError::Busy)
+    }
+
     /// Prepare credential-free authentication wording for a live private Phone token.
     /// The caller must retain its exact call owner and queue this stream only to
     /// that call. Login deliberately needs no prior mailbox authentication.
@@ -1464,6 +1407,14 @@ impl<A: Send, C: Send> Runtime<A, C> {
         if reply.phone_source().is_none() || reply.ended() {
             return Err(RuntimeError::Rejected);
         }
+        self.prepare_private_phone_message(local, Message::PhoneAuthentication { prompt })
+    }
+
+    fn prepare_private_phone_message(
+        &mut self,
+        local: &str,
+        message: Message<'_>,
+    ) -> Result<Box<dyn crate::audio::PcmStreamReader>, RuntimeError> {
         let node = self
             .nodes
             .iter_mut()
@@ -1472,19 +1423,23 @@ impl<A: Send, C: Send> Runtime<A, C> {
         let forms = node
             .control
             .catalog
-            .format(&crate::messages::Message::PhoneAuthentication { prompt })
+            .format(&message)
             .map_err(|_| RuntimeError::Preparation)?;
-        prepare::status_stream(
-            node.control
-                .media_session
-                .as_mut()
-                .ok_or(RuntimeError::Preparation)?
-                .as_mut(),
-            &node.status,
-            &forms.morse,
-            &forms.tts,
-        )
+        Self::private_status_stream(node, &forms.morse, &forms.tts)
     }
+    /// Prepare a fixed outcome for the authenticated private recipient only.
+    pub fn prepare_phone_operation_result(
+        &mut self,
+        local: &str,
+        result: crate::messages::OperationResult,
+        reply: &crate::link::PeerReply,
+    ) -> Result<Box<dyn crate::audio::PcmStreamReader>, RuntimeError> {
+        if reply.phone_source().is_none() || !reply.phone_authenticated() {
+            return Err(RuntimeError::Rejected);
+        }
+        self.prepare_private_phone_message(local, Message::OperationResult { result })
+    }
+
     fn status_forms(
         &self,
         local: &str,
@@ -1571,6 +1526,15 @@ impl<A: Send, C: Send> Runtime<A, C> {
     ) -> Result<(), RuntimeError> {
         self.queue_link_rejection(local, peer, reply, Message::LoopRejected { node: peer })
     }
+    /// Return a fixed recognized-command outcome only on the issuing local transmitter.
+    pub fn queue_operation_result(
+        &mut self,
+        local: &str,
+        result: crate::messages::OperationResult,
+    ) -> Result<(), RuntimeError> {
+        self.queue_link_rejection(local, "", None, Message::OperationResult { result })
+    }
+
     /// Explain a stopped macro only to the issuing RF or exact peer endpoint.
     pub fn queue_macro_stopped(
         &mut self,
@@ -1605,22 +1569,46 @@ impl<A: Send, C: Send> Runtime<A, C> {
             .iter_mut()
             .find(|node| node.name == local)
             .ok_or(RuntimeError::MissingNode)?;
-        let forms = node
-            .control
-            .catalog
-            .format(&message)
-            .map_err(|_| RuntimeError::Preparation)?;
-        let spoken = render::telemetry_speech(&forms.tts, &[peer]);
+        let (morse, spoken) = Self::link_rejection_forms(&node.control.catalog, &message, peer)?;
         queue_status_media(
             &mut node.control.telemetry,
             &mut node.control.media_session,
             &node.status,
-            &forms.morse,
+            &morse,
             &spoken,
             reply,
             None,
         )
     }
+
+    fn prepare_phone_link_rejection(
+        &mut self,
+        local: &str,
+        peer: &str,
+        reply: crate::link::PeerReply,
+        message: Message<'_>,
+    ) -> Result<LinkEffect, RuntimeError> {
+        if !reply.phone_authenticated() {
+            return Err(RuntimeError::Rejected);
+        }
+        let node = self.node(local).ok_or(RuntimeError::MissingNode)?;
+        let (morse, spoken) = Self::link_rejection_forms(&node.control.catalog, &message, peer)?;
+        let stream = Self::private_status_stream(node, &morse, &spoken)?;
+        Ok(LinkEffect::PrivatePhoneMedia(reply, stream))
+    }
+
+    fn link_rejection_forms(
+        catalog: &MessageCatalog,
+        message: &Message<'_>,
+        peer: &str,
+    ) -> Result<(String, String), RuntimeError> {
+        let forms = catalog
+            .format(message)
+            .map_err(|_| RuntimeError::Preparation)?;
+        let spoken = render::telemetry_speech(&forms.tts, &[peer]);
+        Ok((forms.morse, spoken))
+    }
+
     /// Queue one direct-link lifecycle event from every configured node's perspective.
     ///
     /// Each node is attempted independently so one unavailable speech provider or full
@@ -1633,7 +1621,8 @@ impl<A: Send, C: Send> Runtime<A, C> {
         second: &str,
         connected: bool,
     ) -> Result<(), RuntimeError> {
-        self.queue_link_event_with_echo(first, second, connected, None)
+        self.queue_command_link_event(first, second, connected, None)
+            .map(|_| ())
     }
     /// Use the owning QSO's validated callsign and full real ID, while retaining
     /// ordinary local/third-party wording, politeness and reconnect cancellation.
@@ -1644,56 +1633,177 @@ impl<A: Send, C: Send> Runtime<A, C> {
         callsign: &str,
         connected: bool,
     ) -> Result<(), RuntimeError> {
-        let node = crate::link::EchoAlias::parse(second)
-            .map_err(|_| RuntimeError::Rejected)?
-            .to_string();
-        self.queue_link_event_with_echo(first, second, connected, Some((&node, callsign)))
+        self.queue_command_link_event(first, second, connected, Some(callsign))
+            .map(|_| ())
     }
-    fn queue_link_event_with_echo(
+
+    /// Queue the ordinary lifecycle message and report whether it applied at the owning port.
+    pub fn queue_command_link_event(
         &mut self,
         first: &str,
         second: &str,
         connected: bool,
-        echo: Option<(&str, &str)>,
-    ) -> Result<(), RuntimeError> {
+        echo_callsign: Option<&str>,
+    ) -> Result<bool, RuntimeError> {
+        let echo_node = echo_callsign
+            .map(|_| crate::link::EchoAlias::parse(second).map(|node| node.to_string()))
+            .transpose()
+            .map_err(|_| RuntimeError::Rejected)?;
+        self.queue_link_event_with_echo(
+            first,
+            second,
+            connected,
+            echo_node.as_deref().zip(echo_callsign),
+        )
+    }
+    /// Invalidate a superseded disconnect notice for a caller's privately confirmed connect.
+    pub fn cancel_link_disconnect_notice(
+        &mut self,
+        first: &str,
+        second: &str,
+        protocol: crate::link::ProtocolId,
+    ) {
+        let (first, _, _) = self.link_notice_endpoint(first, protocol);
+        let (second, _, _) = self.link_notice_endpoint(second, protocol);
         let (lower, upper) = if first <= second {
-            (first, second)
+            (first.as_str(), second.as_str())
         } else {
-            (second, first)
+            (second.as_str(), first.as_str())
         };
+        self.prune_disconnect_notices(Some((lower, upper, protocol)));
+    }
+
+    fn prune_disconnect_notices(
+        &mut self,
+        connected: Option<(&str, &str, crate::link::ProtocolId)>,
+    ) {
         self.disconnect_notices.retain(|notice| {
             let Some(cancellation) = notice.cancellation.upgrade() else {
                 return false;
             };
-            if connected && notice.first == lower && notice.second == upper {
+            if connected
+                == Some((
+                    notice.first.as_str(),
+                    notice.second.as_str(),
+                    notice.protocol,
+                ))
+            {
                 cancellation.store(true, Ordering::Release);
                 false
             } else {
                 true
             }
         });
+    }
+
+    // Pair cancellation and listener ownership use stable IDs. Only actual wire identities
+    // participate in group membership or receive node-number spelling.
+    fn link_notice_endpoint(
+        &self,
+        endpoint: &str,
+        protocol: crate::link::ProtocolId,
+    ) -> (String, String, bool) {
+        let asl = protocol == crate::link::ProtocolId::AllStarLink;
+        let slot = if asl {
+            self.network_owner(endpoint).unwrap_or(endpoint)
+        } else {
+            endpoint
+        };
+        let Some(node) = self.nodes.iter().find(|node| node.name == slot) else {
+            return (endpoint.to_owned(), endpoint.to_owned(), true);
+        };
+        if asl && let Some(number) = node.network_account() {
+            return (slot.to_owned(), number.to_owned(), true);
+        }
+        let port = self
+            .modular_configuration()
+            .and_then(|config| config.protocols.port(slot.parse().ok()?));
+        let display = port
+            .map(|p| {
+                if p.metadata.name.is_empty() {
+                    p.key.as_str()
+                } else {
+                    &p.metadata.name
+                }
+            })
+            .unwrap_or(endpoint);
+        (slot.to_owned(), display.to_owned(), false)
+    }
+    fn link_notice_protocol(echo: Option<(&str, &str)>) -> crate::link::ProtocolId {
+        if echo.is_some() {
+            crate::link::ProtocolId::EchoLink
+        } else {
+            crate::link::ProtocolId::AllStarLink
+        }
+    }
+
+    fn link_event_forms(
+        node: &RuntimeNode<A, C>,
+        message: &Message<'_>,
+        echo: Option<(&str, &str)>,
+        wire_nodes: &[&str],
+    ) -> Result<Option<(String, String)>, RuntimeError> {
+        let forms = if let Some((number, callsign)) = echo {
+            node.control
+                .catalog
+                .format_echo_peer(node.echo_announcement, number, callsign, message)
+        } else {
+            node.control.catalog.format(message).map(Some)
+        };
+        let forms = forms.map_err(|_| RuntimeError::Preparation)?;
+        Ok(forms.map(|forms| {
+            (
+                forms.morse,
+                render::telemetry_speech(&forms.tts, wire_nodes),
+            )
+        }))
+    }
+
+    fn queue_link_event_with_echo(
+        &mut self,
+        first: &str,
+        second: &str,
+        connected: bool,
+        echo: Option<(&str, &str)>,
+    ) -> Result<bool, RuntimeError> {
+        let protocol = Self::link_notice_protocol(echo);
+        let (first_id, first_label, first_wire) = self.link_notice_endpoint(first, protocol);
+        let (second_id, second_label, second_wire) = self.link_notice_endpoint(second, protocol);
+        let (lower, upper) = if first_id <= second_id {
+            (first_id.as_str(), second_id.as_str())
+        } else {
+            (second_id.as_str(), first_id.as_str())
+        };
+        let (first, second) = (first_label.as_str(), second_label.as_str());
+        self.prune_disconnect_notices(connected.then_some((lower, upper, protocol)));
         let cancellation = (!connected).then(|| Arc::new(AtomicBool::new(false)));
         if let Some(cancellation) = &cancellation {
             self.disconnect_notices.push(DisconnectNotice {
                 first: lower.to_owned(),
                 second: upper.to_owned(),
+                protocol,
                 cancellation: Arc::downgrade(cancellation),
             });
         }
         let mut failure = None;
+        let mut local_notice = false;
         for node in &mut self.nodes {
-            if (node.name == first && node.links.is_group_member(second))
-                || (node.name == second && node.links.is_group_member(first))
+            if (node.name == first_id
+                && second_wire
+                && node.links.suppresses_member_notice(second, connected))
+                || (node.name == second_id
+                    && first_wire
+                    && node.links.suppresses_member_notice(first, connected))
             {
                 continue;
             }
-            let message = if node.name == first {
+            let message = if node.name == first_id {
                 if connected {
                     Message::PeerConnectedLocal { peer: second }
                 } else {
                     Message::PeerDisconnectedLocal { peer: second }
                 }
-            } else if node.name == second {
+            } else if node.name == second_id {
                 if connected {
                     Message::PeerConnectedLocal { peer: first }
                 } else {
@@ -1704,40 +1814,35 @@ impl<A: Send, C: Send> Runtime<A, C> {
             } else {
                 Message::PeerDisconnectedThirdParty { first, second }
             };
-            let forms = if let Some((number, callsign)) = echo {
-                let identity = NodeId::new(&node.name).expect("configured station");
-                let account = crate::config::EchoLinkSettings::resolve(&self.document, &identity)
-                    .expect("validated account settings")
-                    .value;
-                node.control.catalog.format_echo_peer(
-                    account.announcement,
-                    number,
-                    callsign,
-                    &message,
+            let queued = Self::link_event_forms(
+                node,
+                &message,
+                echo,
+                &[
+                    if first_wire { first } else { "" },
+                    if second_wire { second } else { "" },
+                ],
+            )
+            .and_then(|forms| {
+                let Some((morse, spoken)) = forms else {
+                    return Ok(());
+                };
+                local_notice |= node.name == first_id;
+                queue_status_media(
+                    &mut node.control.telemetry,
+                    &mut node.control.media_session,
+                    &node.status,
+                    &morse,
+                    &spoken,
+                    None,
+                    cancellation.clone(),
                 )
-            } else {
-                node.control.catalog.format(&message).map(Some)
-            };
-            let queued = forms
-                .map_err(|_| RuntimeError::Preparation)
-                .and_then(|forms| {
-                    let Some(forms) = forms else { return Ok(()) };
-                    let spoken = render::telemetry_speech(&forms.tts, &[first, second]);
-                    queue_status_media(
-                        &mut node.control.telemetry,
-                        &mut node.control.media_session,
-                        &node.status,
-                        &forms.morse,
-                        &spoken,
-                        None,
-                        cancellation.clone(),
-                    )
-                });
+            });
             if let Err(error) = queued {
                 failure = Some(error);
             }
         }
-        failure.map_or(Ok(()), Err)
+        failure.map_or(Ok(local_notice), Err)
     }
     /// Queue only a group's first active selection and transitions to complete unavailability.
     /// Member connects, recovery attempts, and later winner changes stay silent.
@@ -1745,16 +1850,25 @@ impl<A: Send, C: Send> Runtime<A, C> {
         let mut failure = None;
         for node in &mut self.nodes {
             let groups = node.links.priority_groups();
-            node.group_announcements
-                .retain(|previous| groups.iter().any(|group| group.label == previous.label));
+            node.group_announcements.retain_mut(|previous| {
+                let current = groups.iter().find(|group| {
+                    group.label == previous.label && same_group_configuration(Some(previous), group)
+                });
+                if current.is_none_or(|group| !group.unavailable)
+                    && let Some(notice) = previous.outage_notice.take()
+                {
+                    notice.store(true, Ordering::Release);
+                }
+                current.is_some()
+            });
             for group in groups {
                 let previous = node
                     .group_announcements
                     .iter()
                     .find(|previous| previous.label == group.label);
-                let same_configuration = same_group_configuration(previous, &group);
+                let same_configuration = previous.is_some();
                 let previously_available =
-                    same_configuration && previous.is_some_and(|previous| previous.available);
+                    previous.is_some_and(|previous| previous.outage_notice.is_none());
                 let message = if group.selected.is_some() && !same_configuration {
                     Some(Message::PriorityGroupSelected {
                         group: &group.name,
@@ -1769,7 +1883,10 @@ impl<A: Send, C: Send> Runtime<A, C> {
                 } else {
                     None
                 };
+                let mut outage_notice =
+                    previous.and_then(|previous| previous.outage_notice.clone());
                 if let Some(message) = message {
+                    outage_notice = group.unavailable.then(|| Arc::new(AtomicBool::new(false)));
                     let queued = node
                         .control
                         .catalog
@@ -1787,7 +1904,7 @@ impl<A: Send, C: Send> Runtime<A, C> {
                                 &forms.morse,
                                 &spoken,
                                 None,
-                                None,
+                                outage_notice.clone(),
                             )
                         });
                     if let Err(error) = queued {
@@ -1801,7 +1918,7 @@ impl<A: Send, C: Send> Runtime<A, C> {
                     label: group.label,
                     name: group.name,
                     members: group.members,
-                    available: group.selected.is_some(),
+                    outage_notice,
                 };
                 if let Some(previous) = node
                     .group_announcements
@@ -1837,9 +1954,10 @@ impl<A: Send, C: Send> Runtime<A, C> {
         operation: &DigitOperation,
         now_ms: u64,
     ) {
-        if !operation
-            .remote
-            .is_some_and(|request| request.administrative())
+        if !operation.audible_source()
+            || !operation
+                .remote
+                .is_some_and(|request| request.administrative())
         {
             return;
         }
@@ -1931,7 +2049,10 @@ impl<A: Send, C: Send> Runtime<A, C> {
             self.tick_links(clock);
         }
         let node = self.node(local).ok_or(RuntimeError::MissingNode)?;
-        let work = node.work().ok_or(RuntimeError::Rejected)?;
+        let work = match &operation.action_permit {
+            Some(permit) => permit.generation.reserve(),
+            None => node.work().ok_or(RuntimeError::Rejected)?,
+        };
         let reply = operation.reply.clone();
         let origin = operation.origin.clone();
         let mut effect = node
@@ -2041,29 +2162,6 @@ impl<A: Send, C: Send> Runtime<A, C> {
             .authorize(remote, verified)
             .map_err(RuntimeError::Link)
     }
-    /// Execute a still-current event macro only after its optional message was admitted.
-    pub fn event_command(
-        &mut self,
-        dispatch: &RuntimeDispatch,
-        clock: RuntimeClock,
-    ) -> Result<LinkEffect, RuntimeError> {
-        let scheduler = self.scheduler.as_mut().ok_or(RuntimeError::Rejected)?;
-        if !scheduler.current(&dispatch.token)
-            || ((dispatch.morse.is_some() || dispatch.recipe.is_some())
-                && !scheduler.is_message_queued(&dispatch.token))
-        {
-            return Err(RuntimeError::Rejected);
-        }
-        let Some(command) = dispatch.operation().cloned() else {
-            return Ok(LinkEffect::None);
-        };
-        self.command(
-            dispatch.local(),
-            DigitOperation::new(command, None),
-            clock,
-            false,
-        )
-    }
     /// Revalidate a slow dial against the current node, generation, topology, access and clock.
     pub fn finish_connect(
         &mut self,
@@ -2097,7 +2195,7 @@ impl<A: Send, C: Send> Runtime<A, C> {
     /// Gate all new work, stop devices and emit peer teardown effects; return true only when reclaimed.
     pub fn stop(&mut self, now_ms: u64) -> bool {
         self.stopping = true;
-        self.scheduler = None;
+        self.shared_site = None;
         if self.pending_reload.is_some() {
             for node in &mut self.nodes {
                 node.host.control().stop(now_ms).ok();
@@ -2149,6 +2247,7 @@ fn stop_node<A: Send, C: Send>(
     now_ms: u64,
     effects: &mut Vec<(String, LinkEffect)>,
 ) {
+    node.programs = Default::default();
     let before = node.status(now_ms);
     node.host.control().stop(now_ms).ok();
     let peers = node.links.close();
@@ -2174,145 +2273,6 @@ fn stop_node<A: Send, C: Send>(
         }
     }
 }
-
-fn prepare_events(
-    document: &ConfigDocument,
-    node: &NodeId,
-    recipes: &super::composition::MessageRecipes,
-) -> Result<Vec<Event>, RuntimeError> {
-    let mut events = Vec::new();
-    for label in prepare::labels(document, "event", node.as_str()) {
-        let event = ResolvedEventSettings::resolve(document, node, label)?.value;
-        let text = if event.composed.is_some() {
-            None
-        } else if !event.message.is_empty() {
-            Some(event.message)
-        } else if !event.template.is_empty() {
-            Some(
-                ResolvedTemplateSettings::resolve(document, Some(node), &event.template)?
-                    .value
-                    .text,
-            )
-        } else {
-            None
-        };
-        let template = text
-            .map(|text| MessageTemplate::parse(&text).map_err(|_| RuntimeError::Preparation))
-            .transpose()?;
-        let operation = if event.macro_name.is_empty() {
-            None
-        } else {
-            Some(macro_command(document, node, &event.macro_name)?)
-        };
-        events.push(Event {
-            spec: EventSpec {
-                local: node.as_str().into(),
-                name: label.into(),
-                trigger: crate::schedule::EventTrigger::parse(&event.at, event.days.as_deref())
-                    .map_err(|_| RuntimeError::Preparation)?,
-                media: template.is_some() || recipes.events.contains_key(label),
-            },
-            template,
-            operation,
-            recipe: recipes.events.get(label).copied(),
-            delivery: event.delivery,
-            playback: event.playback,
-        });
-    }
-    Ok(events)
-}
-fn macro_command(
-    document: &ConfigDocument,
-    node: &NodeId,
-    name: &str,
-) -> Result<Command, RuntimeError> {
-    let settings = ResolvedMacroSettings::resolve(document, Some(node), name)?.value;
-    Ok(Command {
-        action: match settings.action() {
-            crate::schedule::ScheduledAction::Connect => LinkAction::Transceive,
-            crate::schedule::ScheduledAction::Disconnect => LinkAction::Disconnect,
-            crate::schedule::ScheduledAction::DisconnectAll => LinkAction::DisconnectAll,
-            crate::schedule::ScheduledAction::ReconnectAll => LinkAction::ReconnectAll,
-        },
-        node: settings.target_node,
-    })
-}
-fn prepare_links(
-    document: &ConfigDocument,
-    node: &NodeId,
-    generation: u64,
-    previous: Option<&LinkScheduler>,
-) -> Result<LinkScheduler, RuntimeError> {
-    let mut routes = Vec::new();
-    let mut permanent = Vec::new();
-    let mut windows = Vec::new();
-    for label in prepare::labels(document, "permanent", node.as_str()) {
-        let settings = ResolvedPermanentLinkSettings::resolve(document, node, label)?.value;
-        let start = routes.len();
-        for (priority, remote) in settings.remote_nodes.into_iter().enumerate() {
-            routes.push(RouteSpec {
-                local: node.as_str().into(),
-                remote,
-                permanent: true,
-                group_label: Some(settings.name.clone()),
-                group_name: settings.group_name.clone(),
-                group_priority: Some(priority),
-            });
-        }
-        permanent.push((label.to_owned(), (start..routes.len()).collect::<Vec<_>>()));
-    }
-    for label in prepare::labels(document, "schedule", node.as_str()) {
-        let settings = ResolvedScheduleSettings::resolve(document, node, label)?.value;
-        let replaced = permanent
-            .iter()
-            .find(|(label, _)| label == &settings.replace_permanent)
-            .map(|(_, indices)| indices.clone())
-            .ok_or(RuntimeError::Preparation)?;
-        // Schema validation rejects permanent conflicts and overlapping scheduled peers.
-        let first_route = routes.len();
-        let group_label = format!("schedule:{}", settings.name);
-        let group_name = Some(settings.group_name.unwrap_or_else(|| settings.name.clone()));
-        for (priority, remote) in settings.remote_nodes.into_iter().enumerate() {
-            routes.push(RouteSpec {
-                local: node.as_str().into(),
-                remote,
-                permanent: false,
-                group_label: Some(group_label.clone()),
-                group_name: group_name.clone(),
-                group_priority: Some(priority),
-            });
-        }
-        let scheduled_routes = (first_route..routes.len()).collect();
-        windows.push(ReplacementSpec {
-            routes: scheduled_routes,
-            replaced,
-            window: ScheduledWindow::parse(
-                Some(&settings.days),
-                Some(&settings.dates),
-                &settings.start_time,
-                &settings.end_time,
-            )
-            .map_err(|_| RuntimeError::Preparation)?,
-            end_inactivity_ms: settings.end_inactivity_ms,
-            warning_before_start_ms: if settings.warning_message_id.is_some() {
-                settings.warning_before_start_ms
-            } else {
-                Vec::new()
-            },
-            warning_before_end_ms: if settings.warning_message_id.is_some() {
-                settings.warning_before_end_ms
-            } else {
-                Vec::new()
-            },
-            warning_message_id: settings.warning_message_id,
-        });
-    }
-    LinkScheduler::new(generation, routes, windows, previous).map_err(|_| RuntimeError::Preparation)
-}
-
-#[cfg(test)]
-#[path = "aggregate_link_tests.rs"]
-mod link_tests;
 
 #[cfg(test)]
 mod group_announcement_tests {
@@ -2340,7 +2300,7 @@ mod group_announcement_tests {
             label: "network".into(),
             name: "Blind Hams".into(),
             members: vec!["2000".into(), "3000".into()],
-            available: false,
+            outage_notice: None,
         };
         assert!(same_group_configuration(Some(&previous), &current));
 

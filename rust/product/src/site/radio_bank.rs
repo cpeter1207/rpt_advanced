@@ -2,7 +2,10 @@
 use super::*;
 use crate::site::acquisition::OutputStatus;
 use rpt_advanced_core::{
-    config::{ResolvedSiteSettings, SiteEndpoint},
+    config::{
+        ResolvedSiteSettings, SiteEndpoint,
+        resources::profiles::equipment::{BoundInterface, InterfaceObservation},
+    },
     site::{FanOutput, SiteObservations},
 };
 use std::collections::{BTreeMap, BTreeSet};
@@ -30,6 +33,7 @@ struct Replacement {
 #[derive(Default)]
 struct Bank {
     inputs: Vec<Input>,
+    observation_clock: Option<(u64, u64)>,
     outputs: Vec<Output>,
     generation: u64,
     pending: Option<Pending>,
@@ -40,6 +44,8 @@ struct Bank {
     error: Option<ReadingQuality>,
 }
 struct Input {
+    sensor: bool,
+    stale_ms: u64,
     node: String,
     name: String,
     mask: u32,
@@ -102,8 +108,33 @@ impl Bank {
     }
     fn observe(&mut self, snapshot: &abi::UrpAstSiteSnapshot, now_ms: u64) {
         self.settled = false;
+        let observed = (snapshot.generation != 0 && snapshot.observed_at_valid == 1)
+            .then(|| snapshot.snapshot_at_ms.checked_sub(snapshot.observed_at_ms))
+            .flatten()
+            .map(|age| {
+                let local = match self.observation_clock {
+                    Some((stamp, local)) if stamp == snapshot.observed_at_ms => local,
+                    _ => now_ms.saturating_sub(age),
+                };
+                self.observation_clock = Some((snapshot.observed_at_ms, local));
+                local
+            });
         for value in &mut self.inputs {
             value.reading = input(snapshot, value.mask, value.active_high, now_ms);
+            if let (Some(local), Some(_)) = (observed, value.reading.observed_at_ms) {
+                value.reading.observed_at_ms = Some(local);
+                if snapshot.input_quality == 1 {
+                    value.reading.quality = if now_ms
+                        .saturating_sub(local)
+                        .max(snapshot.snapshot_at_ms - snapshot.observed_at_ms)
+                        >= value.stale_ms
+                    {
+                        ReadingQuality::Stale
+                    } else {
+                        ReadingQuality::Valid
+                    };
+                }
+            }
         }
         if snapshot.generation == 0 {
             self.pending = None;
@@ -312,6 +343,7 @@ impl RadioSite {
                     }
                 }
                 if !next.replaced.contains(&key.0) {
+                    bank.observation_clock = old.observation_clock;
                     bank.pending = old.pending;
                     bank.touched = old.touched;
                 }
@@ -337,19 +369,45 @@ impl RadioSite {
     ) -> Result<Self, ReadingQuality> {
         let mut result = Self::default();
         for (node, settings) in settings {
-            for input in settings.inputs.iter().filter(|input| input.enabled) {
-                if let Some(endpoint) = input.endpoint.as_ref().filter(|endpoint| radio(endpoint)) {
-                    let (bank, mask) = pin(endpoint.backend, &endpoint.channel, false)?;
+            let inputs = settings.inputs.iter().filter(|i| i.enabled).map(|i| {
+                (
+                    &i.name,
+                    i.active_high,
+                    i.endpoint.as_ref(),
+                    i.interface.as_ref(),
+                    false,
+                    5000,
+                )
+            });
+            let sensors = settings
+                .sensors
+                .iter()
+                .filter(|s| s.enabled && s.interface.is_some())
+                .map(|s| {
+                    (
+                        &s.name,
+                        true,
+                        None,
+                        s.interface.as_ref(),
+                        true,
+                        s.stale_after_ms,
+                    )
+                });
+            for (name, active_high, endpoint, interface, sensor, stale_ms) in inputs.chain(sensors)
+            {
+                if let Some((owner, bank, mask)) = owned_pin(endpoint, interface, false)? {
                     result
                         .banks
-                        .entry((endpoint.device.clone(), bank))
+                        .entry((owner, bank))
                         .or_default()
                         .inputs
                         .push(Input {
+                            sensor,
+                            stale_ms,
                             node: node.clone(),
-                            name: input.name.clone(),
+                            name: name.clone(),
                             mask,
-                            active_high: input.active_high,
+                            active_high,
                             reading: Observation {
                                 value: None,
                                 observed_at_ms: None,
@@ -359,13 +417,10 @@ impl RadioSite {
                 }
             }
             for output in settings.outputs.iter().filter(|output| output.enabled) {
-                if let Some(endpoint) = output.endpoint.as_ref().filter(|endpoint| radio(endpoint))
+                if let Some((owner, bank, mask)) =
+                    owned_pin(output.endpoint.as_ref(), output.interface.as_ref(), true)?
                 {
-                    let (bank, mask) = pin(endpoint.backend, &endpoint.channel, true)?;
-                    let bank = result
-                        .banks
-                        .entry((endpoint.device.clone(), bank))
-                        .or_default();
+                    let bank = result.banks.entry((owner, bank)).or_default();
                     if bank.mask() & mask != 0 {
                         return Err(ReadingQuality::Fault);
                     }
@@ -425,11 +480,17 @@ impl RadioSite {
                 }
             }
             for input in &bank.inputs {
-                observations
-                    .entry(input.node.clone())
-                    .or_default()
-                    .inputs
-                    .insert(input.name.clone(), input.reading.clone());
+                let target = observations.entry(input.node.clone()).or_default();
+                if input.sensor {
+                    target.sensors.insert(
+                        input.name.clone(),
+                        InterfaceObservation::Boolean(input.reading.clone()).sensor(),
+                    );
+                } else {
+                    target
+                        .inputs
+                        .insert(input.name.clone(), input.reading.clone());
+                }
             }
             for output in bank.outputs.iter().filter(|output| output.observed) {
                 observations
@@ -470,6 +531,23 @@ impl RadioSite {
             .map(|output| output.status.clone())
     }
 }
+fn owned_pin(
+    endpoint: Option<&SiteEndpoint>,
+    interface: Option<&BoundInterface>,
+    output: bool,
+) -> Result<Option<(String, u32, u32)>, ReadingQuality> {
+    if let Some(reference) = interface {
+        return Ok(property_pin(&reference.property, output)?
+            .map(|(bank, mask)| (reference.port.to_string(), bank, mask)));
+    }
+    let Some(e) = endpoint.filter(|e| radio(e)) else {
+        return Ok(None);
+    };
+    let (owner, backend, line) = (e.device.as_str(), e.backend, e.channel.as_str());
+    let (bank, mask) = pin(backend, line, output)?;
+    Ok(Some((owner.into(), bank, mask)))
+}
+
 fn radio(endpoint: &SiteEndpoint) -> bool {
     matches!(endpoint.backend, SiteBackend::Cm119 | SiteBackend::Parallel)
 }

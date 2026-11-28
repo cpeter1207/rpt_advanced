@@ -3,6 +3,7 @@
 mod announcement;
 mod courtesy;
 mod message;
+mod observation;
 mod parrot;
 mod tail;
 mod telemetry;
@@ -23,6 +24,7 @@ use courtesy::CourtesyPlanner;
 pub use courtesy::CourtesySettings;
 pub(crate) use message::MessagePreparation;
 pub use message::{MessageAttemptId, MessageCompletion, MessageRequest};
+pub use observation::{TelemetryObservation, TelemetryPhase};
 pub use parrot::{CapturedParrot, ParrotLevels};
 use parrot::{ParrotAck, ParrotCapture, ParrotLifecycle, ParrotRequest};
 use std::sync::{
@@ -60,6 +62,10 @@ pub struct Identifier {
 /// Resolved node timing and transmit settings; native audio is always 48 kHz.
 #[derive(Default)]
 pub struct ControllerSettings {
+    /// Suppress programme and carrier from the local receiver before routing.
+    pub receive_disabled: bool,
+    /// Suppress local transmitter programme, PTT and tone demand.
+    pub transmit_disabled: bool,
     /// Enable fixed-capacity receive burst capture for parrot playback.
     pub parrot_enabled: bool,
     /// Allow local receive while transmitting and repeat local receive audio.
@@ -82,6 +88,23 @@ pub struct ControllerSettings {
     pub status_morse: MorseSettings,
 }
 
+/// Callback-local PCM scratch for the actual transmit mix and admitted receive contribution.
+/// These spans are observations of the existing mix and do not participate in routing.
+pub struct LocalTransmitBranches<'a> {
+    /// Qualified local receive programme entering the station.
+    pub station_input: &'a mut [f32],
+    /// Voice admitted to the final controller combine.
+    pub voice: &'a mut [f32],
+    /// Locally routed public telemetry entering the ducking stage.
+    pub public_telemetry_input: &'a mut [f32],
+    /// Locally routed public telemetry immediately before the final combine.
+    pub public_telemetry: &'a mut [f32],
+    /// Public text scratch filled by the local media producer and gated before combine.
+    pub incoming_text: &'a mut [f32],
+    /// Actual local signaling replacement after the transmit gate.
+    pub regeneration: &'a mut [f32],
+}
+
 /// Callback-owned parrot fanout and per-sample addressed command replies.
 pub(crate) struct ParrotOutput<'a> {
     pub samples: &'a mut [f32],
@@ -91,6 +114,14 @@ pub(crate) struct ParrotOutput<'a> {
     pub regeneration: Option<&'a [Option<f32>]>,
     /// Independent local speech, excluded from reply/broadcast/capture outputs.
     pub local_media: crate::link::LocalMedia<'a>,
+    pub branches: Option<LocalTransmitBranches<'a>>,
+}
+
+/// A public telemetry sample can reach ordinary peer outputs or just WebRTC station monitors.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum PublicTelemetry {
+    Peers(f32),
+    StationMonitor(f32),
 }
 
 /// Per-sample addressed media, independent of RF and ordinary mix-minus routing.
@@ -100,8 +131,8 @@ pub(crate) struct PeerReplySample {
     pub sample: f32,
     /// Suppress ordinary traffic only after its input rings and detectors have advanced.
     pub suppress_repeat: bool,
-    /// Configured message PCM, separate from addressed command replies and RF signaling.
-    pub broadcast: Option<f32>,
+    /// Public station media, separate from addressed command replies and RF signaling.
+    pub broadcast: Option<PublicTelemetry>,
 }
 
 struct ProgramSample<'a> {
@@ -110,6 +141,42 @@ struct ProgramSample<'a> {
     reply: Option<&'a mut PeerReplySample>,
     regeneration: Option<f32>,
     local_media: Option<f32>,
+    branches: Option<TransmitBranchSample<'a>>,
+}
+
+struct TransmitBranchSample<'a> {
+    voice: &'a mut f32,
+    public_telemetry_input: &'a mut f32,
+    public_telemetry: &'a mut f32,
+    incoming_text: &'a mut f32,
+    regeneration: &'a mut f32,
+}
+
+/// Current policy state from the last completed transmit render.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TransmitPolicyStatus {
+    /// The configured, site or configuration inhibit was applied at render.
+    pub inhibited: bool,
+    /// The traffic watchdog is blocking ordinary programme.
+    pub timed_out: bool,
+    /// Ordinary traffic PTT remains asserted on hang with no new demand.
+    pub traffic_holding: bool,
+}
+
+/// Release decision for the serial controller's qualified local receiver.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LocalReceiveRelease {
+    /// Number of admitted 48 kHz sample ticks from key to unkey.
+    pub duration_samples: u64,
+    /// The existing controller rule suppressed traffic hang and courtesy.
+    pub kerchunk: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TransmitClass {
+    Programme,
+    Timeout,
+    Regeneration,
 }
 
 /// Single audio-owner node aggregate; construction and media preparation belong to control.
@@ -117,6 +184,9 @@ struct ProgramSample<'a> {
 /// Processing consumes elapsed native samples, never callback count or wall-clock time.
 /// All configured media remains allocated until this controller is dropped off the audio path.
 pub struct NodeController {
+    configuration_inhibit: Option<Arc<AtomicBool>>,
+    transmit_peak: crate::audio::PeakGuard,
+    transmit_class: TransmitClass,
     settings: ControllerSettings,
     remote_non_fm: bool,
     remote_unqualified_open: bool,
@@ -139,10 +209,13 @@ pub struct NodeController {
     linked: bool,
     receiver_key: u64,
     receiver_unkey: u64,
+    local_receive_release: Option<LocalReceiveRelease>,
     last_activity: u64,
     key_idle: u64,
     keyed: bool,
     traffic_keyed: bool,
+    traffic_holding: bool,
+    transmit_inhibited: bool,
     exempt_release: bool,
     last_audio: u64,
     release_hang: u64,
@@ -157,6 +230,10 @@ pub struct NodeController {
 }
 
 impl NodeController {
+    pub(crate) fn bind_configuration_gate(&mut self, gate: Arc<AtomicBool>) {
+        self.configuration_inhibit = Some(gate);
+    }
+
     /// Apply the rig's non-FM policy on the TX owner. Linked input may interrupt
     /// open receive; that receiver never repeats into its own transmitter.
     pub fn set_remote_non_fm(&mut self, enabled: bool) {
@@ -259,6 +336,9 @@ impl NodeController {
         control.parrot_enabled = settings.parrot_enabled;
         Ok((
             Self {
+                configuration_inhibit: None,
+                transmit_peak: crate::audio::PeakGuard::new(crate::NATIVE_SAMPLE_RATE_HZ),
+                transmit_class: TransmitClass::Programme,
                 settings,
                 remote_non_fm: false,
                 remote_unqualified_open: false,
@@ -289,10 +369,13 @@ impl NodeController {
                 linked: false,
                 receiver_key: 0,
                 receiver_unkey: 0,
+                local_receive_release: None,
                 last_activity: 0,
                 key_idle: 0,
                 keyed: false,
                 traffic_keyed: false,
+                traffic_holding: false,
+                transmit_inhibited: false,
                 exempt_release: false,
                 last_audio: 0,
                 release_hang: 0,
@@ -309,6 +392,20 @@ impl NodeController {
         ))
     }
 
+    /// Install an optional phone courtesy before publishing the station to audio.
+    pub(crate) fn set_phone_courtesy(&mut self, media: PreparedMedia) {
+        self.courtesy.set_phone(media);
+    }
+
+    /// Schedule an admitted caller's release or cancel its own pending cue on rekey.
+    pub(crate) fn phone_voice_edge(&mut self, ingress: u64, keyed: bool) {
+        let due = self
+            .now
+            .saturating_add(samples(self.settings.courtesy_delay_ms));
+        self.courtesy
+            .phone_edge(ingress, keyed, self.now, due, &mut self.telemetry.trace);
+    }
+
     /// Tail media is installed only during control-side construction, before publication.
     pub(crate) fn set_tails(&mut self, tails: Vec<Tail>) -> Result<(), ControllerError> {
         self.tails = TailPlanner::new(tails)?;
@@ -323,9 +420,30 @@ impl NodeController {
 
     /// Feed the already mixed receive tap to the preallocated parrot capture owner.
     pub fn observe_parrot(&mut self, active: bool, samples: &[f32]) {
+        self.observe_parrot_at_epoch(
+            active,
+            samples,
+            self.telemetry.parrot_epoch.load(Ordering::Acquire),
+        );
+    }
+
+    /// Cut parrot capture and playback at station isolation boundaries with no PCM handoff.
+    pub(crate) fn observe_parrot_at_epoch(&mut self, active: bool, samples: &[f32], epoch: u64) {
         self.sync_parrot_lifecycle();
+        let changed = self.telemetry.parrot_epoch.load(Ordering::Relaxed) != epoch;
+        if changed {
+            self.telemetry.parrot_epoch.store(epoch, Ordering::Release);
+        }
+        let suspended = changed || epoch & 1 != 0;
+        if suspended {
+            self.telemetry.disable_parrot(self.now);
+        }
         if let Some(capture) = &mut self.parrot_capture {
-            capture.observe(active, samples);
+            if suspended {
+                capture.discard(active);
+            } else {
+                capture.observe_at_epoch(active, samples, epoch);
+            }
         }
     }
 
@@ -338,7 +456,8 @@ impl NodeController {
     /// Cancel only the resumed direct peer's pending courtesy; active playback continues.
     pub fn link_keyed(&mut self, direct: &str) {
         if !direct.is_empty() {
-            self.courtesy.cancel(direct);
+            self.courtesy
+                .cancel(direct, self.now, &mut self.telemetry.trace);
         }
     }
 
@@ -359,14 +478,30 @@ impl NodeController {
             self.courtesy.schedule(
                 direct,
                 selected,
+                self.now,
                 self.now
                     .saturating_add(samples(self.settings.courtesy_delay_ms)),
+                &mut self.telemetry.trace,
             );
         }
     }
 
+    /// Apply configured receive admission before reporting activity or routing local audio.
+    /// The provider and digit detector own their raw input observations.
+    pub fn admits_local_receive(&self, qualified: bool) -> bool {
+        let qualified = qualified && !self.settings.receive_disabled;
+        self.telemetry
+            .rx_qualified
+            .store(qualified, Ordering::Release);
+        qualified && self.receive_epoch() & 1 == 0
+    }
+    /// Epoch of the actual local operational receive gate.
+    pub fn receive_epoch(&self) -> u64 {
+        self.telemetry.rx_muted.load(Ordering::Acquire)
+    }
     /// Apply a sample-free receive edge without advancing playback or elapsed time.
     pub fn process_event(&mut self, receiving: bool, linked: bool) -> bool {
+        let receiving = self.admits_local_receive(receiving);
         self.process_event_with_activity(receiving, linked, receiving || linked)
     }
 
@@ -375,7 +510,21 @@ impl NodeController {
     /// Disabled activity scoping preserves the radio's existing tone behavior.
     #[must_use]
     pub fn ctcss_enabled(&self) -> bool {
-        self.ctcss_enabled
+        !self.settings.transmit_disabled && self.ctcss_enabled
+    }
+
+    /// Take the most recent local unkey decision on the serial transmit owner.
+    pub fn take_local_receive_release(&mut self) -> Option<LocalReceiveRelease> {
+        self.local_receive_release.take()
+    }
+
+    /// Observe the policy already applied by this serial transmit owner.
+    pub fn transmit_policy_status(&self) -> TransmitPolicyStatus {
+        TransmitPolicyStatus {
+            inhibited: self.transmit_inhibited,
+            timed_out: self.timeout.blocked(),
+            traffic_holding: self.traffic_holding,
+        }
     }
 
     fn process_event_with_activity(
@@ -394,7 +543,7 @@ impl NodeController {
     /// Replace local receive PCM with transmit PCM; return final requested PTT.
     ///
     /// Linked PCM may be shorter than the output; missing samples are silence. Each sample
-    /// advances exactly one 48-kHz tick, so arbitrary callback partitioning has identical output.
+    /// advances exactly one 48-kHz tick. Peak protection processes the completed audio block.
     /// The caller supplies finite normalized PCM and applies the returned PTT to its adapter.
     pub fn process_audio(
         &mut self,
@@ -403,6 +552,7 @@ impl NodeController {
         link_audio: &[f32],
         audio: &mut [f32],
     ) -> bool {
+        let receiving = self.admits_local_receive(receiving);
         self.process_audio_outputs(
             receiving,
             linked,
@@ -462,8 +612,27 @@ impl NodeController {
         if let Some(output) = &mut parrot_output {
             output.samples.fill(0.0);
         }
-        for (offset, sample) in audio.iter_mut().enumerate() {
+        let mut branches = parrot_output
+            .as_mut()
+            .and_then(|output| output.branches.take())
+            .filter(|branch| {
+                branch.voice.len() == audio.len()
+                    && branch.public_telemetry_input.len() == audio.len()
+                    && branch.public_telemetry.len() == audio.len()
+                    && branch.incoming_text.len() == audio.len()
+                    && branch.regeneration.len() == audio.len()
+            });
+        let mut segment_start = 0;
+        for offset in 0..audio.len() {
+            let observed = branches.as_mut().map(|branch| TransmitBranchSample {
+                voice: &mut branch.voice[offset],
+                public_telemetry_input: &mut branch.public_telemetry_input[offset],
+                public_telemetry: &mut branch.public_telemetry[offset],
+                incoming_text: &mut branch.incoming_text[offset],
+                regeneration: &mut branch.regeneration[offset],
+            });
             let parrot_sample = parrot_output.as_mut().map(|output| ProgramSample {
+                branches: observed,
                 parrot: &mut output.samples[offset],
                 parrot_active: &mut *output.active,
                 reply: output
@@ -480,17 +649,25 @@ impl NodeController {
                         .unwrap_or(0.0)
                 }),
             });
-            let rf = self.step(
+            let (rf, class) = self.step(
                 receiving,
                 linked,
                 source_activity,
-                Some(*sample),
+                Some(audio[offset]),
                 link_audio.get(offset).copied().unwrap_or(0.0),
                 parrot_sample,
             );
-            *sample = rf;
+            if class != self.transmit_class {
+                self.transmit_peak.apply(&mut audio[segment_start..offset]);
+                // Priority notices and signaling have their own calibrated level.
+                self.transmit_peak.reset();
+                self.transmit_class = class;
+                segment_start = offset;
+            }
+            audio[offset] = rf;
             self.now = self.now.saturating_add(1);
         }
+        self.transmit_peak.apply(&mut audio[segment_start..]);
         self.activity.advance_clock(self.now);
         self.keyed
     }
@@ -510,7 +687,7 @@ impl NodeController {
                 ParrotAck::Enabled
             }
             Ok(ParrotRequest::Disable) => {
-                self.telemetry.disable_parrot();
+                self.telemetry.disable_parrot(self.now);
                 let capture = self
                     .parrot_capture
                     .take()
@@ -528,7 +705,7 @@ impl NodeController {
 
     fn apply_parrot_disable(&mut self) {
         if !self.parrot_enabled_flag.load(Ordering::Acquire) {
-            self.telemetry.disable_parrot();
+            self.telemetry.disable_parrot(self.now);
         }
     }
 
@@ -537,20 +714,45 @@ impl NodeController {
             let Some(maximum) = id.polite_maximum_wait_ms.filter(|_| busy) else {
                 return true;
             };
-            let due = if id.first_key_only {
-                self.first_due.get(selected).copied().unwrap_or(self.now)
-            } else {
-                self.satisfied
-                    .get(selected)
-                    .copied()
-                    .unwrap_or(self.now)
-                    .saturating_add(samples(id.interval_ms))
-            };
+            let due = self.identifier_due(selected, id);
             self.now.saturating_sub(due) >= samples(maximum)
         })
     }
 
-    fn select_identifier(&self, receiving: bool, busy: bool, after_hang: bool) -> Option<usize> {
+    fn identifier_due(&self, index: usize, id: &Identifier) -> u64 {
+        if id.first_key_only {
+            self.first_due.get(index).copied().unwrap_or(self.now)
+        } else {
+            self.satisfied
+                .get(index)
+                .copied()
+                .unwrap_or(self.now)
+                .saturating_add(samples(id.interval_ms))
+        }
+    }
+
+    fn queue_identifier_observation(&mut self, index: usize) {
+        let id = &self.ids[index];
+        if id.media.9.is_none() {
+            let deadline_sample = id.polite_maximum_wait_ms.map(|limit| {
+                self.identifier_due(index, id)
+                    .saturating_add(samples(limit))
+            });
+            self.ids[index].media.9 = Some(self.telemetry.trace.queue(
+                self.now,
+                "id",
+                "local",
+                deadline_sample,
+            ));
+        }
+    }
+
+    fn select_identifier(
+        &self,
+        receiving: bool,
+        busy: bool,
+        after_hang: bool,
+    ) -> (Option<usize>, Option<usize>) {
         let expired = |index: usize| {
             self.ids[index].polite_maximum_wait_ms.is_some() && self.id_ready(index, true)
         };
@@ -565,7 +767,7 @@ impl NodeController {
                 self.ids[index].first_key_only && self.ids[index].polite_maximum_wait_ms.is_some()
             })
             .map_or(i32::MIN, |index| self.ids[index].priority);
-        selected
+        let eligible = selected
             .filter(|&index| expired(index) || (after_hang && self.id_ready(index, busy)))
             .or_else(|| {
                 // A polite initial covers lower-priority IDs; their deadlines cannot bypass it.
@@ -577,7 +779,8 @@ impl NodeController {
                     self.transmits_during_receive(),
                     |index| expired(index) && self.ids[index].priority >= minimum_priority,
                 )
-            })
+            });
+        (selected, eligible)
     }
 
     /// Borrow the generation-owned envelope without moving or reclaiming it on audio.
@@ -603,15 +806,31 @@ impl NodeController {
     fn satisfy_identifier(&mut self, index: usize) {
         self.identifiers.complete(&self.rules, index, self.now);
         let priority = self.ids[index].priority;
-        for (i, (id, satisfied)) in self.ids.iter().zip(&mut self.satisfied).enumerate() {
+        for (i, (id, satisfied)) in self.ids.iter_mut().zip(&mut self.satisfied).enumerate() {
             if i == index || id.priority < priority {
                 *satisfied = self.now;
+                id.media.observe_completion(
+                    &mut self.telemetry.trace,
+                    self.now,
+                    PlaybackOutcome::Cancelled,
+                    Some("identifier_satisfied"),
+                );
             }
         }
     }
 
     /// Finish exactly one attempt; cancellation never advances successful cooldowns.
     fn complete_playback(&mut self, source: Option<Source>, outcome: PlaybackOutcome) {
+        if let Some(ticket) = self.media(source).and_then(|media| media.9.take()) {
+            let (phase, reason) = match outcome {
+                PlaybackOutcome::Succeeded => (TelemetryPhase::Finished, None),
+                PlaybackOutcome::Cancelled => (TelemetryPhase::Cancelled, Some("cancelled")),
+                PlaybackOutcome::Failed | PlaybackOutcome::Active => {
+                    (TelemetryPhase::Failed, Some("media_source"))
+                }
+            };
+            self.telemetry.trace.record(ticket, self.now, phase, reason);
+        }
         match source {
             Some(Source::Identifier(index)) if outcome == PlaybackOutcome::Succeeded => {
                 self.satisfy_identifier(index);
@@ -641,7 +860,14 @@ impl NodeController {
                             .iter()
                             .position(|tail| tail.tail.media.8 == Some(recipe))
                         {
-                            self.tails.items[index].tail.media.0.cancel();
+                            let tail = &mut self.tails.items[index].tail.media;
+                            tail.0.cancel();
+                            tail.observe_completion(
+                                &mut self.telemetry.trace,
+                                self.now,
+                                PlaybackOutcome::Cancelled,
+                                Some("alternate_delivery"),
+                            );
                             self.tails.complete(index, self.now, true);
                         }
                     }
@@ -665,7 +891,7 @@ impl NodeController {
         input: Option<f32>,
         link_sample: f32,
         parrot_output: Option<ProgramSample<'_>>,
-    ) -> f32 {
+    ) -> (f32, TransmitClass) {
         let local_media = parrot_output.as_ref().and_then(|output| output.local_media);
         if self.telemetry.cancel_message.swap(false, Ordering::AcqRel) {
             let source = self
@@ -678,7 +904,7 @@ impl NodeController {
                 self.complete_playback(source, PlaybackOutcome::Cancelled);
             }
         }
-        self.telemetry.poll_status();
+        self.telemetry.poll_status(self.now);
         let receive = receiving || linked;
         let unqualified_local = self.remote_non_fm && self.remote_unqualified_open;
         let status_idle = !linked
@@ -702,6 +928,10 @@ impl NodeController {
             self.telemetry.held_status = true;
         }
         let idle = self.now.saturating_sub(self.last_activity);
+        // Include every qualified peer, even when group priority selects another for TX.
+        if receive || source_activity {
+            self.activity.publish(self.now);
+        }
         if receive {
             self.ctcss_hang_until = self
                 .now
@@ -712,31 +942,38 @@ impl NodeController {
                 self.suppress_release = false;
             }
             self.last_activity = self.now;
-            self.activity.publish(self.now);
             self.identifiers.activity();
         }
         if receiving && !self.receiver {
             self.receiver_key = self.now;
-            self.courtesy.cancel("");
+            self.courtesy
+                .cancel("", self.now, &mut self.telemetry.trace);
         }
         if !receiving && self.receiver {
             self.receiver_unkey = self.now;
+            let duration_samples = self.now.saturating_sub(self.receiver_key);
             let kerchunk = self.settings.kerchunk_max_ms != 0
-                && self.now.saturating_sub(self.receiver_key)
-                    <= samples(self.settings.kerchunk_max_ms);
+                && duration_samples <= samples(self.settings.kerchunk_max_ms);
+            self.local_receive_release = Some(LocalReceiveRelease {
+                duration_samples,
+                kerchunk,
+            });
             self.receive_unkeyed(kerchunk);
             if !kerchunk {
                 self.courtesy.schedule(
                     "",
                     "",
+                    self.now,
                     self.now
                         .saturating_add(samples(self.settings.courtesy_delay_ms)),
+                    &mut self.telemetry.trace,
                 );
             }
         }
         if self.suppress_release && !receive && (self.receiver || self.linked) {
             // Clear only the final suppressed release, not other ongoing traffic's opportunity.
-            let _ = self.courtesy.pop();
+            self.courtesy
+                .cancel_waiting(self.now, &mut self.telemetry.trace, "release_suppressed");
             for announcement in &mut self.announcements {
                 if announcement.announcement.interval_ms == 0 {
                     announcement.release_pending = false;
@@ -749,6 +986,7 @@ impl NodeController {
             samples(self.settings.hang_ms),
             self.suppress_release,
             !self.timeout.blocked(),
+            &mut self.telemetry.trace,
         );
         if let Some(Source::Tail(index)) = self.telemetry.active {
             if !self.tails.items[index].started && !self.tails.pending() {
@@ -758,16 +996,20 @@ impl NodeController {
         self.receiver = receiving;
         self.linked = linked;
         if source_activity && self.telemetry.parrot_pending() {
-            self.telemetry.discard_pending_parrot();
+            self.telemetry.discard_pending_parrot(self.now);
         }
-        let inhibited = self.telemetry.site_inhibit.load(Ordering::Acquire);
+        let inhibited = self.settings.transmit_disabled
+            || self.telemetry.site_inhibit.load(Ordering::Acquire)
+            || self
+                .configuration_inhibit
+                .as_ref()
+                .is_some_and(|gate| gate.load(Ordering::Acquire));
+        self.transmit_inhibited = inhibited;
+        self.traffic_holding = false;
         if self.timeout.blocked() {
-            return self.timeout_sample(
-                receive || source_activity,
-                inhibited,
-                input,
-                parrot_output,
-            );
+            let notice =
+                self.timeout_sample(receive || source_activity, inhibited, input, parrot_output);
+            return (notice, TransmitClass::Timeout);
         }
         let may_transmit = !inhibited && (self.transmits_during_receive() || !receiving);
         let courtesy_ready = !receive && self.courtesy.ready(self.now);
@@ -777,14 +1019,27 @@ impl NodeController {
             courtesy_ready,
             status_idle && self.now.saturating_sub(self.receiver_unkey) >= 12_000,
         );
-        self.telemetry.poll_status();
+        self.telemetry.poll_status(self.now);
+        if may_transmit
+            && courtesy_ready
+            && self.telemetry.active == Some(Source::Status)
+            && self
+                .telemetry
+                .status
+                .as_ref()
+                .is_some_and(|m| !m.0.has_output())
+        {
+            // Yield the slot before first PCM. Keep the status attempt and its original deadline.
+            self.telemetry.active = None;
+            self.telemetry.held_status = true;
+        }
         let active_before = self.telemetry.active;
         let peer_before = active_before == Some(Source::Status)
             && self
                 .telemetry
                 .status
                 .as_ref()
-                .is_some_and(|media| media.3.is_some() && media.7.is_none());
+                .is_some_and(PreparedMedia::private_reply);
         if receive
             || (!peer_before && matches!(active_before, Some(Source::Status | Source::Courtesy(_))))
         {
@@ -833,9 +1088,9 @@ impl NodeController {
                     })
                 });
             } else if status_ready {
-                self.telemetry.start_status();
+                self.telemetry.start_status(self.now);
             } else if parrot_ready {
-                self.telemetry.start_parrot();
+                self.telemetry.start_parrot(self.now);
                 self.telemetry.active = self.telemetry.parrot.as_ref().map(|_| Source::Parrot);
             }
         }
@@ -844,8 +1099,15 @@ impl NodeController {
                 .telemetry
                 .status
                 .as_ref()
-                .is_some_and(|media| media.3.is_some() && media.7.is_none());
-        let local_telemetry = self.telemetry.active.is_some() && !peer_status;
+                .is_some_and(PreparedMedia::private_reply);
+        let peers_only = self.telemetry.active == Some(Source::Status)
+            && self
+                .telemetry
+                .status
+                .as_ref()
+                .and_then(|m| m.7)
+                .is_some_and(|p| p.destination == PlaybackDestination::Peers);
+        let local_telemetry = self.telemetry.active.is_some() && !peer_status && !peers_only;
         let busy = receive
             || source_activity
             || pending_status
@@ -856,7 +1118,10 @@ impl NodeController {
             || self.tails.hanging(self.now);
         let after_hang =
             announcement_due.is_none() || !self.keyed || release_expired || self.release_pending;
-        let mut selected = self.select_identifier(receiving, busy, after_hang);
+        let (candidate, mut selected) = self.select_identifier(receiving, busy, after_hang);
+        if let Some(candidate) = candidate {
+            self.queue_identifier_observation(candidate);
+        }
         let mut ready = selected.is_some();
         let active_stream = self
             .media(active_before)
@@ -881,7 +1146,11 @@ impl NodeController {
                 self.first_due[index] = self.now;
             }
             self.key_idle = 0;
-            selected = self.select_identifier(receiving, busy, after_hang);
+            let (candidate, eligible) = self.select_identifier(receiving, busy, after_hang);
+            if let Some(candidate) = candidate {
+                self.queue_identifier_observation(candidate);
+            }
+            selected = eligible;
             ready = selected.is_some();
         }
         if may_transmit && ready && input.is_some() {
@@ -897,13 +1166,10 @@ impl NodeController {
             }
         }
         if input.is_some() && may_transmit && self.telemetry.active.is_none() {
-            if ready {
-                self.telemetry.active = selected.and_then(|index| {
-                    self.ids.get_mut(index).map(|id| {
-                        id.media.0.restart(receive);
-                        Source::Identifier(index)
-                    })
-                });
+            if let Some(index) = selected {
+                self.queue_identifier_observation(index);
+                self.ids[index].media.0.restart(receive);
+                self.telemetry.active = Some(Source::Identifier(index));
             } else if let Some(index) = self.tails.ready(self.now) {
                 let item = &mut self.tails.items[index];
                 if !item.suspended {
@@ -916,6 +1182,11 @@ impl NodeController {
                 self.telemetry.active = announcement_due.and_then(|index| {
                     self.announcements.get_mut(index).map(|a| {
                         a.release_pending = false;
+                        a.announcement.media.observe_queue(
+                            &mut self.telemetry.trace,
+                            self.now,
+                            "announcement",
+                        );
                         a.announcement.media.0.restart(false);
                         Source::Announcement(index)
                     })
@@ -956,6 +1227,8 @@ impl NodeController {
         let mut made = 0;
         let mut waiting_for_media = false;
         let mut continuing_media = false;
+        let mut first_pcm = false;
+        let mut outcome = None;
         if let Some((playback, occurrence)) = playback {
             let first_output = !playback.has_output();
             let interrupt = force_morse
@@ -990,11 +1263,20 @@ impl NodeController {
             // Preparation alone does not key. Once audible, a composition owns
             // PTT through pending segment boundaries until completion or failure.
             continuing_media = playback.has_output() && !playback.is_finished();
-            if playback.is_finished() {
-                let outcome = playback.outcome();
-                self.telemetry.active = None;
-                self.complete_playback(rendered_source, outcome);
+            first_pcm = first_output && made != 0;
+            outcome = playback.is_finished().then(|| playback.outcome());
+        }
+        if first_pcm
+            && let Some(mut ticket) = self.media(rendered_source).and_then(|media| media.9.take())
+        {
+            self.telemetry.trace.started(&mut ticket, self.now);
+            if let Some(media) = self.media(rendered_source) {
+                media.9 = Some(ticket);
             }
+        }
+        if let Some(outcome) = outcome {
+            self.telemetry.active = None;
+            self.complete_playback(rendered_source, outcome);
         }
         if let Some(Source::Tail(index)) = self.telemetry.active {
             self.tails.items[index].started |= made != 0;
@@ -1004,8 +1286,9 @@ impl NodeController {
         {
             self.release_pending = false;
         }
-        let telemetry_audio = made != 0 && !peer_status;
-        let message_audio = exempt && (telemetry_audio || (continuing_media && !peer_status));
+        let local_output = !peer_status && !peers_only;
+        let telemetry_audio = made != 0 && local_output;
+        let message_audio = exempt && (telemetry_audio || (continuing_media && local_output));
         let suppress_repeat = policy.is_some_and(|policy| !policy.repeat_during_playback)
             && (made != 0 || continuing_media);
         let short_tail = matches!(
@@ -1031,14 +1314,14 @@ impl NodeController {
         } else {
             samples(self.settings.hang_ms)
         };
-        let mut requested = self.duplex.update(
-            self.transmits_during_receive(),
-            receiving && !self.remote_non_fm,
-            transmit,
-            self.now,
-            hang,
-        );
-        if may_transmit && self.traffic_keyed && self.tails.hanging(self.now) {
+        let full_duplex = self.transmits_during_receive();
+        let receiver_demand = receiving && !self.remote_non_fm;
+        let mut requested =
+            self.duplex
+                .update(full_duplex, receiver_demand, transmit, self.now, hang);
+        let duplex_hang = requested && !transmit && !(full_duplex && receiver_demand);
+        let tail_hang = may_transmit && self.traffic_keyed && self.tails.hanging(self.now);
+        if tail_hang {
             requested = true;
         }
         if !transmit
@@ -1059,13 +1342,11 @@ impl NodeController {
         );
         if self.timeout.blocked() {
             self.begin_timeout();
-            return self.timeout_sample(
-                receive || source_activity,
-                inhibited,
-                input,
-                parrot_output,
-            );
+            let notice =
+                self.timeout_sample(receive || source_activity, inhibited, input, parrot_output);
+            return (notice, TransmitClass::Timeout);
         }
+        self.traffic_holding = self.traffic_keyed && !transmit && (duplex_hang || tail_hang);
         if !self.traffic_keyed {
             self.duplex = DuplexPolicy::default();
         }
@@ -1119,12 +1400,33 @@ impl NodeController {
         } else {
             0.0
         };
-        let telemetry = if peer_status {
-            0.0
+        let telemetry_input = if local_output {
+            telemetry_sample[0]
         } else {
-            telemetry_sample[0] * gain
+            0.0
         };
+        let telemetry = telemetry_input * gain;
+        let regeneration_output = regeneration.filter(|_| may_transmit).unwrap_or(0.0);
+        let text_admitted = regeneration.is_none()
+            && !inhibited
+            && may_transmit
+            && self.traffic_keyed
+            && !suppress_repeat;
         if let Some(output) = parrot_output {
+            if let Some(branches) = output.branches {
+                *branches.public_telemetry_input = telemetry_input;
+                *branches.regeneration = regeneration_output;
+                if !text_admitted {
+                    *branches.incoming_text = 0.0;
+                }
+                if regeneration.is_none() && !inhibited {
+                    *branches.voice = local + link;
+                    *branches.public_telemetry = telemetry;
+                } else {
+                    *branches.voice = 0.0;
+                    *branches.public_telemetry = 0.0;
+                }
+            }
             if rendered_source == Some(Source::Parrot) && made != 0 {
                 *output.parrot_active = true;
             }
@@ -1136,11 +1438,19 @@ impl NodeController {
             if let Some(reply) = output.reply {
                 *reply = PeerReplySample {
                     suppress_repeat,
-                    broadcast: (made != 0
-                        && policy.is_some_and(|policy| {
-                            policy.destination == PlaybackDestination::LocalAndLinks
-                        }))
-                    .then_some(telemetry_sample[0] * gain),
+                    broadcast: if made == 0
+                        || peer_status
+                        || rendered_source == Some(Source::Parrot)
+                    {
+                        // Parrot playback already belongs to the common program.
+                        None
+                    } else if policy.is_some_and(|p| p.destination != PlaybackDestination::Local) {
+                        Some(PublicTelemetry::Peers(telemetry_sample[0] * gain))
+                    } else if local_output && regeneration.is_none() && !inhibited {
+                        Some(PublicTelemetry::StationMonitor(telemetry))
+                    } else {
+                        None
+                    },
                     ..Default::default()
                 };
                 if let Some((target, false)) = reply_target {
@@ -1151,17 +1461,20 @@ impl NodeController {
                 }
             }
         }
-        if let Some(sample) = regeneration {
-            if may_transmit { sample } else { 0.0 }
+        if regeneration.is_some() {
+            (regeneration_output, TransmitClass::Regeneration)
         } else if inhibited {
-            0.0
+            (0.0, TransmitClass::Programme)
         } else {
-            let incoming_text = if may_transmit && self.traffic_keyed && !suppress_repeat {
+            let incoming_text = if text_admitted {
                 local_media.unwrap_or(0.0)
             } else {
                 0.0
             };
-            (local + link + telemetry + incoming_text).clamp(-1.0, 1.0)
+            (
+                local + link + telemetry + incoming_text,
+                TransmitClass::Programme,
+            )
         }
     }
 }

@@ -34,7 +34,7 @@ int main(int argc, char **argv) {
     assert(table->struct_size == sizeof(*table));
     assert(table->abi_version == RPTADV_MEDIA_ABI_VERSION);
     assert(!memcmp(table->capability, CAPABILITY, 16));
-    assert(table->create && table->destroy && table->read_stream && table->close_stream);
+    assert(table->create && table->destroy && table->step_stream && table->close_stream);
     struct rptadv_media_config config = {
         sizeof(config), RPTADV_MEDIA_ABI_VERSION, "unused", 30000, NULL, NULL};
     void *context = (void *)1;
@@ -44,19 +44,24 @@ int main(int argc, char **argv) {
     config.abi_version = RPTADV_MEDIA_ABI_VERSION;
     assert(table->create(&config, &context) == RPTADV_MEDIA_OK && context);
     struct rptadv_media_cancellation cancellation = {NULL, cancelled};
-    struct rptadv_media_stream stream = {(void *)1, 1};
+    void *stream = (void *)1;
 #ifdef FILE_ADAPTER
     assert(table->open_file);
     assert(table->open_file(context, "/missing", &cancellation, &stream) ==
            RPTADV_MEDIA_CANCELLED);
-    assert(!stream.handle && !stream.sample_rate_hz);
+    assert(!stream);
 #else
     assert(table->open_speech);
     struct rptadv_media_speech_request speech = {"hello", "model", 0, 0};
     assert(table->open_speech(context, &speech, &cancellation, &stream) ==
            RPTADV_MEDIA_INVALID_REQUEST);
-    assert(!stream.handle && !stream.sample_rate_hz);
+    assert(!stream);
 #endif
+    float sample = 0;
+    struct rptadv_media_step step = {RPTADV_MEDIA_STEP_FORMAT_READY, 48000, 1};
+    assert(table->step_stream(NULL, &cancellation, &sample, 1, &step) ==
+           RPTADV_MEDIA_CANCELLED);
+    assert(step.kind == RPTADV_MEDIA_STEP_PENDING && !step.sample_rate_hz && !step.samples);
     table->close_stream(NULL);
     table->destroy(context);
     table->destroy(NULL);

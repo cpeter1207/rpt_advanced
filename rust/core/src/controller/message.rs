@@ -46,6 +46,7 @@ struct ControlPort {
     ready: Producer<Ready>,
     retired: Consumer<Stream>,
     waiting: Option<MessageAttemptId>,
+    event: Option<crate::runtime::MessageEventIdentity>,
 }
 
 /// Control-owned ports; each configured recipe has at most one outstanding stream.
@@ -68,6 +69,15 @@ impl MessagePreparation {
 
     /// Allocate only at configuration admission, before the audio owner starts.
     pub fn register(&mut self, content_index: usize) -> Result<PreparedMedia, ControllerError> {
+        self.register_with_event(content_index, None)
+    }
+
+    /// Retain a one-shot trigger on control while audio sees only the scalar request.
+    pub(super) fn register_with_event(
+        &mut self,
+        content_index: usize,
+        event: Option<crate::runtime::MessageEventIdentity>,
+    ) -> Result<PreparedMedia, ControllerError> {
         let (requests, receiver) = RingBuffer::new(1);
         let (ready, consumer) = RingBuffer::new(1);
         let (retired, reclaimer) = RingBuffer::new(1);
@@ -78,6 +88,7 @@ impl MessagePreparation {
             ready,
             retired: reclaimer,
             waiting: None,
+            event,
         });
         let mut media = PreparedMedia::new_stream(Box::new(MessageReader {
             alive,
@@ -121,17 +132,28 @@ impl MessagePreparation {
         None
     }
 
+    pub(super) fn event(
+        &self,
+        attempt: MessageAttemptId,
+    ) -> Option<&crate::runtime::MessageEventIdentity> {
+        self.ports
+            .iter()
+            .find(|port| port.waiting == Some(attempt))?
+            .event
+            .as_ref()
+    }
+
     pub fn complete(
         &mut self,
         attempt: MessageAttemptId,
         result: Result<PreparedMedia, ControllerError>,
-    ) -> Result<(), MessageCompletion> {
+    ) -> Result<(), Box<MessageCompletion>> {
         let Some(port) = self
             .ports
             .iter_mut()
             .find(|port| port.waiting == Some(attempt))
         else {
-            return Err(MessageCompletion { attempt, result });
+            return Err(Box::new(MessageCompletion { attempt, result }));
         };
         // A matching waiting credit proves the previous completion was consumed.
         // Only control converts the envelope or drops any of its other fields.

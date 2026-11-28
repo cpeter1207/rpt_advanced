@@ -7,6 +7,12 @@ decisions. Engineering proposals are identified separately. It does not change
 runtime configuration, authorize a node installation, or claim provider or RF
 acceptance. Paging remains a separate wishlist item.
 
+The [JSON/REST phone-patch contract](2026-11-18-json-rest-configuration-design.md#protocol-jitter-and-phone-patch-keying)
+supersedes the selectable phone command and attachment port in P02/P06 and the
+per-call DTMF isolation bypass in P14. Authenticated callers issue commands to
+their account's port. The corresponding grammar, macro and acceptance material
+below records the earlier design.
+
 ## Intent and scope
 
 Provide outgoing autopatch and incoming reverse patch through ordinary SIP and
@@ -28,11 +34,11 @@ The following are owner decisions, not discretionary engineering defaults.
 | ID | Required behavior |
 | --- | --- |
 | P01 | Common SIP/IAX providers; native Rust crates where practical; Google Voice when supported. |
-| P02 | A phone connection is a private peer/call entity, accessible to local nodes or explicitly allowed local/remote nodes. It is not automatically a public AllStar node. |
+| P02 | A phone connection is a private peer/call entity on the account's owning port, separate from public AllStar nodes. |
 | P03 | Every incoming caller supplies mailbox number and PIN, even on private SIP. Configuration associates the mailbox with first name and callsign. Mailbox identity can support future user features. |
-| P04 | Incoming calls start with private control access. Explicit `*3` is required to attach transceive audio to an eligible node. Control replies remain private. |
+| P04 | Incoming calls stay private until mailbox authentication. Successful authentication attaches the caller to the account’s local port with caller audio and keying muted until that caller unmutes with `*99#`. Control replies remain private. |
 | P05 | All authenticated callers may issue commands that do not require node unlock. Existing protected commands retain their unlock requirement; mailbox login does not unlock them. |
-| P06 | Ordinary connected-call digits go to the telephone. `*4` selects a specific local or remote node for commands. Preserve `*3` connection and `*4` addressed-control concepts. |
+| P06 | The JSON/REST phone-patch contract replaces the historical phone selector. Authenticated caller digits use the owning port's command settings; bare `*3#` retains that attachment. |
 | P07 | Manual keying is a configured alternative to VAD admission. It never temporarily disables or overrides VAD. Mandatory receive checks apply in either mode. |
 | P08 | Earshot qualifies received telephone voice; VAD can make phone-to-peer transmission discontinuous. Its pause detector also guides RF receive windows. |
 | P09 | A configurable five-second deadline limits postponement of a usable receive opportunity. Prefer a natural pause before the deadline. |
@@ -40,9 +46,9 @@ The following are owner decisions, not discretionary engineering defaults.
 | P11 | Total programme interruption accounts for STE, unkey/usable listening, and rekey lead-in. A 200 + 100 + 200 ms configuration costs 500 ms. Avoid audible speech interruptions longer than 100 ms where possible. |
 | P12 | Target normal added local playout latency below 250 ms; permit up to 500 ms during adjustment. Use slight adaptive playout-rate changes and necessary frame discard to avoid accumulating delay. |
 | P13 | Configure autopatch playout to local RF or all eligible peers. Default autopatch suppresses peer audio in both directions at the initiating node for the complete call. |
-| P14 | A per-call peer-isolation bypass is available through DTMF only after node unlock. Anyone knowing the unlock code may enable it. The bypass expires with that call. |
+| P14 | Superseded by the JSON/REST phone-patch contract. The outgoing account's isolation setting governs each call for its lifetime. |
 | P15 | Suppress peer-bound audio from the first detected DTMF digit through command completion. Keep addressed `*4` commands out of band. |
-| P16 | Configurable conference limits default to one node attachment per call and one reverse-patch call per node. The provider enforces the account's paid incoming-call allowance. |
+| P16 | Available CPU, memory, and bandwidth determine the controller’s call capacity. Each simultaneous call keeps an independent peer, media path, and reply sink. |
 | P17 | The provider owns permitted destinations, cost controls, and emergency-service/E911 setup. Do not duplicate those number-class policies in the controller. |
 | P18 | Configure DTMF macros directly by trigger command, unlock protection, and command string. Strings contain multiple commands, termination characters, and comma pauses; no separate numbered-macro mapping is required. |
 
@@ -84,17 +90,42 @@ Provider/trunk authentication never substitutes for mailbox authentication.
 Store PINs as salted password digests; use bounded login attempts and private
 prompts. Never log or regenerate PIN/unlock digits.
 
-A command-only incoming call consumes a transport resource but no RF attachment
-slot. `*3` without an explicit destination attaches the configured local target;
-`*3<node>` selects an eligible explicit target using normal collection completion.
-Attachment requires both phone-side destination permission and destination-side
-permission. Empty remote permissions permit no remote attachments. Local targets
-must be explicitly configured or derived from the called account's local binding.
+The mailbox-number and PIN prompts each have a separate playback boundary. Start
+the shared entry inactivity timer for that field when its private prompt finishes
+playing. If the caller presses a digit during playback, stop the prompt, accept
+that first digit and run the existing inactivity timer from the digit. A stopped
+prompt cannot later resume or start a timer for a subsequent field. The overall
+login deadline still applies.
 
-At a configured attachment limit, reject the additional attachment privately and
-preserve existing ones. No implicit replacement. Local/all-peer playout follows
-normal mix-minus; never reflect a source to itself. Several calls attached to one
-node remain independent peers when the configured limit permits them.
+A call awaiting mailbox authentication consumes its private transport resources.
+Successful authentication requests local attachment through the called account's
+port binding. The existing `*3` request is idempotent for that port and preserves
+the current mute. An explicit destination still requires both phone-side and
+destination-side permission. Empty remote permissions permit no remote attachments.
+
+Each call remains a separate peer. Before mailbox/PIN verification, its audio
+stays in its private transport for digit detection, and only that caller
+hears its authentication prompts. Successful verification automatically attaches
+the call with its ingress audio and keying muted. The caller uses its own `*99#`
+command to unmute. Group or individual mute operations preserve this initial
+mute until the caller lifts it. Each attached call hears eligible local receiver
+audio, linked peers, and other authenticated, attached callers through its
+own mix-minus. Its own upstream audio is excluded. Ordinary network blocking,
+forwarding, and isolation settings govern audio to and from linked peers.
+
+Available CPU, memory, and bandwidth determine call and attachment capacity.
+Do not impose fixed total-call or pending-dial limits. Grow records fallibly off
+audio before admission; if resources cannot support another call, reject it
+privately and preserve current calls. Keep storage and queued work bounded per
+call. A slow prompt, pending dial or full per-call queue must not hold up other
+calls. Shared workers must advance ready calls fairly, with setup and child
+cleanup outside the audio and station scheduling paths.
+
+During outgoing call setup, play provider early audio on the initiating radio
+when available. Otherwise play standard call-progress tones. Stop local progress
+tones when early audio or established call audio takes over. Speak a call failure
+on the initiating radio. These call-progress rules and the private prompt timing
+above are approved requirements with implementation and verification pending.
 
 For outgoing calls, acquire initiating-node peer isolation before dialing and
 release it on failure or hangup. Multiple isolated calls retain independent
@@ -102,11 +133,7 @@ claims: ending one cannot clear another's suppression. Suppression includes
 buffered media revocation, not just fresh enqueue. It does not disable DTMF
 detection, addressed control, safety signaling, or call teardown.
 
-Bypass affects only its call's isolation claim and is checked against the
-initiating node's call/source-scoped unlock. It always requires the unlock code,
-including when remote-base DTMF access is configured `Open`. Existing mailbox
-authentication, command availability, and remote destination selection grant no
-bypass authority. No extra mailbox command-role system is introduced.
+The JSON/REST phone-patch contract removes the per-call DTMF bypass.
 
 An outgoing telephone recipient receives call media without automatically
 acquiring node-control privileges. A reverse caller with no telephone egress
@@ -121,7 +148,8 @@ The phone ingress grammar is distinct from the existing RF/IAX grammar.
 | Context/input | Effect |
 | --- | --- |
 | Telephone mode, ordinary digits including `#` | Telephone egress, when one exists. No implicit node command. |
-| Telephone mode, `*3` / `*3<node>` | Request permitted transceive attachment. |
+| Telephone mode, `*3` / `*3<node>` | Request permitted attachment without changing caller mute. |
+| Authenticated reverse call, `*99#` by default | Toggle that caller’s audio and keying. |
 | Telephone mode, `*4<node>` | Select local or remote command destination; selection alone creates no audio attachment. |
 | Phone node-command mode, bare `#` | Exit to telephone mode locally, as current remote selection does. |
 | Either phone mode, `**` followed by one DTMF symbol | Send that one literal symbol to the selected sink, bypassing only the outer phone grammar. |
@@ -223,6 +251,12 @@ live command input cancels remaining work. Ordinary RF unkey after a trigger
 does not cancel an admitted macro. Completed commands are not rolled back.
 
 ## VAD and half-duplex receive windows
+
+For the standalone JSON configuration, enabled telephone VAD follows speech and
+its configured hang in continuous mode. Only local receiver VAD can use
+kerchunk. Station transmitter hang may keep PTT asserted after telephone VAD
+releases. The [JSON phone-patch contract](2026-11-18-json-rest-configuration-design.md#protocol-jitter-and-phone-patch-keying)
+supersedes the earlier manual-mode proposal below.
 
 Phone `tx_mode=vad|manual` selects admission, with VAD proposed as the default.
 Use Earshot analysis before delayed playout, with pre-roll in the existing
@@ -337,8 +371,9 @@ Required automated evidence includes:
 
 - SIP and IAX simulated-provider setup, authentication, DTMF, failures and
   teardown; no AllStar handshakes or unintended topology on phone legs.
-- Mailbox/private control before `*3`, both allowlists, conference busy behavior,
-  mix-minus, complete bidirectional isolation and reference-counted bypass.
+- Mailbox prompts before attachment, allow and deny policies, automatic muted
+  attachment after authentication, caller-only first unmute, conference mix-minus,
+  complete bidirectional isolation and independent call claims.
 - Per-source unlock, protected macro steps after pause/expiry, quote/terminator
   cases, literal telephone star/pound menus, local and remote `*4`, and immediate
   buffered DTMF suppression without losing OOB commands.
@@ -359,9 +394,9 @@ their own authorized, verified handoffs.
 
 Builder decisions remaining include concrete crate/codec profiles, scoped
 configuration names, safe prepared pacing bounds and ABI evolution. The owner
-approved the proposed defaults and legacy-remote authorization limitation on
-2026-11-09;
-there are no unresolved mailbox, provider-dial-policy or conference-limit choices.
+approved the proposed telephone and legacy-remote authorization defaults on
+2026-11-09. The call-admission rules above incorporate the later decision to
+scale simultaneous calls with available resources.
 
 ## Sources and applicability
 

@@ -633,17 +633,53 @@ dtmf-macro-stopped =
 
 phone-authentication =
     .text = { $state ->
-        [login] Enter mailbox number and PIN
-        [authenticated] Mailbox authenticated. Protected commands still require node unlock
-       *[retry] Login unsuccessful. Try again
+        [login] Enter mailbox number followed by pound
+        [password] Enter password followed by pound
+        [authenticated] Mailbox authenticated
+        [unavailable] Requested operation is unavailable
+        [failed] Command failed
+       *[retry] Login unsuccessful. Enter your mailbox number followed by pound
         }
     .tts = { $state ->
-        [login] Enter your mailbox number and PIN
-        [authenticated] Mailbox authenticated. Protected commands still require node unlock
-       *[retry] Login unsuccessful. Try again
+        [login] Enter your mailbox number followed by pound
+        [password] Enter your passcode followed by pound
+        [authenticated] Mailbox authenticated
+        [unavailable] Requested operation is unavailable
+        [failed] Command failed
+       *[retry] Login unsuccessful. Enter your mailbox number followed by pound
         }
     .morse = { $state ->
-        [login] MAILBOX AND PIN
-        [authenticated] LOGIN OK UNLOCK SEPARATE
-       *[retry] LOGIN FAILED RETRY
+        [login] MAILBOX POUND
+        [password] PASSWORD POUND
+        [authenticated] LOGIN OK
+        [unavailable] OPERATION UNAVAILABLE
+        [failed] COMMAND FAILED
+       *[retry] LOGIN FAILED MAILBOX POUND
         }
+
+operation-result =
+    .text = { operation-result.tts }
+    .tts = { $result ->
+        [unavailable] Requested operation is unavailable
+        [muted] Muted
+        [unmuted] Unmuted
+        [failed] Command failed
+       *[completed] Command completed
+        }
+    .morse = { $result ->
+        [unavailable] OPERATION UNAVAILABLE
+        [muted] MUTED
+        [unmuted] UNMUTED
+        [failed] COMMAND FAILED
+       *[completed] COMMAND COMPLETE
+        }
+
+phone-dial-failure =
+    .text = { phone-dial-failure.tts }
+    .tts = { $reason ->
+        [busy] The line is busy.
+        [unanswered] The call was not answered.
+        [declined] The call was declined.
+       *[failed] The call could not be completed.
+        }
+    .morse = CALL FAILED

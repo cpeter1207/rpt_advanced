@@ -151,6 +151,445 @@ impl PeerInput for FiniteInput {
 }
 
 #[test]
+fn retained_private_policy_holds_network_isolation_until_confirmed() {
+    use crate::link::{PhoneAccountId, PhoneCallId, PhoneSource};
+    let private = PhoneSource::new(
+        PhoneAccountId::new("account").unwrap(),
+        1,
+        PhoneCallId::new([3; 16]).unwrap(),
+        1,
+        3,
+    )
+    .unwrap();
+    let handset = PeerSignals::for_phone(private.clone());
+    assert!(handset.authenticate_phone());
+    let grant = handset.reply_target();
+    let permit = Arc::new(AtomicBool::new(false));
+    let queue = || LinkAudioQueue::new(960, 64).unwrap().into_endpoints();
+    let (source_writer, _source_out) = queue();
+    let (dest_writer, mut dest_out) = queue();
+    let (handset_writer, mut handset_out) = queue();
+    let source = FiniteInput {
+        signals: PeerSignals::new(),
+        samples: vec![0.25; 48_000 * 260 / 1_000].into(),
+    };
+    source.signals.publish_pcm();
+    source.signals.set_radio_keyed(true);
+    let direct = AudioPeer::new("100", Mode::TRANSCEIVE, source, source_writer, 4, 0).unwrap();
+    let dest = AudioPeer::new(
+        "200",
+        Mode::TRANSCEIVE,
+        FiniteInput {
+            signals: PeerSignals::new(),
+            samples: Default::default(),
+        },
+        dest_writer,
+        4,
+        0,
+    )
+    .unwrap();
+    let caller = AudioPeer::for_phone(
+        &private,
+        &grant,
+        Mode::phone(false),
+        FiniteInput {
+            signals: PeerSignals::redirected(&grant),
+            samples: Default::default(),
+        },
+        handset_writer,
+        4,
+    )
+    .unwrap()
+    .with_phone_policy(false, true, Arc::clone(&permit));
+    let (mut graph, mut dispatch) = LinkAudio::new(vec![direct, dest, caller], 4).unwrap();
+    let (mut node, _control) = NodeController::new(
+        ControllerSettings::default(),
+        vec![],
+        vec![],
+        CourtesySettings::default(),
+    )
+    .unwrap();
+    for confirmed in [false, true] {
+        permit.store(confirmed, Ordering::Release);
+        let mut rf = [0.0; 4];
+        graph
+            .process(&mut node, false, &mut rf, SourcePosition::default())
+            .unwrap();
+        dispatch.dispatch(1);
+        let mut samples = [0.0; 4];
+        assert_eq!(dest_out.read_span(&mut samples).is_some(), confirmed);
+        assert_eq!(samples, if confirmed { [0.25; 4] } else { [0.0; 4] });
+        let mut handset_pcm = [0.0; 4];
+        assert_eq!(handset_out.read_span(&mut handset_pcm).is_some(), confirmed);
+        assert_eq!(handset_pcm, samples);
+    }
+}
+
+#[test]
+fn attached_phone_destinations_receive_mix_minus_without_expanding_public_forwarding() {
+    use crate::link::{PhoneAccountId, PhoneCallId, PhoneSource};
+
+    const A: [f32; 4] = [0.125, -0.125, 0.125, -0.125];
+    const B: [f32; 4] = [0.25, -0.25, -0.25, 0.25];
+    const LOCAL: [f32; 4] = [0.0625, 0.0625, -0.0625, -0.0625];
+    const LINK: [f32; 4] = [0.03125; 4];
+    let queue = || LinkAudioQueue::new(960, 4).unwrap().into_endpoints();
+    let source = |id: u8| {
+        PhoneSource::new(
+            PhoneAccountId::new("account").unwrap(),
+            1,
+            PhoneCallId::new([id; 16]).unwrap(),
+            u64::from(id),
+            u64::from(id),
+        )
+        .unwrap()
+    };
+    let read = |output: &mut LinkAudioConsumer| {
+        let mut samples = [0.0; 4];
+        output.read_span(&mut samples).map(|span| {
+            assert_eq!(span.frames, samples.len());
+            samples
+        })
+    };
+    let active_input = |signals: PeerSignals, samples: [f32; 4]| {
+        signals.publish_pcm();
+        signals.set_radio_keyed(true);
+        FiniteInput {
+            signals,
+            samples: samples.repeat(3_200).into(),
+        }
+    };
+    let unattached = source(3);
+    let unverified = PeerSignals::for_phone(unattached.clone());
+    let reply = unverified.reply_target();
+    let (writer, _) = queue();
+    assert!(
+        AudioPeer::for_phone(
+            &unattached,
+            &reply,
+            Mode::phone(false),
+            active_input(unverified, [0.5; 4]),
+            writer,
+            4,
+        )
+        .is_err()
+    );
+
+    // Prove the already-supported forwarding mode before exercising local-only policy.
+    for forward_public in [true, false] {
+        let phone = |id, samples| {
+            let source = source(id);
+            let signals = PeerSignals::for_phone(source.clone());
+            assert!(signals.authenticate_phone());
+            let reply = signals.reply_target();
+            let (writer, output) = queue();
+            let peer = AudioPeer::for_phone(
+                &source,
+                &reply,
+                Mode::phone(forward_public),
+                active_input(signals, samples),
+                writer,
+                4,
+            )
+            .unwrap();
+            (peer, output)
+        };
+        let (a, mut a_output) = phone(1, A);
+        let (b, mut b_output) = phone(2, B);
+        let (writer, mut linked_output) = queue();
+        let link = AudioPeer::new(
+            "200",
+            Mode::TRANSCEIVE,
+            FiniteInput {
+                signals: PeerSignals::new(),
+                samples: Default::default(),
+            },
+            writer,
+            4,
+            0,
+        )
+        .unwrap();
+        let (mut graph, mut dispatcher) = LinkAudio::new(vec![a, b, link], 4).unwrap();
+        let (mut node, _) = NodeController::new(
+            ControllerSettings::default(),
+            vec![],
+            vec![],
+            CourtesySettings::default(),
+        )
+        .unwrap();
+
+        graph
+            .process(&mut node, false, &mut [0.0; 4], SourcePosition::default())
+            .unwrap();
+        dispatcher.dispatch(1);
+        let phones_only = (read(&mut a_output), read(&mut b_output)) == (Some(B), Some(A));
+        let both_callers = std::array::from_fn(|i| A[i] + B[i]);
+        let public_phone_only = read(&mut linked_output) == forward_public.then_some(both_callers);
+
+        let linked = &mut graph.peers[2].input;
+        linked.samples = LINK.repeat(3_200).into();
+        linked.signals.publish_pcm();
+        linked.signals.set_radio_keyed(true);
+        let mut local = LOCAL;
+        let mut link_mix = [f32::NAN; 4];
+        graph
+            .process_with_branches(
+                &mut node,
+                true,
+                &mut local,
+                SourcePosition::default(),
+                None,
+                |mix| link_mix.copy_from_slice(mix),
+            )
+            .unwrap();
+        assert_eq!(link_mix, std::array::from_fn(|i| A[i] + B[i] + LINK[i]));
+        dispatcher.dispatch(1);
+        let mixed_a = std::array::from_fn(|i| LOCAL[i] + LINK[i] + B[i]);
+        let mixed_b = std::array::from_fn(|i| LOCAL[i] + LINK[i] + A[i]);
+        let mixed_phones =
+            (read(&mut a_output), read(&mut b_output)) == (Some(mixed_a), Some(mixed_b));
+        let public_expected =
+            std::array::from_fn(|i| LOCAL[i] + if forward_public { both_callers[i] } else { 0.0 });
+        let public_mixed = read(&mut linked_output) == Some(public_expected);
+
+        graph.peers[2]
+            .input
+            .signals
+            .reply_target()
+            .set_rx_muted(true);
+        let mut local = LOCAL;
+        graph
+            .process_with_branches(
+                &mut node,
+                true,
+                &mut local,
+                SourcePosition::default(),
+                None,
+                |mix| link_mix.copy_from_slice(mix),
+            )
+            .unwrap();
+        assert_eq!(link_mix, both_callers);
+        dispatcher.dispatch(1);
+        let muted_a = std::array::from_fn(|i| LOCAL[i] + B[i]);
+        let muted_b = std::array::from_fn(|i| LOCAL[i] + A[i]);
+        let muted_link =
+            (read(&mut a_output), read(&mut b_output)) == (Some(muted_a), Some(muted_b));
+        let public_receive_mute = read(&mut linked_output) == Some(public_expected);
+        eprintln!(
+            "PHONE_MIX_MINUS forward_public={forward_public} phones_only={phones_only} mixed_phones={mixed_phones} muted_link={muted_link} public_phone_only={public_phone_only} public_mixed={public_mixed} public_receive_mute={public_receive_mute}"
+        );
+        assert!(
+            public_phone_only && public_mixed && public_receive_mute,
+            "phone-to-phone audio must preserve public forwarding policy"
+        );
+        assert!(
+            phones_only && mixed_phones && muted_link,
+            "each attached caller must receive the other caller and eligible shared sources without its own PCM"
+        );
+
+        graph.peers[1].mode = Mode::LOCAL_MONITOR;
+        let mut local = LOCAL;
+        graph
+            .process(&mut node, true, &mut local, SourcePosition::default())
+            .unwrap();
+        dispatcher.dispatch(1);
+        assert!(
+            graph.peers[1].active,
+            "the monitor source must still be active"
+        );
+        let caller = read(&mut a_output) == Some(LOCAL);
+        let monitor_quiet = read(&mut b_output).is_none();
+        let public_expected =
+            std::array::from_fn(|i| LOCAL[i] + if forward_public { A[i] } else { 0.0 });
+        let public = read(&mut linked_output) == Some(public_expected);
+        eprintln!(
+            "PHONE_LOCAL_MONITOR forward_public={forward_public} caller={caller} monitor_quiet={monitor_quiet} public={public}"
+        );
+        assert!(
+            caller && monitor_quiet && public,
+            "an RF-only monitor must retain its ordinary media routing"
+        );
+    }
+}
+
+#[test]
+fn authenticated_phone_hears_only_the_selected_network_group_member() {
+    use crate::link::{PhoneAccountId, PhoneCallId, PhoneSource};
+    use std::num::NonZeroUsize;
+
+    struct ObservedPeer {
+        input: FiniteInput,
+        mix: Option<[f32; 4]>,
+    }
+
+    impl PeerInput for ObservedPeer {
+        fn source_rate(&self) -> u32 {
+            self.input.source_rate()
+        }
+        fn signals(&self) -> &PeerSignals {
+            self.input.signals()
+        }
+        fn available(&self) -> u64 {
+            self.input.available()
+        }
+        fn render(&mut self, samples: &mut [f32]) -> Option<usize> {
+            self.input.render(samples)
+        }
+        fn observe_station_mix(&mut self, samples: &[f32], admitted: bool) {
+            self.mix = admitted.then(|| samples.try_into().unwrap());
+        }
+    }
+
+    let selection = GroupSelection::new();
+    let first = NonZeroUsize::new(1).unwrap();
+    let second = NonZeroUsize::new(2).unwrap();
+    let queue = || LinkAudioQueue::new(960, 4).unwrap().into_endpoints();
+    let empty = |signals| ObservedPeer {
+        input: FiniteInput {
+            signals,
+            samples: Default::default(),
+        },
+        mix: None,
+    };
+    let link = |name, slot| {
+        let (writer, _) = queue();
+        AudioPeer::new(
+            name,
+            Mode::TRANSCEIVE,
+            empty(PeerSignals::new()),
+            writer,
+            4,
+            0,
+        )
+        .map(|peer| peer.with_group(selection.clone(), slot))
+        .unwrap()
+    };
+    let phone = PhoneSource::new(
+        PhoneAccountId::new("account").unwrap(),
+        1,
+        PhoneCallId::new([5; 16]).unwrap(),
+        1,
+        5,
+    )
+    .unwrap();
+    let signals = PeerSignals::for_phone(phone.clone());
+    assert!(signals.authenticate_phone());
+    let reply = signals.reply_target();
+    let (writer, mut output) = queue();
+    let caller = AudioPeer::for_phone(
+        &phone,
+        &reply,
+        Mode::phone(false),
+        empty(signals),
+        writer,
+        4,
+    )
+    .unwrap();
+    let (mut graph, mut dispatcher) =
+        LinkAudio::new(vec![link("200", first), link("300", second), caller], 4).unwrap();
+    let (mut node, _) = NodeController::new(
+        ControllerSettings::default(),
+        vec![],
+        vec![],
+        CourtesySettings::default(),
+    )
+    .unwrap();
+    let mut playout = |graph: &mut LinkAudio<ObservedPeer>| {
+        graph
+            .process(&mut node, false, &mut [0.0; 4], SourcePosition::default())
+            .unwrap();
+        dispatcher.dispatch(1);
+        let mut pcm = [0.0; 4];
+        output.read_span(&mut pcm).map(|span| {
+            assert_eq!(span.frames, pcm.len());
+            pcm
+        })
+    };
+
+    selection.publish_desired(Some(second));
+    assert_eq!(playout(&mut graph), None);
+    assert_eq!(selection.active(), Some(second));
+    for (peer, level) in graph.peers[..2].iter_mut().zip([0.5, 0.25]) {
+        peer.input.input.samples = vec![level; 12_512].into();
+        peer.input.input.signals.publish_pcm();
+        peer.input.input.signals.set_radio_keyed(true);
+    }
+    assert_eq!(playout(&mut graph), Some([0.25; 4]));
+    assert_eq!(graph.peers[0].input.mix, None);
+    assert_eq!(graph.peers[1].input.mix, Some([0.25; 4]));
+
+    selection.publish_desired(Some(first));
+    assert_eq!(playout(&mut graph), Some([0.25; 4]));
+    assert_eq!(selection.active(), Some(second));
+    for peer in &mut graph.peers[..2] {
+        peer.input.input.signals.reply_target().set_rx_muted(true);
+    }
+    assert_eq!(playout(&mut graph), None);
+    assert_eq!(selection.active(), Some(first));
+    assert_eq!(graph.peers[0].input.mix, None);
+    assert_eq!(graph.peers[1].input.mix, None);
+    for peer in &mut graph.peers[..2] {
+        peer.input.input.signals.reply_target().set_rx_muted(false);
+    }
+    assert_eq!(playout(&mut graph), Some([0.5; 4]));
+    assert_eq!(graph.peers[0].input.mix, Some([0.5; 4]));
+    assert_eq!(graph.peers[1].input.mix, None);
+}
+
+#[test]
+fn outgoing_phone_claims_revoke_queued_pcm_independently() {
+    let isolation = Arc::new(crate::link::MediaIsolation::default());
+    let (writer, mut wire) = LinkAudioQueue::new(32, 4).unwrap().into_endpoints();
+    let input = FiniteInput {
+        signals: PeerSignals::new(),
+        samples: Default::default(),
+    };
+    let peer = AudioPeer::new("200", Mode::TRANSCEIVE, input, writer, 4, 0).unwrap();
+    let (audio, mut dispatcher) = LinkAudio::new(vec![peer], 4).unwrap();
+    let mut audio = audio.with_media_isolation(&mut dispatcher, Arc::clone(&isolation));
+    let (mut node, _) = NodeController::new(
+        ControllerSettings {
+            full_duplex: true,
+            ..ControllerSettings::default()
+        },
+        vec![],
+        vec![],
+        CourtesySettings::default(),
+    )
+    .unwrap();
+
+    let mut mix = |value| {
+        audio
+            .process(&mut node, true, &mut [value; 4], SourcePosition::default())
+            .unwrap()
+    };
+    mix(0.25);
+    dispatcher.dispatch(1);
+    mix(0.50);
+    let first = isolation.hold().unwrap();
+    let second = isolation.hold().unwrap();
+    dispatcher.dispatch(1);
+    assert_eq!(
+        wire.read_at_isolation_epoch(&mut [0.0; 4], isolation.epoch()),
+        4
+    );
+    drop(first);
+    assert_eq!(isolation.epoch() & 1, 1);
+    mix(0.75);
+    dispatcher.dispatch(1);
+    assert!(wire.peek_span().is_none());
+    drop(second);
+    mix(1.0);
+    dispatcher.dispatch(1);
+    let mut samples = [0.0; 4];
+    assert_eq!(
+        wire.read_at_isolation_epoch(&mut samples, isolation.epoch()),
+        0
+    );
+    assert_eq!(samples, [1.0; 4]);
+}
+
+#[test]
 fn remote_base_link_activity_remains_visible_before_transmit_muting() {
     let input = FiniteInput {
         signals: PeerSignals::new(),
@@ -227,12 +666,134 @@ fn regeneration_replaces_rf_not_peer_program_or_parrot_capture() {
 }
 
 #[test]
+fn isolated_phone_programme_cannot_replay_after_its_claim_ends() {
+    use crate::{
+        audio::{PcmRead, PcmStreamReader},
+        controller::{ControllerControl, PreparedMedia},
+        link::MediaIsolation,
+        media::PreparedAudio,
+    };
+
+    struct Recording {
+        audio: PreparedAudio,
+        cursor: usize,
+    }
+    impl PcmStreamReader for Recording {
+        fn start(&mut self) {
+            self.cursor = 0;
+        }
+
+        fn render(&mut self, output: &mut [f32]) -> PcmRead {
+            let remaining = &self.audio.samples()[self.cursor..];
+            let count = output.len().min(remaining.len());
+            output[..count].copy_from_slice(&remaining[..count]);
+            self.cursor += count;
+            if count == remaining.len() {
+                PcmRead::FinalSamples(count)
+            } else {
+                PcmRead::Samples(count)
+            }
+        }
+    }
+
+    fn prepare_capture(control: &mut ControllerControl) -> bool {
+        let Some(clip) = control.take_parrot_capture() else {
+            return false;
+        };
+        let audio = PreparedAudio::new(48_000, clip.samples().to_vec()).unwrap();
+        control.recycle_parrot_capture(clip);
+        assert!(
+            control.queue_prepared_parrot(PreparedMedia::new_parrot_stream(
+                None,
+                Box::new(Recording { audio, cursor: 0 }),
+            ))
+        );
+        true
+    }
+
+    let isolation = Arc::new(MediaIsolation::default());
+    let (output, mut remote) = LinkAudioQueue::new(32, 4).unwrap().into_endpoints();
+    let input = FiniteInput {
+        signals: PeerSignals::new(),
+        samples: Default::default(),
+    };
+    let direct = AudioPeer::new("200", Mode::TRANSCEIVE, input, output, 4, 0).unwrap();
+    let (graph, mut dispatch) = LinkAudio::new(vec![direct], 4).unwrap();
+    let mut graph = graph.with_media_isolation(&mut dispatch, Arc::clone(&isolation));
+    let (mut node, mut control) = NodeController::new(
+        ControllerSettings {
+            full_duplex: true,
+            parrot_enabled: true,
+            ..ControllerSettings::default()
+        },
+        vec![],
+        vec![],
+        CourtesySettings::default(),
+    )
+    .unwrap();
+    let mut tick = |receiving, level| {
+        let mut station = [level; 4];
+        graph
+            .process(
+                &mut node,
+                receiving,
+                &mut station,
+                SourcePosition::default(),
+            )
+            .unwrap();
+        dispatch.dispatch(1);
+        let mut peer = [0.0; 4];
+        remote.read_at_isolation_epoch(&mut peer, isolation.epoch());
+        (station, peer)
+    };
+
+    tick(true, 0.25);
+    tick(false, 0.0);
+    assert!(
+        prepare_capture(&mut control),
+        "ordinary parrot must capture"
+    );
+    assert_eq!(
+        tick(false, 0.0),
+        ([0.25; 4], [0.25; 4]),
+        "ordinary parrot must replay"
+    );
+    control.reclaim().for_each(drop);
+
+    // Start a burst in the normal epoch and put unique RF programme on the isolated call.
+    tick(true, 0.125);
+    let claim = isolation.hold().unwrap();
+    let (_, peer) = tick(true, 0.875);
+    assert_eq!(peer, [0.0; 4], "the live isolation gate must work");
+    tick(false, 0.0);
+    // Exercise the off-audio copy and queue before the call drops its claim.
+    let captured = prepare_capture(&mut control);
+    drop(claim);
+    let leaked = (0..3).any(|_| {
+        let (station, peer) = tick(false, 0.0);
+        station
+            .into_iter()
+            .chain(peer)
+            .any(|sample| sample == 0.875)
+    });
+    eprintln!(
+        "A5_PARROT_ISOLATION ordinary_replay=true live_isolation=true captured={captured} private_replay={leaked}"
+    );
+    assert!(
+        !leaked,
+        "station parrot replay exposed isolated telephone-call programme"
+    );
+}
+
+#[test]
 fn configured_message_broadcast_obeys_destination_and_peer_mode() {
     use crate::controller::{MorseSettings, PlaybackDestination, PlaybackPolicy, PreparedMedia};
     for (destination, mode, expected) in [
         (PlaybackDestination::Local, Mode::TRANSCEIVE, false),
         (PlaybackDestination::LocalAndLinks, Mode::TRANSCEIVE, true),
         (PlaybackDestination::LocalAndLinks, Mode::MONITOR, false),
+        (PlaybackDestination::Peers, Mode::TRANSCEIVE, true),
+        (PlaybackDestination::Peers, Mode::MONITOR, false),
     ] {
         let (mut peer, _, mut output) = peer_with_kerchunk("200", 4, 0);
         peer.mode = mode;
@@ -256,10 +817,15 @@ fn configured_message_broadcast_obeys_destination_and_peer_mode() {
             )
         );
         let mut rf = [0.0; 4];
-        links
+        let keyed = links
             .process(&mut controller, false, &mut rf, SourcePosition::default())
             .unwrap();
-        assert_eq!(rf, [0.25; 4]);
+        if destination == PlaybackDestination::Peers {
+            assert!(!keyed);
+            assert_eq!(rf, [0.0; 4]);
+        } else {
+            assert_eq!(rf, [0.25; 4]);
+        }
         dispatcher.dispatch(1);
         let mut remote = [0.0; 4];
         assert_eq!(output.read_span(&mut remote).is_some(), expected);
@@ -956,4 +1522,150 @@ fn ended_peer_cannot_hold_ptt_or_remain_a_dispatch_destination() {
         assert_eq!(outbound.read(&mut output), 1);
         assert_eq!(output, [0.0]);
     }
+}
+
+#[test]
+fn operator_mute_drains_each_input_and_gates_its_pcm_and_key_only() {
+    struct Wave {
+        signals: PeerSignals,
+        level: f32,
+        samples: usize,
+    }
+    impl PeerInput for Wave {
+        fn signals(&self) -> &PeerSignals {
+            &self.signals
+        }
+        fn source_rate(&self) -> u32 {
+            48000
+        }
+        fn available(&self) -> u64 {
+            12480
+        }
+        fn render(&mut self, output: &mut [f32]) -> Option<usize> {
+            self.samples += output.len();
+            output.fill(self.level);
+            Some(output.len())
+        }
+    }
+    let mut peers = vec![];
+    let mut tokens = vec![];
+    for (name, level) in [("2000", 0.25), ("3000", 0.5)] {
+        let sig = PeerSignals::new();
+        sig.publish_pcm();
+        sig.set_radio_keyed(true);
+        tokens.push(sig.reply_target());
+        let (w, _r) = LinkAudioQueue::new(960, 64).unwrap().into_endpoints();
+        peers.push(
+            AudioPeer::new(
+                name,
+                Mode::TRANSCEIVE,
+                Wave {
+                    signals: sig,
+                    level,
+                    samples: 0,
+                },
+                w,
+                960,
+                0,
+            )
+            .unwrap(),
+        );
+    }
+    let (mut mixer, _) = LinkAudio::new(peers, 960).unwrap();
+    let (mut controller, _) = NodeController::new(
+        ControllerSettings::default(),
+        vec![],
+        vec![],
+        CourtesySettings::default(),
+    )
+    .unwrap();
+    for (a, b, level) in [(true, true, 0.0), (true, false, 0.5), (false, true, 0.25)] {
+        tokens[0].set_rx_muted(a);
+        tokens[1].set_rx_muted(b);
+        let mut audio = [0.0; 96];
+        let ptt = mixer
+            .process(
+                &mut controller,
+                false,
+                &mut audio,
+                SourcePosition::default(),
+            )
+            .unwrap();
+        assert_eq!(ptt, !(a && b));
+        assert!(audio.iter().all(|&x| x == level));
+        assert!(tokens.iter().all(|t| t.active()), "raw qualifier survives");
+    }
+    assert!(mixer.peers.iter().all(|p| p.input.samples == 288));
+}
+
+#[test]
+fn application_audio_requires_qualified_key_and_preserves_listen_only_mix_minus() {
+    let application = |session, transceive, sample, keyed| {
+        let signals = PeerSignals::for_webrtc(uuid::Uuid::from_u128(session));
+        signals.publish_pcm();
+        signals.set_radio_keyed(keyed);
+        signals.set_webrtc_deadline(1_000_000_000);
+        let reply = signals.reply_target();
+        let (writer, output) = LinkAudioQueue::new(960, 4).unwrap().into_endpoints();
+        let peer = AudioPeer::for_application(
+            &reply,
+            transceive,
+            Arc::new(AtomicBool::new(true)),
+            FiniteInput {
+                signals,
+                samples: vec![sample; 12_800].into(),
+            },
+            writer,
+            4,
+        )
+        .unwrap();
+        (peer, reply, output)
+    };
+    let (talker, talker_reply, mut self_audio) = application(1, true, 0.125, false);
+    let (listener, _, mut station_audio) = application(2, false, 0.5, true);
+    let (mut graph, mut dispatcher) = LinkAudio::new(vec![talker, listener], 4).unwrap();
+    let (mut node, _) = NodeController::new(
+        ControllerSettings::default(),
+        vec![],
+        vec![],
+        CourtesySettings::default(),
+    )
+    .unwrap();
+    let block = |graph: &mut LinkAudio<FiniteInput>, node: &mut NodeController, born_ns| {
+        graph
+            .process(
+                node,
+                false,
+                &mut [0.0; 4],
+                SourcePosition {
+                    born_ns,
+                    ..SourcePosition::default()
+                },
+            )
+            .unwrap();
+        graph.peer_source_active()
+    };
+
+    // Receive-only input and unqualified transport PCM cannot open the station.
+    assert!(!block(&mut graph, &mut node, Some(0)));
+    assert!(!talker_reply.active());
+    dispatcher.dispatch(1);
+    let mut samples = [0.0; 4];
+    assert!(station_audio.read_span(&mut samples).is_none());
+
+    graph.peers[0].input.signals.set_radio_keyed(true);
+    assert!(!block(&mut graph, &mut node, None));
+    dispatcher.dispatch(1);
+    assert!(block(&mut graph, &mut node, Some(0)));
+    assert!(talker_reply.active());
+    dispatcher.dispatch(1);
+    assert!(self_audio.read_span(&mut samples).is_none());
+    assert_eq!(station_audio.read_span(&mut samples).unwrap().frames, 4);
+    assert_eq!(samples, [0.125; 4]);
+
+    assert!(!block(&mut graph, &mut node, Some(999_999_000)));
+    assert!(!talker_reply.active());
+    talker_reply.set_rx_muted(true);
+    assert!(!block(&mut graph, &mut node, Some(0)));
+    assert!(!talker_reply.active());
 }

@@ -1,5 +1,8 @@
 //! Last-unkey courtesy selection with source-specific rekey cancellation.
-use super::PreparedMedia;
+use super::{
+    PreparedMedia, TelemetryPhase,
+    observation::{PlaybackTicket, Trace},
+};
 
 /// Control-prepared local, generic-link, and exact-peer courtesy media.
 #[derive(Default)]
@@ -12,11 +15,18 @@ pub struct CourtesySettings {
     pub peers: Vec<(String, PreparedMedia)>,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Source {
+    RadioOrLink([u8; 64]),
+    Phone(u64),
+}
+
 #[derive(Clone, Copy)]
 struct Pending {
-    source: [u8; 64],
+    source: Source,
     media: usize,
     due: u64,
+    ticket: PlaybackTicket,
 }
 
 pub(super) struct CourtesyPlanner {
@@ -24,6 +34,7 @@ pub(super) struct CourtesyPlanner {
     peers: Vec<(String, usize)>,
     receiver: Option<usize>,
     link: Option<usize>,
+    phone: Option<usize>,
     pending: Option<Pending>,
 }
 
@@ -52,28 +63,36 @@ impl CourtesyPlanner {
             peers,
             receiver,
             link,
+            phone: None,
             pending: None,
         }
     }
-    fn identity(source: &str) -> Option<[u8; 64]> {
+    fn identity(source: &str) -> Option<Source> {
         if source.len() >= 64 {
             return None;
         }
         let mut key = [0; 64];
         key.get_mut(..source.len())?
             .copy_from_slice(source.as_bytes());
-        Some(key)
+        Some(Source::RadioOrLink(key))
     }
-    pub fn cancel(&mut self, source: &str) {
+    pub fn cancel(&mut self, source: &str, now: u64, trace: &mut Trace) {
         let Some(key) = Self::identity(source) else {
             return;
         };
         if self.pending.is_some_and(|item| item.source == key) {
-            self.pending = None;
+            self.cancel_waiting(now, trace, "source_rekeyed");
         }
     }
     /// Replace any waiting courtesy with the latest unkey, including an unconfigured tone.
-    pub fn schedule(&mut self, source: &str, selected: &str, due: u64) {
+    pub fn schedule(
+        &mut self,
+        source: &str,
+        selected: &str,
+        now: u64,
+        due: u64,
+        trace: &mut Trace,
+    ) {
         let Some(key) = Self::identity(source) else {
             return;
         };
@@ -90,11 +109,37 @@ impl CourtesyPlanner {
                 })
                 .or(self.link)
         };
+        self.cancel_waiting(now, trace, "superseded");
         self.pending = chosen.map(|media| Pending {
             source: key,
             media,
             due,
+            ticket: trace.queue(now, "courtesy", "local", Some(due)),
         });
+    }
+    pub fn set_phone(&mut self, media: PreparedMedia) {
+        if media.1 {
+            self.phone = Some(self.media.len());
+            self.media.push(media);
+        }
+    }
+    pub fn phone_edge(&mut self, ingress: u64, keyed: bool, now: u64, due: u64, trace: &mut Trace) {
+        let Some(media) = self.phone else {
+            return;
+        };
+        let source = Source::Phone(ingress);
+        if !keyed {
+            self.cancel_waiting(now, trace, "superseded");
+            let ticket = trace.queue(now, "courtesy", "local", Some(due));
+            self.pending = Some(Pending {
+                source,
+                media,
+                due,
+                ticket,
+            });
+        } else if self.pending.is_some_and(|item| item.source == source) {
+            self.cancel_waiting(now, trace, "source_rekeyed");
+        }
     }
     pub fn pending(&self) -> bool {
         self.pending.is_some()
@@ -103,6 +148,13 @@ impl CourtesyPlanner {
         self.pending.is_some_and(|p| now >= p.due)
     }
     pub fn pop(&mut self) -> Option<usize> {
-        self.pending.take().map(|p| p.media)
+        let pending = self.pending.take()?;
+        self.media[pending.media].9 = Some(pending.ticket);
+        Some(pending.media)
+    }
+    pub fn cancel_waiting(&mut self, now: u64, trace: &mut Trace, cause: &'static str) {
+        if let Some(pending) = self.pending.take() {
+            trace.record(pending.ticket, now, TelemetryPhase::Cancelled, Some(cause));
+        }
     }
 }

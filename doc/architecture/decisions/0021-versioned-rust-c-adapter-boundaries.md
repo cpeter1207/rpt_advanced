@@ -60,7 +60,7 @@ separation rule in the other direction, from Rust to external C dependencies.
 
 ## Implementation status — 2026-10-15
 
-The metadata-only C loader selects `librptadv_asterisk_adapter.so.1`, a Rust
+The metadata-only C loader selects `librptadv_asterisk_adapter.so.2`, a Rust
 `cdylib` that owns the public Asterisk entry and host-service calls. It forwards
 through versioned C-compatible descriptors to the product rather than exposing
 the product's private Rust ABI. The independently replaceable Asterisk

@@ -79,6 +79,33 @@ fn remote_base_non_fm_allows_link_transmit_without_repeating_open_receive() {
 }
 
 #[test]
+fn transmit_programme_applies_one_gain_to_an_overloaded_mix() {
+    let (mut node, _control) = NodeController::new(
+        ControllerSettings {
+            full_duplex: true,
+            ..ControllerSettings::default()
+        },
+        vec![],
+        vec![],
+        CourtesySettings::default(),
+    )
+    .unwrap();
+
+    let mut local = [0.5, 0.75, -0.75, -0.5, 0.125];
+    let link = [0.625, 0.75, -0.75, -0.625, 0.125];
+    assert!(node.process_audio(true, true, &link, &mut local));
+    for (actual, mixed) in local.iter().zip([1.125, 1.5, -1.5, -1.125, 0.25]) {
+        assert!((actual - mixed * 0.6).abs() < 1e-6, "{local:?}");
+    }
+
+    // Clean programme stays bit-identical after the preceding overload releases.
+    node.process_audio(true, false, &[], &mut [0.0; 4_800]);
+    let mut low = [0.375, -0.3125];
+    node.process_audio(true, false, &[], &mut low);
+    assert_eq!(low, [0.375, -0.3125]);
+}
+
+#[test]
 fn incoming_text_interrupts_voice_telemetry_with_its_morse_fallback() {
     for peer_reply in [false, true] {
         let (mut node, mut control) = NodeController::new(
@@ -109,6 +136,7 @@ fn incoming_text_interrupts_voice_telemetry_with_its_morse_fallback() {
             &[],
             &mut output,
             ParrotOutput {
+                branches: None,
                 samples: &mut parrot,
                 active: &mut active,
                 replies: Some(&mut replies),
@@ -156,6 +184,7 @@ fn text_local_mix_callback_does_not_allocate_or_release_storage() {
         &[],
         &mut output,
         ParrotOutput {
+            branches: None,
             samples: &mut parrot,
             active: &mut active,
             replies: None,
@@ -742,8 +771,8 @@ fn receive_defers_status_and_switches_identifiers_and_announcements_to_morse() {
                     _ => {
                         let reply = (source == 3).then(|| peer.reply_target());
                         assert!(control.queue_prepared_status(media(0.75, 100).reply_to(reply)));
-                        node.telemetry.poll_status();
-                        node.telemetry.start_status();
+                        node.telemetry.poll_status(node.now);
+                        node.telemetry.start_status(node.now);
                         telemetry::Source::Status
                     }
                 });
@@ -759,6 +788,7 @@ fn receive_defers_status_and_switches_identifiers_and_announcements_to_morse() {
                         &[],
                         &mut radio,
                         ParrotOutput {
+                            branches: None,
                             samples: &mut parrot,
                             active: &mut parrot_active,
                             replies: Some(&mut replies),
@@ -914,6 +944,7 @@ fn regenerate(
         &[],
         samples,
         ParrotOutput {
+            branches: None,
             samples: &mut parrot,
             active: &mut active,
             replies: None,
@@ -1041,6 +1072,7 @@ fn regeneration_consumption_does_not_allocate_or_free_on_audio() {
         &[],
         &mut audio,
         ParrotOutput {
+            branches: None,
             samples: &mut parrot,
             active: &mut active,
             replies: None,
@@ -1075,6 +1107,9 @@ fn peer_reply_completion_and_cancellation_never_allocate_or_free_on_audio() {
         let mut parrot = [0.0];
         let mut active = false;
         let mut replies = [PeerReplySample::default()];
+        let [mut station, mut voice, mut telemetry_input, mut telemetry] = [[f32::NAN]; 4];
+        let mut incoming_text = [0.0];
+        let mut regeneration = [f32::NAN];
         AUDIO_ALLOCATIONS.with(|count| count.set(Some(0)));
         let keyed = node.process_audio_with_parrot(
             false,
@@ -1083,6 +1118,14 @@ fn peer_reply_completion_and_cancellation_never_allocate_or_free_on_audio() {
             &[],
             &mut radio,
             ParrotOutput {
+                branches: Some(LocalTransmitBranches {
+                    station_input: &mut station,
+                    voice: &mut voice,
+                    public_telemetry_input: &mut telemetry_input,
+                    public_telemetry: &mut telemetry,
+                    incoming_text: &mut incoming_text,
+                    regeneration: &mut regeneration,
+                }),
                 samples: &mut parrot,
                 active: &mut active,
                 replies: Some(&mut replies),
@@ -1095,6 +1138,8 @@ fn peer_reply_completion_and_cancellation_never_allocate_or_free_on_audio() {
         assert!(!keyed);
         assert!(!node.ctcss_enabled());
         assert_eq!(radio, [0.0]);
+        assert_eq!((telemetry_input, telemetry), ([0.0], [0.0]));
+        assert_eq!((incoming_text, regeneration), ([0.0], [0.0]));
         assert_eq!(replies[0].sample, if ended { 0.0 } else { 0.4 });
         assert_eq!(control.reclaim().count(), 1);
     }
@@ -1138,6 +1183,7 @@ fn pending_peer_reply_stays_silent_and_ended_reply_is_reclaimed() {
             &[],
             &mut radio,
             ParrotOutput {
+                branches: None,
                 samples: &mut parrot,
                 active: &mut active,
                 replies: Some(replies),
@@ -1326,6 +1372,7 @@ fn parrot_output_size_mismatch_skips_sample_processing() {
         &[],
         &mut audio,
         ParrotOutput {
+            branches: None,
             samples: &mut parrot,
             active: &mut active,
             replies: None,
@@ -1790,6 +1837,39 @@ fn queued_parrot() -> PreparedMedia {
 }
 
 #[test]
+fn parrot_epoch_rejects_delayed_preparation_and_rearms_after_unkey() {
+    let (mut node, mut control) = NodeController::new(
+        ControllerSettings {
+            parrot_enabled: true,
+            ..ControllerSettings::default()
+        },
+        vec![],
+        vec![],
+        CourtesySettings::default(),
+    )
+    .unwrap();
+    node.observe_parrot_at_epoch(true, &[0.25], 0);
+    node.observe_parrot_at_epoch(false, &[], 0);
+    let prior = control.take_parrot_capture().unwrap();
+    assert!(control.queue_captured_parrot(&prior, queued_parrot()));
+
+    node.observe_parrot_at_epoch(true, &[0.875], 1);
+    node.observe_parrot_at_epoch(true, &[0.875], 2);
+    node.observe_parrot_at_epoch(true, &[0.875], 2);
+    node.observe_parrot_at_epoch(false, &[], 2);
+    assert_eq!(control.reclaim().count(), 1);
+    assert!(!control.queue_captured_parrot(&prior, queued_parrot()));
+    control.recycle_parrot_capture(prior);
+    assert!(control.take_parrot_capture().is_none());
+
+    node.observe_parrot_at_epoch(true, &[0.125], 2);
+    node.observe_parrot_at_epoch(false, &[], 2);
+    let fresh = control.take_parrot_capture().unwrap();
+    assert_eq!(fresh.samples(), &[0.125]);
+    assert!(control.queue_captured_parrot(&fresh, queued_parrot()));
+}
+
+#[test]
 fn receive_activity_discards_a_queued_parrot_before_playback() {
     let (mut node, mut control) = NodeController::new(
         ControllerSettings {
@@ -1813,6 +1893,7 @@ fn receive_activity_discards_a_queued_parrot_before_playback() {
         &[],
         &mut audio,
         ParrotOutput {
+            branches: None,
             samples: &mut parrot,
             active: &mut parrot_active,
             replies: None,
@@ -1850,6 +1931,7 @@ fn receive_activity_interrupts_and_discards_active_parrot_audio() {
         &[],
         &mut audio,
         ParrotOutput {
+            branches: None,
             samples: &mut parrot,
             active: &mut parrot_active,
             replies: None,
@@ -1867,6 +1949,7 @@ fn receive_activity_interrupts_and_discards_active_parrot_audio() {
         &[],
         &mut audio,
         ParrotOutput {
+            branches: None,
             samples: &mut parrot,
             active: &mut parrot_active,
             replies: None,
@@ -1904,6 +1987,7 @@ fn disabling_parrot_interrupts_playback_at_the_next_audio_boundary() {
         &[],
         &mut rf,
         ParrotOutput {
+            branches: None,
             samples: &mut parrot,
             active: &mut active,
             replies: None,
@@ -1921,6 +2005,7 @@ fn disabling_parrot_interrupts_playback_at_the_next_audio_boundary() {
         &[],
         &mut rf,
         ParrotOutput {
+            branches: None,
             samples: &mut parrot,
             active: &mut active,
             replies: None,
@@ -2256,14 +2341,15 @@ fn courtesy_latest_unkey_validates_identity_and_cancels_only_its_source() {
     });
     assert_eq!(planner.pop(), None);
     assert!(!planner.ready(u64::MAX));
+    let (mut trace, _) = observation::channel();
     let invalid = "x".repeat(64);
-    planner.schedule(&invalid, "selected", 0);
+    planner.schedule(&invalid, "selected", 0, 0, &mut trace);
     assert!(!planner.pending());
-    planner.schedule("", "", 2);
-    planner.schedule("direct", "selected", 3);
-    planner.schedule("other", "", 4);
-    planner.cancel(&invalid);
-    planner.cancel("direct");
+    planner.schedule("", "", 0, 2, &mut trace);
+    planner.schedule("direct", "selected", 0, 3, &mut trace);
+    planner.schedule("other", "", 0, 4, &mut trace);
+    planner.cancel(&invalid, 0, &mut trace);
+    planner.cancel("direct", 0, &mut trace);
     assert!(!planner.ready(1));
     assert!(!planner.ready(2));
     assert!(!planner.ready(3));
@@ -2271,11 +2357,11 @@ fn courtesy_latest_unkey_validates_identity_and_cancels_only_its_source() {
     assert_eq!(planner.pop(), Some(1));
     assert_eq!(planner.pop(), None);
     let maximum = "x".repeat(63);
-    planner.schedule(&maximum, "selected", 5);
+    planner.schedule(&maximum, "selected", 0, 5, &mut trace);
     assert_eq!(planner.pop(), Some(2));
     assert_eq!(planner.pop(), None);
-    planner.schedule(&maximum, "", 6);
-    planner.cancel(&maximum);
+    planner.schedule(&maximum, "", 0, 6, &mut trace);
+    planner.cancel(&maximum, 0, &mut trace);
     assert!(!planner.pending());
 }
 
@@ -2971,6 +3057,68 @@ fn kerchunk_does_not_interrupt_other_traffic_or_its_normal_release() {
 }
 
 #[test]
+fn due_receiver_courtesy_plays_while_polite_status_awaits_first_pcm() {
+    for already_audible in [true, false] {
+        let mut preparation = MessagePreparation::new(1);
+        let status = preparation
+            .register(0)
+            .unwrap()
+            .with_delivery(samples(5_000), PoliteDelivery::default());
+        let (mut node, mut control) = NodeController::new(
+            ControllerSettings {
+                full_duplex: true,
+                courtesy_delay_ms: 500,
+                hang_ms: 1_000,
+                telemetry_duck_db: 0,
+                ..ControllerSettings::default()
+            },
+            vec![],
+            vec![],
+            CourtesySettings {
+                receiver: Some(media(0.25, 1)),
+                ..CourtesySettings::default()
+            },
+        )
+        .unwrap();
+        assert!(node.process_audio(true, false, &[], &mut [0.0; 96]));
+        assert!(control.queue_prepared_status(status));
+        for _ in 0..23_999 {
+            let mut sample = [0.0];
+            assert!(node.process_audio(false, false, &[], &mut sample));
+            assert_eq!(sample, [0.0]);
+        }
+        let request = preparation.take_request().expect("status awaiting PCM");
+        if already_audible {
+            assert!(
+                preparation
+                    .complete(request.attempt, Ok(media(0.75, 2)))
+                    .is_ok()
+            );
+        }
+        let mut before_due = [0.0];
+        node.process_audio(false, false, &[], &mut before_due);
+        assert_eq!(before_due, [if already_audible { 0.75 } else { 0.0 }]);
+        let mut due = [0.0; 2];
+        assert!(node.process_audio(false, false, &[], &mut due));
+        if already_audible {
+            assert_eq!(due, [0.75, 0.25], "finish audible status before courtesy");
+        } else {
+            assert_eq!(due, [0.25, 0.0], "silent status must yield to due courtesy");
+            assert!(
+                preparation
+                    .complete(request.attempt, Ok(media(0.75, 2)))
+                    .is_ok()
+            );
+            let mut resumed = [0.0; 3];
+            node.process_audio(false, false, &[], &mut resumed);
+            assert_eq!(resumed, [0.75, 0.75, 0.0]);
+        }
+        assert_eq!(control.reclaim().count(), 1);
+        assert!(preparation.take_request().is_none());
+    }
+}
+
+#[test]
 fn local_courtesy_delay_cancellation_and_short_receive_suppression() {
     let settings = ControllerSettings {
         full_duplex: true,
@@ -2986,9 +3134,24 @@ fn local_courtesy_delay_cancellation_and_short_receive_suppression() {
     node.process_audio(true, false, &[], &mut [0.0; 48]);
     node.process_audio(false, false, &[], &mut [0.0; 96]);
     assert!(!node.courtesy.pending());
+    assert_eq!(
+        node.take_local_receive_release(),
+        Some(LocalReceiveRelease {
+            duration_samples: 48,
+            kerchunk: true,
+        })
+    );
+    assert_eq!(node.take_local_receive_release(), None);
     node.process_audio(true, false, &[], &mut [0.0; 49]);
     node.process_event(false, false);
     assert!(node.courtesy.pending());
+    assert_eq!(
+        node.take_local_receive_release(),
+        Some(LocalReceiveRelease {
+            duration_samples: 49,
+            kerchunk: false,
+        })
+    );
     node.process_event(true, false);
     assert!(!node.courtesy.pending());
     node.process_audio(true, false, &[], &mut [0.0; 49]);
@@ -3509,7 +3672,7 @@ fn first_key_does_not_play_an_expired_periodic_id_before_its_initial_id() {
     node.process_event(true, false);
     for (polite, expected) in [(None, Some(2)), (Some(60_000), None)] {
         node.ids[0].polite_maximum_wait_ms = polite;
-        assert_eq!(node.select_identifier(true, true, false), expected);
+        assert_eq!(node.select_identifier(true, true, false).1, expected);
     }
     let mut played = Vec::new();
     let mut previous = None;
@@ -3751,4 +3914,88 @@ fn empty_courtesy_override_falls_back_to_generic_media() {
     let mut output = [0.0];
     node.process_audio(false, false, &[], &mut output);
     assert_eq!(output, [0.4]);
+}
+
+#[test]
+fn nonselected_qualified_peer_resets_scheduler_continuous_idle_without_keying() {
+    let (mut node, _) = NodeController::new(
+        ControllerSettings::default(),
+        vec![],
+        vec![],
+        CourtesySettings::default(),
+    )
+    .unwrap();
+    node.process_audio_outputs(false, false, true, &[], &mut [0.0; 48], None);
+    assert!(node.activity().is_active());
+    node.process_audio(false, false, &[], &mut [0.0; 48]);
+    assert!(!node.activity().is_active());
+    assert_eq!(node.activity().last_sample(), Some(47));
+}
+
+#[test]
+fn transmit_branch_taps_report_public_audio_before_the_sum() {
+    let courtesy = CourtesySettings {
+        link: Some(media(0.125, 16)),
+        ..CourtesySettings::default()
+    };
+    let (mut node, _) = NodeController::new(
+        ControllerSettings {
+            full_duplex: true,
+            telemetry_duck_db: -6,
+            ..ControllerSettings::default()
+        },
+        vec![],
+        vec![],
+        courtesy,
+    )
+    .unwrap();
+    node.link_unkeyed("2000", "", false);
+    let mut opening = [0.0];
+    node.process_audio(false, false, &[], &mut opening);
+    assert_eq!(opening, [0.125]);
+
+    for replacement in [None, Some(0.0), Some(0.25)] {
+        let mut audio = [0.1875];
+        let mut voice = [f32::NAN];
+        let mut telemetry = [f32::NAN];
+        let mut telemetry_input = [f32::NAN];
+        let mut station = [0.0];
+        let mut incoming_text = [0.03125];
+        let mut regeneration = [f32::NAN];
+        node.process_audio_with_parrot(
+            true,
+            true,
+            true,
+            &[0.0625],
+            &mut audio,
+            ParrotOutput {
+                samples: &mut [0.0],
+                active: &mut false,
+                replies: None,
+                regeneration: Some(&[replacement]),
+                local_media: crate::link::LocalMedia {
+                    samples: &[0.0625],
+                    active: true,
+                },
+                branches: Some(LocalTransmitBranches {
+                    station_input: &mut station,
+                    voice: &mut voice,
+                    public_telemetry_input: &mut telemetry_input,
+                    public_telemetry: &mut telemetry,
+                    incoming_text: &mut incoming_text,
+                    regeneration: &mut regeneration,
+                }),
+            },
+        );
+        assert_eq!(telemetry_input, [0.125]);
+        if let Some(replacement) = replacement {
+            assert_eq!((audio, voice, telemetry), ([replacement], [0.0], [0.0]));
+            assert_eq!((incoming_text, regeneration), ([0.0], [replacement]));
+        } else {
+            assert_eq!((incoming_text, regeneration), ([0.03125], [0.0]));
+            assert_eq!(voice, [0.25]);
+            assert!(telemetry[0] > 0.124 && telemetry[0] < telemetry_input[0]);
+            assert_eq!(audio, [voice[0] + telemetry[0] + 0.0625]);
+        }
+    }
 }

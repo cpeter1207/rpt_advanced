@@ -21,6 +21,7 @@ struct StreamFixture {
     state: Arc<SpeechFixture>,
     text: String,
     read: usize,
+    format_pending: bool,
 }
 
 pub(crate) fn preparer(state: Arc<SpeechFixture>) -> NativeMediaPreparer {
@@ -28,7 +29,7 @@ pub(crate) fn preparer(state: Arc<SpeechFixture>) -> NativeMediaPreparer {
         context: *const c_void,
         request: *const super::super::ffi::rptadv_media_speech_request,
         _: *const super::super::ffi::rptadv_media_cancellation,
-        output: *mut super::super::ffi::rptadv_media_stream,
+        output: *mut *mut c_void,
     ) -> i32 {
         let state = unsafe { &*context.cast::<Arc<SpeechFixture>>() }.clone();
         let request = unsafe { &*request };
@@ -42,15 +43,13 @@ pub(crate) fn preparer(state: Arc<SpeechFixture>) -> NativeMediaPreparer {
         let active = state.active.fetch_add(1, Ordering::AcqRel) + 1;
         state.maximum.fetch_max(active, Ordering::AcqRel);
         unsafe {
-            *output = super::super::ffi::rptadv_media_stream {
-                handle: Box::into_raw(Box::new(StreamFixture {
-                    state,
-                    text,
-                    read: 0,
-                }))
-                .cast(),
-                sample_rate_hz: 48000,
-            };
+            *output = Box::into_raw(Box::new(StreamFixture {
+                state,
+                text,
+                read: 0,
+                format_pending: true,
+            }))
+            .cast();
         }
         0
     }
@@ -59,9 +58,19 @@ pub(crate) fn preparer(state: Arc<SpeechFixture>) -> NativeMediaPreparer {
         cancel: *const super::super::ffi::rptadv_media_cancellation,
         output: *mut f32,
         capacity: usize,
-        count: *mut usize,
+        event: *mut super::super::ffi::rptadv_media_step,
     ) -> i32 {
         let stream = unsafe { &mut *handle.cast::<StreamFixture>() };
+        if std::mem::take(&mut stream.format_pending) {
+            unsafe {
+                *event = super::super::ffi::rptadv_media_step {
+                    kind: 1,
+                    sample_rate_hz: 48000,
+                    samples: 0,
+                };
+            }
+            return 0;
+        }
         let body = stream
             .text
             .split_once(" says: ")
@@ -71,13 +80,20 @@ pub(crate) fn preparer(state: Arc<SpeechFixture>) -> NativeMediaPreparer {
         }
         let cancel = unsafe { &*cancel };
         // Deterministic external-source stall, released by the test or cancellation.
-        while (body.starts_with('A') || body.starts_with('é'))
+        if (body.starts_with('A') || body.starts_with('é'))
             && !stream.state.release.load(Ordering::Acquire)
         {
             if unsafe { cancel.is_cancelled.unwrap()(cancel.context) } != 0 {
                 return -6;
             }
-            thread::park_timeout(Duration::from_millis(1));
+            unsafe {
+                *event = super::super::ffi::rptadv_media_step {
+                    kind: 0,
+                    sample_rate_hz: 0,
+                    samples: 0,
+                };
+            }
+            return 0;
         }
         let frames = if body.starts_with("empty") {
             0
@@ -87,7 +103,11 @@ pub(crate) fn preparer(state: Arc<SpeechFixture>) -> NativeMediaPreparer {
             usize::from(stream.read == 0)
         };
         unsafe {
-            *count = frames;
+            *event = super::super::ffi::rptadv_media_step {
+                kind: if frames == 0 { 3 } else { 2 },
+                sample_rate_hz: 0,
+                samples: frames,
+            };
             std::slice::from_raw_parts_mut(output, frames).fill(if body.starts_with('B') {
                 0.5
             } else {
@@ -109,7 +129,7 @@ pub(crate) fn preparer(state: Arc<SpeechFixture>) -> NativeMediaPreparer {
     preparer.speech = Arc::new(super::super::Context {
         handle: NonNull::new(Box::into_raw(Box::new(state)).cast()).unwrap(),
         destroy,
-        read_stream: read,
+        step_stream: read,
         close_stream: close,
         open_file: None,
         open_speech: Some(open),
@@ -306,7 +326,14 @@ fn text_admission_full_ring_obeys_process_budget_and_releases_quota_after_retire
         executor.admit(message(1, "B recovered".into()), speech()),
         Admission::Accepted
     );
-    until(|| reader.render(&mut output));
+    let mut observed = [0.0; 16];
+    // Existing private progress audio in the sum must never enter the public tap.
+    output.fill(0.25);
+    until(|| reader.render_observed(&mut output, Some(&mut observed)));
+    assert!(observed.iter().any(|sample| *sample != 0.0));
+    for (sum, public) in output.into_iter().zip(observed) {
+        assert_eq!(sum, 0.25 + public);
+    }
     executor.cancel(reader.origin());
     assert!(!reader.render(&mut [0.0; 16]));
     executor.stop();

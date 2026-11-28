@@ -20,12 +20,12 @@ fn compound_duration_rejects_an_oversized_runtime_catalog_branch() {
 
 #[test]
 fn private_phone_authentication_forms_have_no_credential_arguments() {
-    use super::messages::PhoneAuthenticationPrompt as Prompt;
+    use super::messages::{OperationResult, PhoneAuthenticationPrompt as Prompt};
     let catalog = MessageCatalog::from_sources("en-US", ENGLISH, None).unwrap();
     for (prompt, expected) in [
-        (Prompt::Login, "MAILBOX AND PIN"),
-        (Prompt::Retry, "LOGIN FAILED RETRY"),
-        (Prompt::Authenticated, "LOGIN OK UNLOCK SEPARATE"),
+        (Prompt::Login, "MAILBOX POUND"),
+        (Prompt::Password, "PASSWORD POUND"),
+        (Prompt::Retry, "LOGIN FAILED MAILBOX POUND"),
     ] {
         let forms = catalog
             .format(&Message::PhoneAuthentication { prompt })
@@ -36,6 +36,36 @@ fn private_phone_authentication_forms_have_no_credential_arguments() {
                 .iter()
                 .all(|form| form.len() <= 127)
         );
+    }
+    for (message, expected, morse) in [
+        (
+            Message::PhoneAuthentication {
+                prompt: Prompt::Authenticated,
+            },
+            "Mailbox authenticated",
+            "LOGIN OK",
+        ),
+        (
+            Message::OperationResult {
+                result: OperationResult::CallerMuted,
+            },
+            "Muted",
+            "MUTED",
+        ),
+        (
+            Message::OperationResult {
+                result: OperationResult::CallerUnmuted,
+            },
+            "Unmuted",
+            "UNMUTED",
+        ),
+    ] {
+        let forms = catalog.format(&message).unwrap();
+        assert_eq!(
+            (forms.text.as_str(), forms.tts.as_str()),
+            (expected, expected)
+        );
+        assert_eq!(forms.morse, morse);
     }
 }
 
@@ -750,4 +780,21 @@ fn english_catalog_rejects_fluent_format_errors() {
 fn catalog_load_uses_missing_locale_fallback() {
     let catalog = MessageCatalog::load("fr-CA").unwrap();
     assert!(catalog.format(&Message::NoLinks).is_ok());
+}
+
+#[test]
+fn station_dial_failure_uses_bounded_localized_reason_without_dialed_digits() {
+    let catalog = MessageCatalog::from_sources("en-US", ENGLISH, None).unwrap();
+    for (status, expected) in [
+        (486, "The line is busy."),
+        (408, "The call was not answered."),
+        (603, "The call was declined."),
+        (500, "The call could not be completed."),
+    ] {
+        let forms = catalog
+            .format(&Message::PhoneDialFailure { status })
+            .unwrap();
+        assert_eq!(forms.tts, expected);
+        assert_eq!(forms.text, expected);
+    }
 }

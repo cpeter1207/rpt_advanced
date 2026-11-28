@@ -316,4 +316,4 @@ impl Drop for Endpoint {
 
 #[cfg(test)]
 #[path = "endpoint_tests.rs"]
-mod tests;
+pub(crate) mod tests;

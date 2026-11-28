@@ -19,7 +19,11 @@ impl Fixture {
             .parent()
             .unwrap()
             .join("peer-support/tests/fixtures/echo_owner.rs");
-        let result = Command::new("rustc")
+        let mut compiler = Command::new("rustc");
+        if kind == "managed" {
+            compiler.args(["--cfg", "network"]);
+        }
+        let result = compiler
             .args([
                 "--edition=2024",
                 "--crate-type=cdylib",

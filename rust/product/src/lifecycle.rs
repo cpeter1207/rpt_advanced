@@ -2,27 +2,21 @@
 use crate::{
     abi,
     control::{ControlClient, Descriptor as ControlDescriptor},
-    host::Host,
+    host::{Host, PendingLinkDial, PhoneLinkReply},
     media::{FileDescriptor, NativeMediaPreparer, SpeechDescriptor},
     scheduler_health::SchedulerHealth,
     services::HostServices,
-    site::backends::SiteBackends,
-};
-use rpt_advanced_core::{
-    audio::{DtmfDetector, MorseRenderer, ToneSequence},
-    config::{ConfigDocument, Schema},
-    control::{ControlExecutor, ControlTask},
-    runtime::{RuntimeClock, RuntimeError},
-    schedule,
-    template::MessageTemplate,
 };
 use rpt_advanced_core::{
     command::LinkAction,
     runtime::{
-        RuntimeDispatch,
         dtmf::DigitOperation,
         links::{ConnectAttempt, LinkEffect, RetryWork},
     },
+};
+use rpt_advanced_core::{
+    control::{ControlExecutor, ControlTask},
+    runtime::{RuntimeClock, RuntimeError},
 };
 use std::{
     any::Any,
@@ -36,11 +30,15 @@ use std::{
         mpsc,
     },
     thread::JoinHandle,
-    time::{Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 type ErasedResult = Box<dyn Any + Send>;
 type HostOperation = Box<dyn FnOnce(&mut Host) -> Result<ErasedResult, RuntimeError> + Send>;
+
+#[cfg(target_os = "linux")]
+#[path = "lifecycle_asl.rs"]
+pub(crate) mod asl;
 
 #[cfg(test)]
 static FAIL_DIAL_THREAD: AtomicBool = AtomicBool::new(false);
@@ -65,8 +63,28 @@ fn spawn_dial(operation: impl FnOnce() + Send + 'static) -> std::io::Result<Join
         .spawn(operation)
 }
 
+#[cfg(target_os = "linux")]
+#[path = "lifecycle_bootstrap.rs"]
+pub(crate) mod bootstrap;
+#[cfg(target_os = "linux")]
+#[path = "lifecycle_management.rs"]
+mod management;
+#[cfg(target_os = "linux")]
+#[path = "lifecycle_native.rs"]
+mod native;
 #[path = "lifecycle_site.rs"]
 mod site;
+#[cfg(target_os = "linux")]
+pub(crate) use native::PreparedSite;
+#[cfg(test)]
+pub(crate) use site::{
+    install_delayed_site_bank, site_bank_delay, site_bank_electrical, site_bank_sample,
+};
+
+struct StopBarrier {
+    reason: &'static str,
+    warn_at: Option<Instant>,
+}
 
 pub(crate) struct Engine {
     executor: ControlClient,
@@ -74,30 +92,67 @@ pub(crate) struct Engine {
     services: HostServices,
     origin: Instant,
     health: SchedulerHealth,
-    accepting: AtomicBool,
-    reloading: AtomicBool,
-    revision: AtomicU64,
+    stop_barrier: Mutex<Option<StopBarrier>>,
+    accepting: Arc<AtomicBool>,
+    reloading: Arc<AtomicBool>,
+    revision: Arc<AtomicU64>,
     lost_digits: AtomicBool,
-    event_busy: AtomicU64,
     calls: Mutex<usize>,
     drained: Condvar,
     ticker: Mutex<Option<JoinHandle<()>>>,
     jobs: Mutex<Vec<JoinHandle<()>>>,
-    // Drop selected provider code only after Host and endpoint workers retire.
-    site_backends: Arc<SiteBackends>,
+    // The service and its management writer both retain this Engine. A failed
+    // shutdown keeps the global owner; the last drained owner releases the lease.
+    #[cfg(target_os = "linux")]
+    _managed_store: Option<Arc<crate::management::ManagedStore>>,
+    #[cfg(target_os = "linux")]
+    management_state: management::ManagementState,
 }
+/// Read-only fence for asynchronous media and dial receipts. The atomics cannot keep the Engine alive.
+#[cfg(target_os = "linux")]
+#[derive(Clone)]
+pub(crate) struct MediaAdmission {
+    accepting: Arc<AtomicBool>,
+    reloading: Arc<AtomicBool>,
+    revision: Arc<AtomicU64>,
+    expected: u64,
+}
+
+#[cfg(target_os = "linux")]
+impl MediaAdmission {
+    pub(crate) fn current(&self) -> bool {
+        self.accepting.load(Ordering::Acquire)
+            && !self.reloading.load(Ordering::Acquire)
+            && self.revision.load(Ordering::Acquire) == self.expected
+    }
+}
+
 pub(crate) struct Call(Arc<Engine>);
 enum Dial {
     Connect(ConnectAttempt),
     Retry(RetryWork),
 }
+enum DialTarget {
+    Host {
+        destination: String,
+        wire_local: String,
+    },
+    #[cfg(target_os = "linux")]
+    Managed(Box<crate::host::asl::Account>, Option<u64>),
+}
 struct DialJob {
     local: String,
     attempt: Dial,
-    event: Option<RuntimeDispatch>,
     report: bool,
 }
 impl Dial {
+    fn phone_reply(&self) -> Option<&rpt_advanced_core::link::PeerReply> {
+        match self {
+            Self::Connect(work) => work.phone_reply(),
+            Self::Retry(work) => work.phone_reply(),
+        }
+    }
+
     fn remote(&self) -> &str {
         match self {
             Self::Connect(work) => work.remote(),
@@ -125,6 +180,71 @@ impl Drop for Call {
     }
 }
 impl Engine {
+    fn new(services: HostServices, executor: ControlClient, origin: Instant) -> Self {
+        Self {
+            executor,
+            host: Mutex::new(None),
+            services,
+            origin,
+            health: SchedulerHealth::default(),
+            stop_barrier: Mutex::new(None),
+            accepting: Arc::new(AtomicBool::new(true)),
+            reloading: Arc::new(AtomicBool::new(false)),
+            revision: Arc::new(AtomicU64::new(1)),
+            lost_digits: AtomicBool::new(false),
+            calls: Mutex::new(0),
+            drained: Condvar::new(),
+            ticker: Mutex::new(None),
+            jobs: Mutex::new(Vec::new()),
+            #[cfg(target_os = "linux")]
+            _managed_store: None,
+            #[cfg(target_os = "linux")]
+            management_state: Default::default(),
+        }
+    }
+
+    /// Start the serialized control owner without selecting a radio configuration.
+    /// The process owner retains the descriptors until successful stop and drain.
+    #[cfg(target_os = "linux")]
+    pub(crate) unsafe fn start_management(
+        store: Arc<crate::management::ManagedStore>,
+        host: *const abi::rptadv_host_services_v11,
+        control: *const ControlDescriptor,
+        file: *const FileDescriptor,
+        speech: *const SpeechDescriptor,
+    ) -> Result<Arc<Self>, RuntimeError> {
+        // SAFETY: the caller supplies process-lifetime descriptor storage for all four owners.
+        let (services, executor, media) = unsafe { host_components(host, control, file, speech) }?;
+        let origin = Instant::now();
+        let engine = Arc::new(Self {
+            _managed_store: Some(store),
+            ..Self::new(services, executor, origin)
+        });
+        let target = Arc::clone(&engine);
+        let (send, receive) = mpsc::sync_channel(1);
+        engine.enqueue(move || {
+            let result = Host::management_only(media, services, origin).map(|host| {
+                let gate = host.runtime.configuration_gate();
+                gate.store(true, Ordering::Release);
+                target.management_state.install_gate(gate);
+                assert!(
+                    target
+                        .management_state
+                        .status_edges
+                        .set(Arc::clone(&host.status_edges))
+                        .is_ok()
+                );
+                *target
+                    .host
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner()) = Some(host);
+            });
+            let _ = send.send(result);
+        })?;
+        receive.recv().map_err(|_| RuntimeError::Rejected)??;
+        Ok(engine)
+    }
+
     pub(crate) fn execute(
         self: &Arc<Self>,
         local: String,
@@ -151,6 +271,11 @@ impl Engine {
     ) -> Result<LinkEffect, RuntimeError> {
         use rpt_advanced_core::runtime::dtmf::DigitOutcome;
         match outcome {
+            DigitOutcome::Mapped(input) => {
+                let name = local.to_owned();
+                let clock = self.clock();
+                self.run(move |host| host.mapped_effect(&name, input, clock))
+            }
             DigitOutcome::MacroStopped { reply } => {
                 let local = local.to_owned();
                 self.run(move |host| host.runtime.queue_macro_stopped(&local, reply))?;
@@ -163,6 +288,19 @@ impl Engine {
             DigitOutcome::PadTest(report) => {
                 let local = local.to_owned();
                 self.run(move |host| host.runtime.queue_pad_test(&local, &report))?;
+                Ok(LinkEffect::None)
+            }
+            DigitOutcome::ReceivedDigit(symbol, origin) => {
+                let local = local.to_owned();
+                self.run(move |host| {
+                    host.regenerate_digit(
+                        &local,
+                        crate::link::regeneration::RegenerationDigit {
+                            symbol,
+                            origin: Some(origin),
+                        },
+                    )
+                })?;
                 Ok(LinkEffect::None)
             }
             DigitOutcome::Regenerate(digit) => {
@@ -214,18 +352,9 @@ impl Engine {
         local: &str,
         operation: DigitOperation,
     ) -> Result<LinkEffect, RuntimeError> {
-        let verify = operation.command.action == LinkAction::Command && operation.digit.is_none();
-        let verified = if verify {
-            let name = local.to_owned();
-            let remote = operation.command.node.clone();
-            self.run(move |host| host.lookup(&name, &remote, None))
-                .is_ok()
-        } else {
-            false
-        };
-        let name = local.to_owned();
+        let local = local.to_owned();
         let clock = self.clock();
-        self.run(move |host| host.runtime.command(&name, operation, clock, verified))
+        self.run(move |host| host.command(&local, operation, clock))
     }
     fn effect(
         self: &Arc<Self>,
@@ -233,18 +362,57 @@ impl Engine {
         effect: LinkEffect,
         revision: u64,
     ) -> Result<(), RuntimeError> {
-        if let LinkEffect::Connect(attempt) = effect {
-            self.dial(local, Dial::Connect(attempt), revision)
-        } else {
-            let clock = self.clock();
-            let engine = Arc::clone(self);
-            self.run(move |host| {
-                if !engine.current(revision) {
-                    return Err(RuntimeError::Rejected);
-                }
-                host.immediate(&local, effect, clock)
-            })
+        match effect {
+            LinkEffect::Connect(attempt) => self.dial(local, Dial::Connect(attempt), revision),
+            #[cfg(target_os = "linux")]
+            LinkEffect::PhoneDial(number, permit) => {
+                self.begin_phone_dial(local, number, permit, revision, false)
+            }
+            #[cfg(target_os = "linux")]
+            LinkEffect::PhoneHangup(permit) => {
+                let engine = Arc::clone(self);
+                self.run(move |host| {
+                    if !engine.current(revision) || !permit.current(Some(engine.elapsed_ms())) {
+                        return Err(RuntimeError::Rejected);
+                    }
+                    host.hangup_outgoing_phone(&local)
+                })
+            }
+            effect => {
+                let clock = self.clock();
+                let engine = Arc::clone(self);
+                self.run(move |host| {
+                    if !engine.current(revision) {
+                        return Err(RuntimeError::Rejected);
+                    }
+                    host.immediate(&local, effect, clock)
+                })
+            }
         }
+    }
+    #[cfg(target_os = "linux")]
+    fn begin_phone_dial(
+        self: &Arc<Self>,
+        local: String,
+        number: rpt_advanced_core::command_language::ProtectedOperand<String>,
+        permit: rpt_advanced_core::runtime::dtmf::ActionPermit,
+        revision: u64,
+        report: bool,
+    ) -> Result<(), RuntimeError> {
+        let engine = Arc::clone(self);
+        self.run(move |host| {
+            if !engine.current(revision) || !permit.current(Some(engine.elapsed_ms())) {
+                return Err(RuntimeError::Rejected);
+            }
+            host.begin_phone_dial(
+                local,
+                &number,
+                Arc::downgrade(&engine),
+                permit,
+                revision,
+                report,
+            )
+        })
     }
     fn dial(
         self: &Arc<Self>,
@@ -256,25 +424,110 @@ impl Engine {
         let remote = attempt.remote().to_owned();
         let destination_remote = remote.clone();
         let destination = if self.current(revision) && attempt.current(self.elapsed_ms()) {
-            self.run(move |host| host.lookup(&name, &destination_remote, None))
+            self.run(move |host| {
+                #[cfg(target_os = "linux")]
+                if host.runtime.modular_configuration().is_some()
+                    && rpt_advanced_core::link::PeerIdentity::from_operator(&destination_remote)
+                        .map_err(|_| RuntimeError::Rejected)?
+                        .protocol()
+                        == rpt_advanced_core::link::ProtocolId::AllStarLink
+                {
+                    let account =
+                        host.asl_account(name.parse().map_err(|_| RuntimeError::Rejected)?)?;
+                    if !account.permits(&destination_remote) {
+                        return Err(RuntimeError::Rejected);
+                    }
+                    return Ok(DialTarget::Managed(
+                        Box::new(account),
+                        host.handoff_owner(&name),
+                    ));
+                }
+                Ok(DialTarget::Host {
+                    destination: host.lookup(&name, &destination_remote, None)?,
+                    wire_local: host.wire_local(&name, &destination_remote)?,
+                })
+            })
         } else {
             Err(RuntimeError::Rejected)
         };
+        #[cfg(target_os = "linux")]
+        let mut managed = None;
+        #[cfg(target_os = "linux")]
+        let mut observed_asl = None;
+        let current = || self.current(revision) && attempt.current(self.elapsed_ms());
         let io = destination
             .ok()
-            .filter(|_| self.current(revision) && attempt.current(self.elapsed_ms()))
-            .and_then(|destination| {
-                self.services
-                    .dial(&destination, &local, crate::host::MAXIMUM_FRAMES, || {
-                        self.current(revision) && attempt.current(self.elapsed_ms())
-                    })
-                    .ok()
+            .filter(|_| current())
+            .and_then(|target| match target {
+                DialTarget::Host {
+                    destination,
+                    wire_local,
+                } => self
+                    .services
+                    .dial(
+                        &destination,
+                        &wire_local,
+                        crate::host::MAXIMUM_FRAMES,
+                        current,
+                    )
+                    .ok(),
+                #[cfg(target_os = "linux")]
+                DialTarget::Managed(account, generation) => {
+                    observed_asl =
+                        generation.map(|generation| crate::host::status::PendingAslDial {
+                            station: account.station,
+                            account: account.identity(),
+                            generation,
+                            admission: self.media_admission(revision),
+                        });
+                    let (peer, proof) =
+                        asl::Outbound::originate(self, *account, &remote, current).ok()?;
+                    managed = Some(proof);
+                    Some(peer)
+                }
             });
         let engine = Arc::clone(self);
         self.run_inner(true, move |host| {
             let clock = engine.clock();
             let mode = attempt.mode();
             let current = engine.current(revision);
+            #[cfg(target_os = "linux")]
+            let io = io.filter(|_| {
+                managed.as_ref().is_none_or(|proof| {
+                    current && attempt.current(clock.now_ms) && proof.current(host, &remote)
+                })
+            });
+            #[cfg(target_os = "linux")]
+            let observed_asl = observed_asl.filter(|_| current && attempt.current(clock.now_ms));
+            let phone = if current {
+                attempt.phone_reply().and_then(|reply| {
+                    let generation = host.runtime.node(&local)?.command_work()?;
+                    Some(PhoneLinkReply {
+                        reply: reply.clone(),
+                        generation,
+                        report_failure: matches!(attempt, Dial::Connect(_)),
+                    })
+                })
+            } else {
+                None
+            };
+            let receiver = if current
+                && matches!(&attempt, Dial::Connect(attempt) if attempt.local_receiver())
+            {
+                host.runtime
+                    .node(&local)
+                    .and_then(|node| node.command_work())
+            } else {
+                None
+            };
+            let mut dial = PendingLinkDial {
+                #[cfg(target_os = "linux")]
+                outgoing: true,
+                #[cfg(target_os = "linux")]
+                asl: observed_asl,
+                phone,
+                receiver,
+            };
             let attached = match attempt {
                 Dial::Connect(attempt) if !current => {
                     if let Some(node) = host.runtime.node(&local) {
@@ -284,7 +537,7 @@ impl Engine {
                 }
                 Dial::Connect(attempt) => {
                     host.runtime
-                        .finish_connect(&local, attempt, io.is_some(), clock)?
+                        .finish_connect(&local, attempt, io.is_some(), clock)
                 }
                 Dial::Retry(attempt) => host
                     .runtime
@@ -292,23 +545,29 @@ impl Engine {
                     .ok_or(RuntimeError::MissingNode)?
                     .links()
                     .finish_retry(attempt, current && io.is_some(), clock.now_ms)
-                    .map_err(RuntimeError::Link)?,
+                    .map_err(RuntimeError::Link),
             };
-            if attached {
-                let result = host.attach_peer(
+            let result = attached.and_then(|attached| {
+                if !attached {
+                    return Err(RuntimeError::Rejected);
+                }
+                let result = host.attach_peer_observed(
                     &local,
                     &remote,
                     mode,
                     io.ok_or(RuntimeError::Rejected)?,
                     clock,
+                    &mut dial,
                 );
                 if result.is_err() {
                     host.reject_peer(&local, &remote, clock.now_ms);
                 }
                 result
-            } else {
-                Err(RuntimeError::Rejected)
+            });
+            if result.is_err() {
+                host.settle_link_dial(dial, &local, &remote, false);
             }
+            result
         })
     }
     fn background(
@@ -318,14 +577,21 @@ impl Engine {
         revision: u64,
         report: bool,
     ) -> Result<(), RuntimeError> {
-        if let LinkEffect::Connect(attempt) = effect {
-            self.spawn_dial(local, Dial::Connect(attempt), revision, None, report)
-        } else {
-            let result = self.effect(local.clone(), effect, revision);
-            if report {
-                self.services.command_notice(&local, result.is_ok());
+        match effect {
+            LinkEffect::Connect(attempt) => {
+                self.spawn_dial(local, Dial::Connect(attempt), revision, report)
             }
-            result
+            #[cfg(target_os = "linux")]
+            LinkEffect::PhoneDial(number, permit) => {
+                self.begin_phone_dial(local, number, permit, revision, report)
+            }
+            effect => {
+                let result = self.effect(local.clone(), effect, revision);
+                if report {
+                    self.services.command_notice(&local, result.is_ok());
+                }
+                result
+            }
         }
     }
     fn spawn_dial(
@@ -333,7 +599,6 @@ impl Engine {
         local: String,
         attempt: Dial,
         revision: u64,
-        event: Option<RuntimeDispatch>,
         report: bool,
     ) -> Result<(), RuntimeError> {
         let call = self.enter()?;
@@ -341,7 +606,6 @@ impl Engine {
         let job = Arc::new(Mutex::new(Some(DialJob {
             local,
             attempt,
-            event,
             report,
         })));
         let worker_job = Arc::clone(&job);
@@ -376,18 +640,6 @@ impl Engine {
         let result = self.dial(job.local.clone(), job.attempt, revision);
         if job.report {
             self.services.command_notice(&job.local, result.is_ok());
-        }
-        if let Some(event) = job.event {
-            let completion = self.run(move |host| {
-                host.runtime.complete_event(&event);
-                Ok(())
-            });
-            let _ =
-                self.event_busy
-                    .compare_exchange(revision, 0, Ordering::AcqRel, Ordering::Acquire);
-            if result.is_ok() {
-                completion?;
-            }
         }
         result
     }
@@ -480,12 +732,22 @@ impl Engine {
         }
     }
     /// Use monotonic process time for diagnostics, independent of civil-clock steps.
-    fn elapsed_ms(&self) -> u64 {
+    pub(crate) fn elapsed_ms(&self) -> u64 {
         self.origin.elapsed().as_millis().min(u128::from(u64::MAX)) as u64
     }
     pub(crate) fn clock(&self) -> RuntimeClock {
         capture(self.origin, self.services)
     }
+    #[cfg(target_os = "linux")]
+    pub(crate) fn media_admission(&self, expected: u64) -> MediaAdmission {
+        MediaAdmission {
+            accepting: Arc::clone(&self.accepting),
+            reloading: Arc::clone(&self.reloading),
+            revision: Arc::clone(&self.revision),
+            expected,
+        }
+    }
+
     pub(crate) fn current(&self, revision: u64) -> bool {
         self.accepting.load(Ordering::Acquire)
             && !self.reloading.load(Ordering::Acquire)
@@ -504,26 +766,90 @@ impl Engine {
         }
         drop(jobs);
         let lost = self.lost_digits.swap(false, Ordering::AcqRel);
-        let (operations, site_links) = self.run(move |host| {
+        let (operations, site_links, lookups) = self.run(move |host| {
             if lost {
                 host.lost_digits();
             }
             host.pump(clock)?;
+            #[cfg(target_os = "linux")]
+            host.poll_phone_dials(clock);
             if schedule {
                 host.runtime.tick_links(clock);
             }
-            Ok((host.take_operations(), host.take_site_links()))
+            #[cfg(target_os = "linux")]
+            let lookups = host.take_target_lookups();
+            #[cfg(not(target_os = "linux"))]
+            let lookups = ();
+            Ok((host.take_operations(), host.take_site_links(), lookups))
         })?;
+        #[cfg(target_os = "linux")]
+        for lookup in lookups {
+            let services = self.services;
+            // A spawn failure disconnects the one-shot response; never resolve on control.
+            if let Ok(job) = spawn_dial(move || lookup.resolve(services)) {
+                self.jobs
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(job);
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        let _ = lookups;
         for (local, effect) in site_links {
             self.background(local, effect, revision, false)?;
         }
         for (local, operation) in operations {
+            let mapped = matches!(
+                operation,
+                rpt_advanced_core::runtime::dtmf::DigitOutcome::Mapped(_)
+            );
             if self
                 .digit_effect(&local, operation)
                 .and_then(|effect| self.background(local, effect, revision, true))
                 .is_err()
+                && !mapped
             {
                 self.lost_digits.store(true, Ordering::Release);
+            }
+        }
+        let locals = self.run(|host| {
+            Ok(host
+                .runtime
+                .node_names()
+                .into_iter()
+                .map(str::to_owned)
+                .collect::<Vec<_>>())
+        })?;
+        for local in locals {
+            let name = local.clone();
+            let origin = self.origin;
+            if let Some((effect, receipt)) = self.run(move |host| {
+                // A management action may have arrived after the ticker sampled the wall clock.
+                let now_ms = origin.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+                let at_dispatch = RuntimeClock {
+                    now_ms: clock.now_ms.max(now_ms),
+                    ..clock
+                };
+                host.runtime.advance_commands(&name, at_dispatch)
+            })? {
+                if let LinkEffect::RemoteBase(operation) = effect {
+                    // This provider returns a completion ticket, independently of queue admission.
+                    // A rejected or abandoned submission drops the receipt and ends the macro.
+                    let _ = self.run(move |host| {
+                        host.submit_command_remote(&local, operation, clock, Some(receipt))
+                    });
+                } else if let LinkEffect::VerifyCommandTarget(operation) = effect {
+                    let engine = Arc::clone(self);
+                    let _ = self.run(move |host| {
+                        if !engine.current(revision) {
+                            return Err(RuntimeError::Rejected);
+                        }
+                        host.command_with_receipt(&local, operation, engine.clock(), Some(receipt))
+                            .map(drop)
+                    });
+                } else {
+                    receipt.settle(self.background(local, effect, revision, false).is_ok());
+                }
             }
         }
         if schedule {
@@ -544,53 +870,17 @@ impl Engine {
                     .collect::<Vec<_>>()
                 {
                     let node = host.runtime.node(&local).ok_or(RuntimeError::MissingNode)?;
-                    let work = node
-                        .work()
-                        .expect("configured node retains an active generation");
-                    if let Some(retry) = node.links().take_retry(clock.now_ms, work) {
+                    // A failed station restore retains its configuration, but has no radio to retry.
+                    if let Some(work) = node.work()
+                        && let Some(retry) = node.links().take_retry(clock.now_ms, work)
+                    {
                         retries.push((local, retry));
                     }
                 }
                 Ok(retries)
             })?;
             for (local, retry) in retries {
-                self.spawn_dial(local, Dial::Retry(retry), revision, None, false)?;
-            }
-            loop {
-                let event = self.run(move |host| host.runtime.next_event(clock))?;
-                let Some(event) = event else {
-                    break;
-                };
-                if self.event_busy.load(Ordering::Acquire) == revision {
-                    break;
-                }
-                let local = event.local().to_owned();
-                let (effect, event) = self.run(move |host| {
-                    host.runtime.queue_event(&event)?;
-                    let effect = host.runtime.event_command(&event, clock);
-                    Ok((effect, event))
-                })?;
-                match effect {
-                    Ok(LinkEffect::Connect(attempt)) => {
-                        self.event_busy.store(revision, Ordering::Release);
-                        if self
-                            .spawn_dial(local, Dial::Connect(attempt), revision, Some(event), false)
-                            .is_err()
-                        {
-                            self.event_busy.store(0, Ordering::Release);
-                        }
-                        break;
-                    }
-                    effect => {
-                        if let Ok(effect) = effect {
-                            let _ = self.effect(local, effect, revision);
-                        }
-                        self.run(move |host| {
-                            host.runtime.complete_event(&event);
-                            Ok(())
-                        })?;
-                    }
-                }
+                self.spawn_dial(local, Dial::Retry(retry), revision, false)?;
             }
         }
         Ok(())
@@ -651,12 +941,48 @@ impl Engine {
             }
         }
     }
-    fn stop(self: &Arc<Self>) -> bool {
+    /// A normal asynchronous stop often needs one more poll. Report only persistent phases.
+    fn stop_pending(&self, reason: &'static str, started: Instant) -> bool {
+        let mut barrier = self.stop_barrier.lock().unwrap_or_else(|e| e.into_inner());
+        let now = Instant::now();
+        let warn = match barrier.as_mut() {
+            Some(prior) if prior.reason == reason => {
+                let due = prior.warn_at.is_some_and(|at| now >= at);
+                if due {
+                    prior.warn_at = None;
+                }
+                due
+            }
+            _ => {
+                let warn_at = started + Duration::from_millis(250);
+                let due = now >= warn_at;
+                *barrier = Some(StopBarrier {
+                    reason,
+                    warn_at: (!due).then_some(warn_at),
+                });
+                due
+            }
+        };
+        drop(barrier);
+        if warn {
+            self.services
+                .scheduler_notice(&format!("controller stop pending: {reason}"));
+        }
+        false
+    }
+
+    pub(crate) fn stop(self: &Arc<Self>) -> bool {
+        let started = Instant::now();
+        let defer = |reason| self.stop_pending(reason, started);
         self.accepting.store(false, Ordering::Release);
+        // Callbacks outlive control admission while site safe-output and device
+        // retirement are pending. Latch their independent TX gate before joining.
+        #[cfg(target_os = "linux")]
+        self.inhibit_modular();
         self.revision.fetch_add(1, Ordering::AcqRel);
         if let Some(ticker) = self.ticker.lock().unwrap_or_else(|e| e.into_inner()).take() {
             if ticker.join().is_err() {
-                return false;
+                return defer("ticker join failed");
             }
         }
         let mut calls = self.calls.lock().unwrap_or_else(|e| e.into_inner());
@@ -664,18 +990,33 @@ impl Engine {
             calls = self.drained.wait(calls).unwrap_or_else(|e| e.into_inner());
         }
         drop(calls);
-        for job in self
-            .jobs
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .drain(..)
+        #[cfg(target_os = "linux")]
         {
-            if job.join().is_err() {
-                return false;
+            let pending = self
+                .host
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .as_ref()
+                .is_some_and(Host::has_target_selections);
+            if pending && self.site_control(Host::cancel_target_selections).is_err() {
+                return defer("media target selections could not be cancelled");
+            }
+        }
+        {
+            let mut jobs = self.jobs.lock().unwrap_or_else(|e| e.into_inner());
+            // Directory callbacks have no cancellation ABI. Retain providers and retry
+            // through the existing stop poll; joining here must never wait for a resolver.
+            if jobs.iter().any(|job| !job.is_finished()) {
+                return defer("asynchronous jobs have not finished");
+            }
+            for job in jobs.drain(..) {
+                if job.join().is_err() {
+                    return defer("asynchronous job join failed");
+                }
             }
         }
         if !self.stop_sites() {
-            return false;
+            return defer("site safe-output barrier did not confirm shutdown");
         }
         let engine = Arc::clone(self);
         let (send, receive) = mpsc::sync_channel(1);
@@ -690,32 +1031,34 @@ impl Engine {
                 }
                 let stopped = host
                     .as_mut()
-                    .is_none_or(|host| host.stop(engine.clock().now_ms));
+                    .map_or(Ok(()), |host| host.poll_stop(engine.clock().now_ms));
                 #[cfg(test)]
                 let stopped = match stop_mode {
-                    1 => false,
+                    1 => Err("injected host retirement is pending"),
                     _ => stopped,
                 };
-                let retired = if stopped {
+                let retired = if stopped.is_ok() {
                     host.as_mut()
                         .map(|host| (host.take_status_posts(), host.take_sites()))
                 } else {
                     None
                 };
-                if stopped {
+                if stopped.is_ok() {
                     *host = None;
                 }
                 let _ = send.send((stopped, retired));
             })
             .is_err()
         {
-            return false;
+            return defer("host retirement task could not be submitted");
         }
-        let Ok((true, retired)) = receive.recv() else {
-            return false;
+        let retired = match receive.recv() {
+            Ok((Ok(()), retired)) => retired,
+            Ok((Err(reason), _)) => return defer(reason),
+            Err(_) => return defer("host retirement task did not return a result"),
         };
         if self.executor.stop_and_drain().is_err() {
-            return false;
+            return defer("control executor did not drain");
         }
         // HTTP and physical-device owners may still be leaving their worker loops.
         // Join them outside the serialized lifecycle executor.
@@ -756,12 +1099,6 @@ fn capture_at(origin: Instant, wall: SystemTime, services: HostServices) -> Runt
         civil,
     }
 }
-fn document(text: &str) -> Result<ConfigDocument, RuntimeError> {
-    let document = ConfigDocument::parse(text)?;
-    Schema::validate(&document)?;
-    Ok(document)
-}
-
 /// Borrow validated UTF-8 bytes for the duration of one product ABI call.
 pub(crate) unsafe fn input<'a>(
     pointer: *const std::ffi::c_char,
@@ -796,7 +1133,14 @@ unsafe fn incoming_identity(
     };
     let phone = protocol == rpt_advanced_core::link::ProtocolId::Phone;
     if request.abi_version != 1
-        || request.local.length > if phone { 63 } else { 32 }
+        || request.local.length
+            > if phone {
+                63
+            } else if protocol == rpt_advanced_core::link::ProtocolId::EchoLink {
+                36
+            } else {
+                32
+            }
         || request.remote.length > 32
         || request.source.length > 64
     {
@@ -814,142 +1158,50 @@ unsafe fn incoming_identity(
     ))
 }
 
-/// Prepare and register the product using the loader's real module and mandatory capabilities.
-///
-/// # Safety
-/// The complete descriptor/code allocations must remain live through successful stop.
-unsafe extern "C" fn rptadv_product_start(
-    host: *const abi::rptadv_host_services_v10,
+/// Select the checked service, control and media owners for this product lifetime.
+unsafe fn host_components(
+    host: *const abi::rptadv_host_services_v11,
     control: *const ControlDescriptor,
     file: *const FileDescriptor,
     speech: *const SpeechDescriptor,
-    configuration: *const std::ffi::c_char,
-    configuration_length: usize,
-) -> i32 {
-    catch_unwind(AssertUnwindSafe(|| -> Result<(), RuntimeError> {
-        let mut selected = ENGINE.lock().unwrap_or_else(|e| e.into_inner());
-        if selected.is_some() {
-            return Err(RuntimeError::Busy);
-        }
-        let services =
-            unsafe { HostServices::open(host) }.map_err(|_| RuntimeError::Preparation)?;
-        let executor = unsafe { ControlClient::open(control, "rpt_advanced/links", 512) }
-            .map_err(|_| RuntimeError::Preparation)?;
-        let media = unsafe {
-            NativeMediaPreparer::from_descriptors(
-                file,
-                speech,
-                Path::new("/usr/bin/ffmpeg"),
-                Path::new("/usr/bin/piper"),
-                30000,
-                (services.reaper_acquire(), services.reaper_release()),
-            )
-        }
+) -> Result<(HostServices, ControlClient, NativeMediaPreparer), RuntimeError> {
+    let services = unsafe { HostServices::open(host) }.map_err(|_| RuntimeError::Preparation)?;
+    let executor = unsafe { ControlClient::open(control, "rpt_advanced/links", 512) }
         .map_err(|_| RuntimeError::Preparation)?;
-        // Mandatory released composition is validated even for a disabled configuration.
-        drop(
-            crate::link::ring::InboundRing::open(48000, crate::link::ring::InboundPolicy::Peer)
-                .map_err(|_| RuntimeError::Preparation)?,
-        );
-        drop(crate::link::egress::Egress::new(48000, 960).map_err(|_| RuntimeError::Preparation)?);
-        ToneSequence::provider_ready().map_err(|_| RuntimeError::Preparation)?;
-        MorseRenderer::provider_ready().map_err(|_| RuntimeError::Preparation)?;
-        DtmfDetector::provider_ready().map_err(|_| RuntimeError::Preparation)?;
-        rpt_advanced_core::audio::DtmfGenerator::provider_ready()
-            .map_err(|_| RuntimeError::Preparation)?;
-        MessageTemplate::provider_ready().map_err(|_| RuntimeError::Preparation)?;
-        schedule::provider_ready().map_err(|_| RuntimeError::Preparation)?;
-        let document = document(unsafe { input(configuration, configuration_length) }?)?;
-        let site_backends = Arc::new(SiteBackends::load(&document)?);
-        let origin = Instant::now();
-        let settings = crate::site::configured(&document)?;
-        // Retain this envelope outside control: rejected tasks and failed radio
-        // activation must not join dormant device workers on the station executor.
-        let sites = Arc::new(Mutex::new(Some((
-            crate::site::acquisition::Acquisition::prepare(
-                &settings,
-                Arc::clone(&site_backends),
-                origin,
-            )
-            .map_err(|_| RuntimeError::Preparation)?,
-            crate::site::radio::RadioSite::prepare(&settings)
-                .map_err(|_| RuntimeError::Preparation)?,
-        ))));
-        let clock = capture(origin, services);
-        let engine = Arc::new(Engine {
-            executor,
-            host: Mutex::new(None),
-            services,
-            origin,
-            health: SchedulerHealth::default(),
-            accepting: AtomicBool::new(true),
-            reloading: AtomicBool::new(false),
-            revision: AtomicU64::new(1),
-            lost_digits: AtomicBool::new(false),
-            event_busy: AtomicU64::new(0),
-            calls: Mutex::new(0),
-            drained: Condvar::new(),
-            ticker: Mutex::new(None),
-            jobs: Mutex::new(Vec::new()),
-            site_backends,
-        });
-        let target = Arc::clone(&engine);
-        let candidate = Arc::clone(&sites);
-        let (send, receive) = mpsc::sync_channel(1);
-        engine.enqueue(move || {
-            let result = Host::start(document, media, services, origin, clock);
-            let result = result.map(|mut host| {
-                let (acquisition, radio) = candidate
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .take()
-                    .expect("one prepared initial site owner");
-                host.install_sites(acquisition, radio);
-                *target.host.lock().unwrap_or_else(|e| e.into_inner()) = Some(host)
-            });
-            let _ = send.send(result);
-        })?;
-        if let Err(error) = receive.recv().unwrap_or(Err(RuntimeError::Rejected)) {
-            if !engine.stop() {
-                *selected = Some(engine);
-                return Ok(());
-            }
-            return Err(error);
-        }
-        let activation = (|| {
-            loop {
-                let clock = engine.clock();
-                if engine.run(move |host| host.poll_reload(clock))? {
-                    break;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(1));
-            }
-            Ok::<(), RuntimeError>(())
-        })();
-        if let Err(error) = activation.and_then(|()| engine.start_ticker()) {
-            if !engine.stop() {
-                *selected = Some(engine);
-                return Ok(());
-            }
-            return Err(error);
-        }
-        *selected = Some(engine);
-        Ok(())
-    }))
-    .ok()
-    .and_then(Result::ok)
-    .map_or(1, |()| 0)
+    let media = unsafe {
+        NativeMediaPreparer::from_descriptors(
+            file,
+            speech,
+            Path::new("/usr/bin/ffmpeg"),
+            Path::new("/usr/bin/piper"),
+            30000,
+            (services.reaper_acquire(), services.reaper_release()),
+        )
+    }
+    .map_err(|_| RuntimeError::Preparation)?;
+    Ok((services, executor, media))
 }
-/// Prepare a replacement without discarding the live configuration on failure.
-unsafe extern "C" fn rptadv_product_reload(
-    configuration: *const std::ffi::c_char,
-    configuration_length: usize,
-) -> i32 {
+
+/// Reload only the checked JSON working store owned by the managed service.
+extern "C" fn rptadv_product_reload_working() -> i32 {
     catch_unwind(AssertUnwindSafe(|| -> Result<i32, RuntimeError> {
-        let document = document(unsafe { input(configuration, configuration_length) }?)?;
         let (engine, _call) = selected()?;
-        engine.reload_configuration(document)?;
-        Ok(i32::from(engine.reloading.load(Ordering::Acquire)))
+        #[cfg(target_os = "linux")]
+        {
+            let mut owner = engine
+                .management_state
+                .reload
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            owner
+                .as_mut()
+                .ok_or(RuntimeError::Rejected)?
+                .begin()
+                .map_err(|_| RuntimeError::Rejected)?;
+            Ok(1)
+        }
+        #[cfg(not(target_os = "linux"))]
+        Err(RuntimeError::Rejected)
     }))
     .ok()
     .and_then(Result::ok)
@@ -959,14 +1211,24 @@ unsafe extern "C" fn rptadv_product_reload(
 unsafe extern "C" fn rptadv_product_reload_poll() -> i32 {
     catch_unwind(AssertUnwindSafe(|| {
         let (engine, _call) = selected_reload(true)?;
-        engine.poll_reload_configuration()
+        #[cfg(target_os = "linux")]
+        if let Some(reload) = engine
+            .management_state
+            .reload
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_mut()
+        {
+            return reload.poll().map_err(|_| RuntimeError::Rejected);
+        }
+        Err(RuntimeError::Rejected)
     }))
     .ok()
     .and_then(Result::ok)
     .map_or(-1, |ready| i32::from(!ready))
 }
 /// Gate admission, stop/join owners, and drain accepted tasks before releasing registrations.
-extern "C" fn rptadv_product_stop() -> i32 {
+pub(crate) extern "C" fn rptadv_product_stop() -> i32 {
     catch_unwind(AssertUnwindSafe(|| {
         let mut selected = ENGINE.lock().unwrap_or_else(|e| e.into_inner());
         let Some(engine) = selected.as_ref() else {
@@ -999,10 +1261,8 @@ unsafe extern "C" fn rptadv_product_authorize_incoming(
                 return Err(RuntimeError::Rejected);
             }
             return engine.run(move |host| {
-                host.runtime
-                    .settings(&local)
-                    .map(|_| ())
-                    .ok_or(RuntimeError::MissingNode)
+                let (account, generation) = metadata.phone_owner().ok_or(RuntimeError::Rejected)?;
+                host.authorize_phone_owner(&local, account, generation)
             });
         }
         // Echo admission must inspect the live provider QSO. A null/pre-answer
@@ -1011,8 +1271,13 @@ unsafe extern "C" fn rptadv_product_authorize_incoming(
             return Err(RuntimeError::Rejected);
         }
         engine.run(move |host| {
-            host.lookup(&local, &remote, Some(&source))?;
-            host.runtime.authorize_incoming(&local, &remote, true)
+            let owner = host
+                .runtime
+                .network_owner(&local)
+                .ok_or(RuntimeError::MissingNode)?
+                .to_owned();
+            host.lookup(&owner, &remote, Some(&source))?;
+            host.runtime.authorize_incoming(&owner, &remote, true)
         })
     }))
     .ok()
@@ -1140,20 +1405,16 @@ unsafe extern "C" fn rptadv_product_digit(
 
 static DESCRIPTOR: abi::rptadv_product_descriptor_v1 = abi::rptadv_product_descriptor_v1 {
     struct_size: size_of::<abi::rptadv_product_descriptor_v1>() as u32,
-    abi_version: 7,
-    capability: *b"rptadv.prod7\0\0\0\0",
-    start: Some(rptadv_product_start),
-    reload: Some(rptadv_product_reload),
+    abi_version: 8,
+    capability: *b"rptadv.prod8\0\0\0\0",
+    reload_working: Some(rptadv_product_reload_working),
     stop: Some(rptadv_product_stop),
     authorize_incoming: Some(rptadv_product_authorize_incoming),
     incoming: Some(rptadv_product_incoming),
     link_command: Some(rptadv_product_link_command),
     link_status: Some(rptadv_product_link_status),
     digit: Some(rptadv_product_digit),
-    inspect_configuration: Some(crate::configuration::inspect_configuration),
-    inspect_secrets: Some(crate::configuration::inspect_secrets),
     site_command: Some(crate::site::command::execute),
-    radio_control: Some(crate::radio_control::execute),
     reload_poll: Some(rptadv_product_reload_poll),
 };
 
@@ -1165,4 +1426,4 @@ pub extern "C" fn rptadv_product_descriptor_v1() -> *const abi::rptadv_product_d
 
 #[cfg(test)]
 #[path = "lifecycle_tests.rs"]
-mod tests;
+pub(crate) mod tests;

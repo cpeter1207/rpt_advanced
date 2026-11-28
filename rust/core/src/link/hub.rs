@@ -36,16 +36,29 @@ impl Mode {
         transmit: false,
         forward: true,
     };
+    /// Deliver station programme to a listener that contributes no source audio.
+    pub const LISTEN: Self = Self {
+        transmit: true,
+        forward: false,
+    };
     /// Receive locally only.
     pub const LOCAL_MONITOR: Self = Self {
         transmit: false,
         forward: false,
     };
+    /// Receive the attached station's per-call mix-minus.
+    /// Forwarding permits the caller's contribution on eligible ordinary network links.
+    pub fn phone(forward: bool) -> Self {
+        Self {
+            transmit: true,
+            forward,
+        }
+    }
     /// Whether this destination receives program audio.
     pub fn transmits(self) -> bool {
         self.transmit
     }
-    /// Whether this source contributes to other peers.
+    /// Whether this source contributes to ordinary linked-peer programme.
     pub fn forwards(self) -> bool {
         self.forward
     }
@@ -61,6 +74,11 @@ pub(super) struct Attached {
     pub group_member: Option<GroupMemberSelection>,
 }
 impl Attached {
+    fn bound_to_group(&self, label: &str) -> bool {
+        self.group_member
+            .as_ref()
+            .is_some_and(|member| member.label() == label)
+    }
     pub(super) fn reporting_state(&self) -> (Mode, bool) {
         if self
             .group_member
@@ -78,6 +96,8 @@ struct Retry {
     mode: Mode,
     automatic: bool,
     paused: bool,
+    /// The last dial failed or the transport was lost since the last operator pause.
+    outage_observed: bool,
     due: u64,
     delay: u64,
     attempt: Option<u64>,
@@ -155,6 +175,22 @@ impl LinkManager {
             serial: 0,
         })
     }
+    pub(crate) fn wire_node(&self) -> Option<&str> {
+        (!self.local.is_empty()).then_some(self.local.as_str())
+    }
+    pub(crate) fn configure_wire_node(&mut self, node: Option<&str>) {
+        self.local = node.unwrap_or_default().to_owned();
+    }
+    /// Compare the actual ASL account including leading-zero spellings used on ingress.
+    /// This check does not alter the handler's original generic parameter or peer name.
+    pub(crate) fn is_wire_self(&self, name: &str) -> bool {
+        self.wire_node().is_some_and(|local| {
+            local == name
+                || (decimal_identity(local)
+                    && decimal_identity(name)
+                    && local.trim_start_matches('0') == name.trim_start_matches('0'))
+        })
+    }
     /// Direct ended peers reserve identity; only live topology proves transit reachability.
     pub fn reaches(&self, name: &str, include_paused: bool) -> bool {
         self.peers.iter().any(|peer| {
@@ -176,7 +212,7 @@ impl LinkManager {
         if !decimal_identity(name) {
             return Err(AdmissionError::Identity);
         }
-        if name == self.local
+        if self.is_wire_self(name)
             || self.peers.iter().any(|peer| {
                 peer.name == name
                     || (group.is_none()
@@ -396,6 +432,7 @@ impl LinkManager {
                     mode: peer.mode,
                     automatic: true,
                     paused: false,
+                    outage_observed: true,
                     due: now_ms,
                     delay: 0,
                     attempt: None,
@@ -431,6 +468,7 @@ impl LinkManager {
             mode,
             automatic: true,
             paused: false,
+            outage_observed: true,
             due: now_ms,
             delay: 0,
             attempt: None,
@@ -454,6 +492,7 @@ impl LinkManager {
             mode,
             automatic: true,
             paused: false,
+            outage_observed: true,
             due: now_ms,
             delay: 0,
             attempt: None,
@@ -478,6 +517,7 @@ impl LinkManager {
             retry.automatic = true;
             retry.paused = false;
             retry.attempt = None;
+            retry.outage_observed = true;
             retry.blocked_topology = Some(evidence);
             retry.group = group.map(str::to_owned);
             retry.group_member = group_member;
@@ -488,6 +528,7 @@ impl LinkManager {
             mode,
             automatic: true,
             paused: false,
+            outage_observed: true,
             due: 0,
             delay: 0,
             attempt: None,
@@ -537,6 +578,7 @@ impl LinkManager {
         {
             // Retained retry identities are already validated; only topology can
             // change admission while this serial control owner holds the token.
+            self.retries[index].outage_observed = true;
             self.retries[index].blocked_topology =
                 Some(self.topology_evidence(&attempt.name, self.retries[index].group.as_deref()));
             return Err(error);
@@ -571,6 +613,7 @@ impl LinkManager {
         let retry = &mut self.retries[index];
         retry.attempt = None;
         if !retry.paused {
+            retry.outage_observed = true;
             retry.delay = retry.delay.saturating_mul(2).clamp(1000, 300000);
             retry.due = now_ms.saturating_add(retry.delay);
         }
@@ -579,10 +622,20 @@ impl LinkManager {
     pub fn cancel_retry(&mut self, name: &str) {
         self.retries.retain(|retry| retry.name != name);
     }
+    /// Group outage telemetry requires an ended transport or an observed failed attempt.
+    pub(crate) fn member_unavailable(&self, remote: &str) -> bool {
+        if let Some(peer) = self.peers.iter().find(|peer| peer.name == remote) {
+            return peer.ended;
+        }
+        self.retries
+            .iter()
+            .any(|retry| retry.name == remote && retry.outage_observed)
+    }
     /// Pause retained intent without cancelling it.
     pub fn pause_retries(&mut self) {
         for retry in &mut self.retries {
             retry.paused = true;
+            retry.outage_observed = false;
         }
     }
     /// Resume retained intent with immediate first attempts.
@@ -634,6 +687,23 @@ impl LinkManager {
         }
     }
 
+    /// A matching active ungrouped permanent connection or its existing outage recovery.
+    /// An indirect advertised route or a pending owner that has been paused is not a match.
+    pub(crate) fn active_permanent(&self, name: &str, mode: Mode) -> bool {
+        self.peers.iter().any(|p| {
+            p.name == name && p.mode == mode && p.permanent && !p.ended && p.group.is_none()
+        }) || self.retries.iter().any(|r| {
+            r.name == name
+                && r.mode == mode
+                && r.automatic
+                && !r.paused
+                && r.group.is_none()
+                && r.blocked_topology.is_none()
+                && !self.peers.iter().any(|p| {
+                    p.name == name || !p.ended && p.routes.iter().any(|route| route.node == name)
+                })
+        })
+    }
     /// Exact permanent route ownership, including paused recovery intent.
     pub fn owns_permanent(&self, name: &str) -> bool {
         self.peers
@@ -643,6 +713,30 @@ impl LinkManager {
                 .retries
                 .iter()
                 .any(|retry| retry.name == name && retry.automatic)
+    }
+
+    pub(crate) fn attached_group_member(&self, name: &str, label: &str) -> bool {
+        self.peers
+            .iter()
+            .any(|peer| peer.name == name && !peer.ended && peer.bound_to_group(label))
+    }
+
+    /// Keep the retiring identity reserved until the host acknowledges reader detachment.
+    pub(crate) fn withdraw_held_member(&mut self, name: &str, label: &str) -> bool {
+        let mut detach = false;
+        if let Some(peer) = self
+            .peers
+            .iter_mut()
+            .find(|peer| peer.name == name && (peer.permanent || peer.bound_to_group(label)))
+        {
+            detach = !peer.ended;
+            peer.permanent = false;
+            if detach {
+                self.end(name);
+            }
+        }
+        self.disconnect_permanent(name);
+        detach
     }
 
     /// Unpublish one temporary peer. The adapter must then stop and drain its reader.
@@ -734,6 +828,7 @@ impl LinkManager {
     pub fn disconnect_permanent_all(&mut self) -> Vec<String> {
         for retry in self.retries.iter_mut().filter(|retry| retry.automatic) {
             retry.paused = true;
+            retry.outage_observed = false;
             retry.attempt = None;
         }
         let mut removed = Vec::new();
@@ -749,6 +844,7 @@ impl LinkManager {
                 mode: peer.mode,
                 automatic: true,
                 paused: true,
+                outage_observed: false,
                 due: 0,
                 delay: 0,
                 attempt: None,
@@ -774,6 +870,7 @@ impl LinkManager {
                 mode: peer.mode,
                 automatic: peer.permanent,
                 paused: true,
+                outage_observed: false,
                 due: 0,
                 delay: 0,
                 attempt: None,
@@ -815,7 +912,7 @@ impl LinkManager {
             return Vec::new();
         }
         match message {
-            Protocol::Query { requester } if requester != &self.local => {
+            Protocol::Query { requester } if !self.is_wire_self(requester) => {
                 let age = if transitioned_ms == 0 {
                     0
                 } else {
@@ -843,7 +940,7 @@ impl LinkManager {
                 source,
                 keyed,
                 age_seconds,
-            } if destination != &self.local => {
+            } if !self.is_wire_self(destination) => {
                 let text = format!(
                     "K {destination} {source} {} {age_seconds}",
                     u8::from(*keyed)
@@ -881,7 +978,7 @@ impl LinkManager {
         else {
             return Vec::new();
         };
-        if destination == &self.local {
+        if self.is_wire_self(destination) {
             return Vec::new();
         }
         let text = format!("D {destination} {source} {sequence} {digit}");

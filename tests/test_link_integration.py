@@ -11,7 +11,21 @@ import tempfile
 import time
 from pathlib import Path
 
-from test_asterisk_integration import cli
+from asterisk_working_store import WorkingStore
+from test_asterisk_integration import cli as asterisk_cli
+
+# Map test labels to actual UUIDs only when sending commands to their owned controller.
+stores = {}
+
+
+def cli(configuration, command):
+    words = command.split()
+    if len(words) > 3 and words[:2] == ["rpt_advanced", "link"]:
+        store = stores[configuration]
+        if words[3] in store.ports:
+            words[3] = store.identity(words[3])
+        command = " ".join(words)
+    return asterisk_cli(configuration, command)
 
 
 def port():
@@ -56,7 +70,7 @@ def server(
     codec,
     radio,
     load_resample=True,
-    extra_configuration="",
+    denied=False,
 ):
     """! @brief Own an isolated IAX/radio server and always terminate it.
     @param directory Test-owned configuration directory.
@@ -68,7 +82,7 @@ def server(
     @param codec Permitted IAX codec.
     @param radio Phased synthetic receiver name.
     @param load_resample Whether to load Asterisk's rate translator for a control case.
-    @param extra_configuration Node settings present before the first runtime starts.
+    @param denied Select a scoped ACL that rejects this peer.
     @return Context yielding CLI configuration and output log paths.
     Channel reservation precedes activation and owner publication. Require the
     fixture's callback-ready marker plus installed-controller status before yielding.
@@ -117,26 +131,23 @@ def server(
     (directory / "extensions.conf").write_text(
         f"[incoming]\nexten => {node},1,RptAdvanced({node})\n", encoding="utf-8"
     )
-    directory_file = directory / "nodes.conf"
-    directory_file.write_text(
-        f"[extnodes]\n{peer}=radio@127.0.0.1:{peer_port}/{peer},127.0.0.1\n",
-        encoding="utf-8",
-    )
-    (directory / "rpt_advanced.conf").write_text(
-        f"[{node}]\nradio_channel={radio}\nlink_directory_file={directory_file}\n"
-        "link_lookup_method=file\n" + extra_configuration,
-        encoding="utf-8",
-    )
+    store = WorkingStore(directory)
+    stores[configuration] = store
     logfile = directory / "console.log"
     with logfile.open("w", encoding="utf-8") as output:
         process = subprocess.Popen(
             ["asterisk", "-f", "-C", str(configuration)],
             stdin=subprocess.DEVNULL,
+            env=store.environment,
             stdout=output,
             stderr=subprocess.STDOUT,
         )
         try:
             deadline = time.monotonic() + 30
+            store.start()
+            store.station(node, radio, "half")
+            store.asl(node, local_port, peer, peer_port, denied)
+            store.enabled(node)
             while True:
                 if process.poll() is not None or time.monotonic() > deadline:
                     raise RuntimeError("network test Asterisk did not start")
@@ -159,6 +170,7 @@ def server(
             print(logfile.read_text(encoding="utf-8", errors="replace"))
             raise
         finally:
+            stores.pop(configuration, None)
             process.terminate()
             try:
                 process.wait(timeout=30)
@@ -185,27 +197,16 @@ def same_server(modules):
             "ulaw",
             "network-a",
         ) as (configuration, _):
-            (directory / "nodes.conf").write_text(
-                "[extnodes]\n"
-                + "".join(
-                    f"{node}=radio@127.0.0.1:{endpoint}/{node},127.0.0.1\n"
-                    for node in ("524950", "508422")
-                ),
-                encoding="utf-8",
-            )
             (directory / "extensions.conf").write_text(
                 "[incoming]\n"
                 "exten => 524950,1,RptAdvanced(524950)\n"
                 "exten => 508422,1,RptAdvanced(508422)\n",
                 encoding="utf-8",
             )
-            node_configuration = directory / "rpt_advanced.conf"
-            node_configuration.write_text(
-                node_configuration.read_text(encoding="utf-8")
-                + f"[508422]\nradio_channel=network-b\nlink_directory_file={directory / 'nodes.conf'}\n"
-                "link_lookup_method=file\n",
-                encoding="utf-8",
-            )
+            store = stores[configuration]
+            store.station("508422", "network-b", "half")
+            store.asl("508422", endpoint, "524950", endpoint)
+            store.enabled("508422")
             cli(configuration, "dialplan reload")
             cli(configuration, "module reload app_rpt_advanced.so")
             result = cli(configuration, "rpt_advanced link connect 524950 508422")
@@ -289,7 +290,7 @@ def rate_adapter(modules):
                 while True:
                     states = [
                         (
-                            node,
+                            stores[configuration].identity(node),
                             cli(configuration, "core show channels concise"),
                             cli(configuration, f"rpt_advanced link status {node}"),
                         )
@@ -313,9 +314,8 @@ def rate_adapter(modules):
                 for configuration, _ in (first, second):
                     assert_iax_native_codec(configuration, codec)
                 for configuration, _ in (first, second):
-                    (configuration.parent / "rpt_advanced.conf").write_text(
-                        "", encoding="utf-8"
-                    )
+                    for key in list(stores[configuration].ports):
+                        stores[configuration].remove(key)
                     cli(configuration, "module reload app_rpt_advanced.so")
                 for configuration, logfile in (first, second):
                     recorded = re.findall(
@@ -361,30 +361,60 @@ def dtmf_links(modules):
                 "network-dtmf",
             ) as first,
         ):
-            completed = "node 524950 link command completed"
-            # Codec offers create provisional channels before controller admission.
+            endpoints = (
+                (first[0], "524950", "508422"),
+                (second[0], "508422", "524950"),
+            )
+
+            def observations():
+                return [
+                    (
+                        stores[configuration].identity(local),
+                        remote,
+                        cli(configuration, f"rpt_advanced link status {local}"),
+                        cli(configuration, "core show channels concise"),
+                    )
+                    for configuration, local, remote in endpoints
+                ]
+
+            # Only receiver PCM originates an action. Provisional IAX channels alone
+            # do not prove that either controller admitted the opposite station.
             deadline = time.monotonic() + 15
-            while completed not in first[1].read_text(encoding="utf-8") or (
-                "508422: transceive"
-                not in cli(first[0], "rpt_advanced link status 524950")
-            ):
+            while True:
+                observed = observations()
+                if all(
+                    f"  {remote}: transceive rx-missing=" in status
+                    and any(line.startswith("IAX2/") for line in channels.splitlines())
+                    for _, remote, status, channels in observed
+                ):
+                    break
+                assert time.monotonic() < deadline, ("DTMF connect", observed)
+                time.sleep(0.1)
+
+            origin = stores[first[0]]
+            path = f"/api/v1/status/ports/{origin.identity('524950')}/"
+            expected = {
+                "selected_count": 1,
+                "removed_count": 1,
+                "peer_nodes": ["508422"],
+            }
+            deadline = time.monotonic() + 15
+            while True:
+                observed = observations()
+                code, _, body = origin.request("GET", path)
+                assert code == 200, (path, code)
+                receipt = body["status"]["last_disconnect"]
+                if receipt == expected and all(
+                    reverse_ready(channels, status, local)
+                    for local, _, status, channels in observed
+                ):
+                    break
                 assert time.monotonic() < deadline, (
-                    "received DTMF did not connect the link"
+                    "DTMF disconnect",
+                    observed,
+                    receipt,
                 )
                 time.sleep(0.1)
-            assert "IAX2/" in cli(first[0], "core show channels concise")
-            assert "IAX2/" in cli(second[0], "core show channels concise")
-            deadline = time.monotonic() + 15
-            while first[1].read_text(encoding="utf-8").count(completed) < 2 or any(
-                "IAX2/" in cli(configuration, "core show channels concise")
-                for configuration, _ in (first, second)
-            ):
-                assert time.monotonic() < deadline, (
-                    "DTMF timeout did not disconnect the link"
-                )
-                time.sleep(0.1)
-            log = first[1].read_text(encoding="utf-8")
-            assert log.count(completed) == 2, log
             print(
                 "received DTMF connect/hash and disconnect/timeout at fixed 48 kHz passed"
             )
@@ -407,7 +437,6 @@ def main():
         with tempfile.TemporaryDirectory(prefix="rpt-advanced-iax-") as temporary:
             directory = Path(temporary)
             first_port, second_port = port(), port()
-            denied_policy = "link_allow_nodes=524950\nlink_deny_nodes=524950\n"
             with (
                 server(
                     directory / "a",
@@ -428,18 +457,32 @@ def main():
                     first_port,
                     codec,
                     "network-b",
-                    extra_configuration=denied_policy,
+                    denied=True,
                 ) as second,
             ):
                 for configuration, _ in (first, second):
                     cli(configuration, "iax2 set debug on")
-                receiver_config = second[0].parent / "rpt_advanced.conf"
-                original = receiver_config.read_text(encoding="utf-8").removesuffix(
-                    denied_policy
-                )
                 rejected = cli(first[0], "rpt_advanced link connect 524950 508422")
                 assert "failed" in rejected, rejected
-                receiver_config.write_text(original, encoding="utf-8")
+                receiver = stores[second[0]]
+                collection = receiver.ports["508422"] + "protocols/allstarlink/"
+                account = receiver.request("GET", collection)[2]["_links"]["item"][0][
+                    "href"
+                ]
+                values = {
+                    "node_number": 508422,
+                    "iax": {"registration_url": "", "local_port": second_port},
+                    "directory_file": "",
+                    "lookup_method": "file",
+                    "static_nodes": {
+                        "524950": {
+                            "host": "127.0.0.1",
+                            "port": first_port,
+                            "source": "127.0.0.1",
+                        }
+                    },
+                }
+                receiver.edit("PUT", account, {"configuration": values})
                 reloaded = cli(second[0], "module reload app_rpt_advanced.so")
                 # Asterisk's CLI exit status does not report module reload failure.
                 assert "reloaded successfully" in reloaded, reloaded
@@ -476,7 +519,7 @@ def main():
                 while True:
                     states = [
                         (
-                            node,
+                            stores[configuration].identity(node),
                             cli(configuration, "core show channels concise"),
                             cli(configuration, f"rpt_advanced link status {node}"),
                         )
@@ -498,9 +541,8 @@ def main():
                 assert "completed" in result, result
                 time.sleep(1)
                 for configuration, _ in (first, second):
-                    (configuration.parent / "rpt_advanced.conf").write_text(
-                        "", encoding="utf-8"
-                    )
+                    for key in list(stores[configuration].ports):
+                        stores[configuration].remove(key)
                     cli(configuration, "module reload app_rpt_advanced.so")
                 for configuration, logfile in (first, second):
                     recorded = re.findall(

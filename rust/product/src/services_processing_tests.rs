@@ -1,8 +1,10 @@
 use super::*;
+use crate::configuration_radio::{PreparationError, PreparedPeer, fixture_native_peer};
 use rpt_advanced_core::link::{PeerInput as Input, PeerSignals};
-use std::sync::atomic::AtomicUsize;
-
-const CONFIGURATION: &str = "[link]\nlimiter_enabled=yes\n";
+use std::sync::{
+    Arc,
+    atomic::{AtomicI16, AtomicUsize},
+};
 
 struct State {
     mode: usize,
@@ -10,98 +12,121 @@ struct State {
     processed_samples: AtomicUsize,
     nonzero_samples: AtomicUsize,
     destroyed: AtomicUsize,
-    previous: std::sync::atomic::AtomicU32,
+    previous: AtomicI16,
 }
 
-unsafe extern "C" fn process(context: *mut c_void, samples: *mut f32, count: usize) -> i32 {
+unsafe extern "C" fn process(
+    context: *mut c_void,
+    direction: u32,
+    rate: u32,
+    samples: *mut i16,
+    count: u32,
+) -> i32 {
+    assert_eq!(direction, abi::URP_AST_LINK_DIRECTION_READ);
+    assert_eq!(rate, 8000);
+    // SAFETY: the typed graph keeps the transferred Arc and PCM block live.
     let state = unsafe { &*context.cast::<State>() };
     state.processed.fetch_add(1, Ordering::Relaxed);
-    let samples = unsafe { std::slice::from_raw_parts_mut(samples, count) };
-    state.processed_samples.fetch_add(count, Ordering::Relaxed);
+    let samples = unsafe { std::slice::from_raw_parts_mut(samples, count as usize) };
+    state
+        .processed_samples
+        .fetch_add(samples.len(), Ordering::Relaxed);
     state.nonzero_samples.fetch_add(
-        samples.iter().filter(|sample| **sample != 0.0).count(),
+        samples.iter().filter(|sample| **sample != 0).count(),
         Ordering::Relaxed,
     );
     if state.mode == 7 {
-        samples.fill(9.0);
+        samples.fill(i16::MAX);
         return -1;
     }
     for sample in samples {
         if state.mode == 10 {
-            *sample = f32::from_bits(state.previous.swap(sample.to_bits(), Ordering::Relaxed));
+            *sample = state.previous.swap(*sample, Ordering::Relaxed);
         } else {
-            *sample *= 0.5;
+            *sample /= 2;
         }
     }
     0
 }
 
-unsafe extern "C" fn destroy(context: *mut c_void) {
-    unsafe { &*context.cast::<State>() }
-        .destroyed
-        .fetch_add(1, Ordering::Relaxed);
-}
-
-unsafe extern "C" fn prepare(
+unsafe extern "C" fn process_f32(
     context: *mut c_void,
-    configuration: *const c_char,
-    length: usize,
-    local: *const c_char,
-    local_length: usize,
-    maximum: usize,
-    output: *mut abi::rptadv_pcm_processor_v1,
+    direction: u32,
+    rate: u32,
+    samples: *mut f32,
+    count: u32,
 ) -> i32 {
-    assert_eq!(
-        unsafe { std::slice::from_raw_parts(configuration.cast::<u8>(), length) },
-        CONFIGURATION.as_bytes()
-    );
-    assert_eq!(
-        unsafe { std::slice::from_raw_parts(local.cast::<u8>(), local_length) },
-        b"1000"
-    );
-    assert_eq!(maximum, 4);
+    assert_eq!(direction, abi::URP_AST_LINK_DIRECTION_READ);
+    assert_eq!(rate, 8000);
+    // SAFETY: the typed graph keeps the transferred Arc and PCM block live.
     let state = unsafe { &*context.cast::<State>() };
-    match state.mode {
-        1 => return 1,
-        2 => return -1,
-        8 => return 2,
-        _ => {}
+    state.processed.fetch_add(1, Ordering::Relaxed);
+    let samples = unsafe { std::slice::from_raw_parts_mut(samples, count as usize) };
+    if state.mode == 7 {
+        samples.fill(1.0);
+        return -1;
     }
-    let output = unsafe { &mut *output };
-    output.context = context;
-    output.process = Some(process);
-    output.destroy = Some(destroy);
-    match state.mode {
-        3 => output.struct_size -= 1,
-        4 => output.abi_version = 2,
-        5 => output.process = None,
-        6 => output.context = ptr::null_mut(),
-        9 => output.destroy = None,
-        _ => {}
+    for sample in samples {
+        *sample *= 0.5;
     }
     0
 }
 
-fn fixture(mode: usize) -> (Box<State>, HostServices) {
-    let mut state = Box::new(State {
+unsafe extern "C" fn destroy(context: *mut c_void) {
+    // SAFETY: the factory transferred precisely this Arc into the typed graph.
+    let state = unsafe { Arc::from_raw(context.cast::<State>()) };
+    state.destroyed.fetch_add(1, Ordering::Relaxed);
+}
+
+fn fixture(mode: usize) -> (Arc<State>, Result<PreparedPeer, PreparationError>) {
+    fixture_with_float(mode, false)
+}
+
+fn fixture_with_float(
+    mode: usize,
+    float: bool,
+) -> (Arc<State>, Result<PreparedPeer, PreparationError>) {
+    let state = Arc::new(State {
         mode,
         processed: AtomicUsize::new(0),
         processed_samples: AtomicUsize::new(0),
         nonzero_samples: AtomicUsize::new(0),
         destroyed: AtomicUsize::new(0),
-        previous: std::sync::atomic::AtomicU32::new(0),
+        previous: AtomicI16::new(0),
     });
-    let services = host_services(|table| {
-        table.context = ptr::from_mut(state.as_mut()).cast();
-        table.peer_processing_prepare = Some(prepare);
-    });
-    (state, services)
+    // SAFETY: the factory transfers an Arc only on success, and the corresponding
+    // typed callbacks process the same context and release it once on destroy.
+    let graph = unsafe {
+        fixture_native_peer(
+            8000,
+            |table| {
+                table.link_process = Some(process);
+                table.link_process_f32 = if float { Some(process_f32) } else { None };
+                table.link_destroy = Some(destroy);
+            },
+            |ffmpeg, output| {
+                assert!(!ffmpeg.is_null());
+                match mode {
+                    1 => 1,
+                    2 => -1,
+                    8 => 2,
+                    9 => 0, // Success without a transferred handle is incompatible.
+                    _ => {
+                        *output = Arc::into_raw(state.clone()).cast_mut().cast();
+                        0
+                    }
+                }
+            },
+        )
+    };
+    (state, graph)
 }
 
 struct Source {
     signals: PeerSignals,
     real: Option<usize>,
     renders: usize,
+    block_sample: f32,
 }
 impl Source {
     fn new(real: Option<usize>) -> Self {
@@ -109,6 +134,7 @@ impl Source {
             signals: PeerSignals::default(),
             real,
             renders: 0,
+            block_sample: 0.5,
         }
     }
 }
@@ -149,14 +175,14 @@ impl Input for Source {
     }
     fn render(&mut self, samples: &mut [f32]) -> Option<usize> {
         self.renders += 1;
-        samples.fill(0.5);
+        samples.fill(self.block_sample);
         self.real
     }
 }
 
 #[test]
 fn source_timing_survives_bypass_but_opaque_delayed_dsp_stays_unknown() {
-    let mut bypass = ProcessedPeer::new(Source::new(Some(1)), None);
+    let mut bypass = ProcessedPeer::new(Source::new(Some(1)));
     assert!(bypass.source_timing_available());
     let first = bypass.render_timed_sample().unwrap();
     assert_eq!(first.sample, 0.25);
@@ -166,11 +192,8 @@ fn source_timing_survives_bypass_but_opaque_delayed_dsp_stays_unknown() {
     assert_eq!(muted.sample, 0.0);
     assert!(muted.provenance.unwrap().muted);
 
-    let (state, services) = fixture(10);
-    let processor = services
-        .prepare_peer_processing(CONFIGURATION, "1000", 4)
-        .unwrap();
-    let mut delayed = ProcessedPeer::new(Source::new(Some(1)), processor);
+    let (state, processor) = fixture(10);
+    let mut delayed = ProcessedPeer::modular(Source::new(Some(1)), processor.unwrap(), 4);
     assert!(!delayed.source_timing_available());
     assert_eq!(delayed.render_timed_sample().unwrap().sample, 0.0);
     let second = delayed.render_timed_sample().unwrap();
@@ -189,13 +212,10 @@ fn source_timing_survives_bypass_but_opaque_delayed_dsp_stays_unknown() {
     drop(delayed);
     assert_eq!(state.destroyed.load(Ordering::Relaxed), 1);
 
-    let mut failed = ProcessedPeer::new(Source::new(None), None);
+    let mut failed = ProcessedPeer::new(Source::new(None));
     assert_eq!(failed.render_timed_sample(), None);
-    let (state, services) = fixture(7);
-    let processor = services
-        .prepare_peer_processing(CONFIGURATION, "1000", 4)
-        .unwrap();
-    let mut failed = ProcessedPeer::new(Source::new(Some(1)), processor);
+    let (state, processor) = fixture(7);
+    let mut failed = ProcessedPeer::modular(Source::new(Some(1)), processor.unwrap(), 4);
     assert_eq!(failed.render_timed_sample(), None);
     assert_eq!(state.processed.load(Ordering::Relaxed), 1);
 }
@@ -203,11 +223,8 @@ fn source_timing_survives_bypass_but_opaque_delayed_dsp_stays_unknown() {
 #[test]
 fn idle_peer_graph_receives_only_silence_without_reading_or_keying_its_source() {
     for mode in [0, 7] {
-        let (state, services) = fixture(mode);
-        let processor = services
-            .prepare_peer_processing(CONFIGURATION, "1000", 4)
-            .unwrap();
-        let mut input = ProcessedPeer::new(Source::new(Some(4)), processor);
+        let (state, processor) = fixture(mode);
+        let mut input = ProcessedPeer::modular(Source::new(Some(4)), processor.unwrap(), 4);
         let edge = input.signals().activity_edge();
         let mut scratch = [7.0; 4];
         for count in [3, 1] {
@@ -227,7 +244,7 @@ fn idle_peer_graph_receives_only_silence_without_reading_or_keying_its_source() 
         assert_eq!(oversized, [0.0; 5]);
         assert_eq!(state.processed.load(Ordering::Relaxed), 2);
     }
-    let mut bypass = ProcessedPeer::new(Source::new(None), None);
+    let mut bypass = ProcessedPeer::new(Source::new(None));
     let mut scratch = [7.0; 4];
     bypass.silence(&mut scratch);
     assert_eq!(scratch, [0.0; 4]);
@@ -235,38 +252,42 @@ fn idle_peer_graph_receives_only_silence_without_reading_or_keying_its_source() 
 }
 
 #[test]
-fn host_peer_processor_bypasses_or_rejects_without_leaking_transferred_owners() {
-    assert!(
-        host_services(|_| {})
-            .prepare_peer_processing(CONFIGURATION, "1000", 4)
-            .unwrap()
-            .is_none()
-    );
-    for mode in 1..=9 {
-        if mode == 7 {
-            continue;
-        }
-        let (state, services) = fixture(mode);
-        let result = services.prepare_peer_processing(CONFIGURATION, "1000", 4);
-        if mode == 1 {
-            assert!(result.unwrap().is_none());
-        } else {
-            assert!(matches!(result, Err(Error::Operation)));
-        }
-        assert_eq!(
-            state.destroyed.load(Ordering::Relaxed),
-            usize::from(matches!(mode, 3..=5))
-        );
+fn typed_peer_factory_rejects_errors_and_missing_owned_result() {
+    for (mode, expected) in [
+        (
+            1,
+            PreparationError::Rejected {
+                status: 1,
+                field: None,
+            },
+        ),
+        (
+            2,
+            PreparationError::Rejected {
+                status: -1,
+                field: None,
+            },
+        ),
+        (
+            8,
+            PreparationError::Rejected {
+                status: 2,
+                field: None,
+            },
+        ),
+        (9, PreparationError::Incompatible),
+    ] {
+        let (state, result) = fixture(mode);
+        assert_eq!(result.err(), Some(expected));
+        assert_eq!(Arc::strong_count(&state), 1);
+        assert_eq!(state.destroyed.load(Ordering::Relaxed), 0);
     }
 }
 
 #[test]
 fn peer_processor_filters_native_ring_output_including_concealment_once() {
-    let (state, services) = fixture(0);
-    let processor = services
-        .prepare_peer_processing(CONFIGURATION, "1000", 4)
-        .unwrap();
-    let mut input = ProcessedPeer::new(Source::new(Some(0)), processor);
+    let (state, processor) = fixture(0);
+    let mut input = ProcessedPeer::modular(Source::new(Some(0)), processor.unwrap(), 4);
     assert_eq!(input.source_rate(), 8000);
     assert_eq!(input.available(), 9);
     assert_eq!(input.finite_playout(), Some(true));
@@ -284,37 +305,54 @@ fn peer_processor_filters_native_ring_output_including_concealment_once() {
 }
 
 #[test]
+fn peer_processor_preserves_float_headroom_before_native_dsp() {
+    let (state, graph) = fixture_with_float(0, true);
+    let mut source = Source::new(Some(4));
+    source.block_sample = 1.25;
+    let mut input = ProcessedPeer::modular(source, graph.unwrap(), 4);
+    let mut samples = [0.0; 4];
+    assert_eq!(input.render(&mut samples), Some(4));
+    assert_eq!(samples, [0.625; 4]);
+    assert_eq!(state.processed.load(Ordering::Relaxed), 1);
+
+    let mut oversized = [0.0; 5];
+    assert_eq!(input.render(&mut oversized), None);
+    assert_eq!(oversized, [0.0; 5]);
+    assert_eq!(state.processed.load(Ordering::Relaxed), 1);
+
+    let (state, graph) = fixture_with_float(7, true);
+    let mut failed = ProcessedPeer::modular(Source::new(Some(4)), graph.unwrap(), 4);
+    assert_eq!(failed.render(&mut samples), None);
+    assert_eq!(samples, [0.0; 4]);
+    assert_eq!(state.processed.load(Ordering::Relaxed), 1);
+}
+
+#[test]
 fn peer_processor_failure_silences_only_its_block_and_preserves_bypass() {
-    let (state, services) = fixture(7);
-    let processor = services
-        .prepare_peer_processing(CONFIGURATION, "1000", 4)
-        .unwrap();
-    let mut input = ProcessedPeer::new(Source::new(Some(4)), processor);
+    let (state, processor) = fixture(7);
+    let mut input = ProcessedPeer::modular(Source::new(Some(4)), processor.unwrap(), 4);
     let mut samples = [0.0; 4];
     assert_eq!(input.render(&mut samples), None);
     assert_eq!(samples, [0.0; 4]);
     assert_eq!(state.processed.load(Ordering::Relaxed), 1);
     drop(input);
     assert_eq!(state.destroyed.load(Ordering::Relaxed), 1);
-    let mut bypass = ProcessedPeer::new(Source::new(Some(4)), None);
+    let mut bypass = ProcessedPeer::new(Source::new(Some(4)));
     assert_eq!(bypass.render(&mut samples), Some(4));
     assert_eq!(samples, [0.5; 4]);
-    let mut unavailable = ProcessedPeer::new(Source::new(None), None);
+    let mut unavailable = ProcessedPeer::new(Source::new(None));
     assert_eq!(unavailable.render(&mut samples), None);
     assert_eq!(samples, [0.0; 4]);
     assert_eq!(unavailable.render_sample(), None);
-    let mut bypass_sample = ProcessedPeer::new(Source::new(Some(1)), None);
+    let mut bypass_sample = ProcessedPeer::new(Source::new(Some(1)));
     assert_eq!(bypass_sample.render_sample(), Some(0.5));
 }
 
 #[test]
 fn peer_processor_rejects_oversized_blocks_and_failed_single_samples() {
     for mode in [0, 7] {
-        let (state, services) = fixture(mode);
-        let processor = services
-            .prepare_peer_processing(CONFIGURATION, "1000", 4)
-            .unwrap();
-        let mut input = ProcessedPeer::new(Source::new(Some(1)), processor);
+        let (state, processor) = fixture(mode);
+        let mut input = ProcessedPeer::modular(Source::new(Some(1)), processor.unwrap(), 4);
         let mut oversized = [1.0; 5];
         assert_eq!(input.render(&mut oversized), None);
         assert_eq!(oversized, [0.0; 5]);
@@ -330,11 +368,8 @@ fn peer_processor_rejects_oversized_blocks_and_failed_single_samples() {
 
 #[test]
 fn peer_processor_mutes_final_output_using_current_dtmf_state() {
-    let (state, services) = fixture(0);
-    let processor = services
-        .prepare_peer_processing(CONFIGURATION, "1000", 4)
-        .unwrap();
-    let mut input = ProcessedPeer::new(Source::new(Some(1)), processor);
+    let (state, processor) = fixture(0);
+    let mut input = ProcessedPeer::modular(Source::new(Some(1)), processor.unwrap(), 4);
     for muted in [true, false] {
         // Ring output can precede a detector-state change, and stateful DSP can
         // retain tone history. Qualification must therefore gate the final PCM.
@@ -346,4 +381,117 @@ fn peer_processor_mutes_final_output_using_current_dtmf_state() {
         assert_eq!(input.render_sample(), Some(expected));
     }
     assert_eq!(state.processed.load(Ordering::Relaxed), 4);
+}
+
+#[test]
+fn typed_station_preparation_selects_the_peer_graph_for_the_actual_port() {
+    use crate::{configuration_radio::RadioPreparationApi, fixture::station};
+    use rpt_advanced_core::config::resources::candidate::ResourceKind;
+    use serde_json::json;
+
+    let prepared = station::prepare(
+        &[
+            (station::LOCAL, "selected", json!({})),
+            (station::SECOND_LOCAL, "other", json!({})),
+        ],
+        &[(
+            station::LOCAL,
+            ResourceKind::PeerAudio,
+            "",
+            json!({"input_gain_db":-6}),
+        )],
+    );
+    let api = RadioPreparationApi::open().unwrap();
+    let ports = &prepared.runtime().radio;
+    let selected = api
+        .prepare_link(
+            ports
+                .port(station::LOCAL.parse().unwrap())
+                .unwrap()
+                .processing
+                .link
+                .as_ref(),
+        )
+        .unwrap();
+    let neutral = api
+        .prepare_link(
+            ports
+                .port(station::SECOND_LOCAL.parse().unwrap())
+                .unwrap()
+                .processing
+                .link
+                .as_ref(),
+        )
+        .unwrap();
+    assert!(!selected.equivalent(&neutral).unwrap());
+    let graph = selected.prepare_peer(8000, 160).unwrap();
+    let bypass = neutral.prepare_peer(8000, 160).unwrap();
+    drop((api, prepared, selected, neutral));
+
+    let mut selected = ProcessedPeer::modular(Source::new(Some(160)), graph, 160);
+    let mut neutral = ProcessedPeer::modular(Source::new(Some(160)), bypass, 160);
+    let mut wet = [0.0; 160];
+    let mut dry = [0.0; 160];
+    assert_eq!(selected.render(&mut wet), Some(160));
+    assert_eq!(neutral.render(&mut dry), Some(160));
+    assert_eq!(dry, [0.5; 160]);
+    assert!(wet[120] > 0.0 && wet[120] < dry[120]);
+}
+
+#[test]
+fn native_link_observer_outlives_its_matching_rate_graph_and_exposes_no_mismatched_values() {
+    use crate::configuration_radio::{ProviderOutputState, RadioPreparationApi};
+
+    let role = RadioPreparationApi::open()
+        .unwrap()
+        .prepare_link(None)
+        .unwrap();
+    let mismatch = role.prepare_peer(8_000, 960).unwrap().output_observer();
+    assert!(matches!(
+        mismatch.output().state,
+        ProviderOutputState::RateMismatch
+    ));
+
+    let mut graph = role.prepare_peer(48_000, 960).unwrap();
+    let observer = graph.output_observer();
+    for _ in 0..60 {
+        let mut pcm: [i16; 960] = std::array::from_fn(|i| {
+            (3650.0 * (std::f64::consts::TAU * (i % 48) as f64 / 48.0).sin()) as i16
+        });
+        graph.process(&mut pcm).unwrap();
+    }
+    let ProviderOutputState::Observed(first) = observer.output().state else {
+        panic!("expected the native 48 kHz output observer");
+    };
+    assert_ne!(first.loudness_epoch, 0);
+    assert!(first.valid_samples >= 19_200);
+    assert!(first.processed_blocks > 0);
+    assert!(first.integrated_lufs.is_some() && first.true_peak_dbtp.is_some());
+    drop(graph);
+    let ProviderOutputState::Observed(retained) = observer.output().state else {
+        panic!("the released observer must survive graph destruction");
+    };
+    assert_eq!(retained, first);
+}
+
+#[test]
+fn peer_dsp_protects_signed_input_and_float_output_at_their_own_boundaries() {
+    for float in [false, true] {
+        let (_, graph) = fixture_with_float(0, float);
+        let mut peer = ProcessedPeer::modular(Source::new(Some(4)), graph.unwrap(), 4);
+        // The fixture graph halves its input. The float graph can consume the
+        // original headroom, while the signed graph must first preserve shape.
+        let mut pcm = [-3.0, -2.0, 1.0, 3.0];
+        assert!(peer.process(&mut pcm));
+        let level = if float { 0.9 } else { 0.45 };
+        for (actual, ratio) in pcm.iter().zip([-1.0, -2.0 / 3.0, 1.0 / 3.0, 1.0]) {
+            assert!((actual - ratio * level).abs() <= 1.0 / 32768.0);
+        }
+    }
+    // A fresh signed graph must distinguish the legal asymmetric extrema.
+    let (_, graph) = fixture(0);
+    let mut peer = ProcessedPeer::modular(Source::new(Some(2)), graph.unwrap(), 2);
+    let mut extrema = [-1.0, 1.0];
+    assert!(peer.process(&mut extrema));
+    assert_eq!(extrema, [-0.5, 16383.0 / 32768.0]);
 }

@@ -1,0 +1,22 @@
+{
+  "store_path": "/var/lib/rpt-advanced/configuration",
+  "store_uuid": "31c6bf12-7e60-4b4b-86be-71a3c065dc95",
+  "write_key_id": "service-key-1",
+  "listen": "127.0.0.1:8443",
+  "authorities": [
+    "localhost:8443"
+  ],
+  "server_chain": [
+    "server-leaf"
+  ],
+  "server_key": "server-key",
+  "client_issuers": [
+    "client-ca"
+  ],
+  "clients": [
+    {
+      "identity": "operator-cli",
+      "leaf_certificate": "operator-leaf"
+    }
+  ]
+}

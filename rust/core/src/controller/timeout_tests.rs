@@ -19,6 +19,43 @@ fn protected_node() -> (NodeController, ControllerControl) {
 }
 
 #[test]
+fn transmit_policy_reports_actual_held_timeout_and_inhibit_states() {
+    let (mut node, control) = protected_node();
+    assert!(node.process_audio(true, false, &[], &mut [0.5; 4]));
+    assert_eq!(
+        node.transmit_policy_status(),
+        TransmitPolicyStatus::default()
+    );
+    assert!(node.process_audio(false, false, &[], &mut [0.0; 4]));
+    assert!(node.transmit_policy_status().traffic_holding);
+
+    node.process_audio(true, false, &[], &mut [0.5; 960]);
+    assert_eq!(
+        node.transmit_policy_status(),
+        TransmitPolicyStatus {
+            timed_out: true,
+            ..TransmitPolicyStatus::default()
+        }
+    );
+    control.set_site_inhibit(true);
+    assert!(!node.process_audio(true, false, &[], &mut [0.5; 960]));
+    assert_eq!(
+        node.transmit_policy_status(),
+        TransmitPolicyStatus {
+            inhibited: true,
+            timed_out: true,
+            traffic_holding: false,
+        }
+    );
+    control.set_site_inhibit(false);
+    node.process_audio(false, false, &[], &mut [0.0; 960]);
+    assert_eq!(
+        node.transmit_policy_status(),
+        TransmitPolicyStatus::default()
+    );
+}
+
+#[test]
 fn timeout_speaks_over_muted_traffic_then_drops_without_traffic_hang() {
     let (mut node, _) = protected_node();
     let mut audio = [0.5; 4800];
@@ -80,7 +117,7 @@ fn timeout_notice_obeys_site_inhibit_without_losing_recovery() {
 }
 
 #[test]
-fn timeout_notices_are_local_only_even_with_regeneration_and_peer_fanout() {
+fn timeout_notices_are_station_monitor_telemetry_even_with_regeneration() {
     let (mut node, _) = protected_node();
     node.process_audio(true, true, &[], &mut [0.5; 48]);
     let mut audio = [0.5; 4];
@@ -94,6 +131,7 @@ fn timeout_notices_are_local_only_even_with_regeneration_and_peer_fanout() {
         &[0.125; 4],
         &mut audio,
         ParrotOutput {
+            branches: None,
             samples: &mut parrot,
             active: &mut active,
             replies: Some(&mut replies),
@@ -106,7 +144,8 @@ fn timeout_notices_are_local_only_even_with_regeneration_and_peer_fanout() {
     assert!(!active);
     assert!(replies.iter().all(|reply| reply.target == 0
         && reply.sample == 0.0
-        && reply.broadcast.is_none()
+        && matches!(reply.broadcast,
+            Some(PublicTelemetry::StationMonitor(sample)) if sample == 0.25)
         && !reply.suppress_repeat));
 }
 

@@ -378,7 +378,7 @@ fn distinct_manual_prefix_families_remain_configurable() {
 #[test]
 fn every_action_and_pending_collection_redacts_payloads_in_debug() {
     let actions = [
-        Action::TelephoneDigit('8'),
+        Action::<String>::TelephoneDigit('8'),
         Action::Attach(Some("10001234".into())),
         Action::SelectTarget("10001234".into()),
         Action::NodeDigit {
@@ -397,4 +397,105 @@ fn every_action_and_pending_collection_redacts_payloads_in_debug() {
     let mut grammar = grammar();
     input(&mut grammar, "*310001234", 0);
     assert!(!format!("{grammar:?}").contains("10001234"));
+}
+
+#[test]
+fn phone_commands_stay_on_the_current_authenticated_calls_port() {
+    use rpt_advanced_core::{
+        command_language::{
+            Action, ActionError, CommandLanguage, CommandSource, HostAction, InvocationContext,
+            prepare_runtime_action,
+        },
+        config::resources::candidate::ResourceScope,
+        link::{PeerSignals, PhoneAccountId, PhoneCallId, PhoneSource},
+        phone_dtmf::PhoneDtmfAction,
+        runtime::{GenerationSettings, NodeHost, RuntimeGeneration},
+    };
+    use serde_json::json;
+    use std::sync::Arc;
+    let mut host = NodeHost::new(
+        RuntimeGeneration::prepare(
+            4,
+            GenerationSettings {
+                node: "1234".into(),
+                device: "test".into(),
+                receive_maximum: 480,
+                transmit_maximum: 480,
+                squelch_delay_ms: 0,
+                status_snapshot_interval_ms: 50,
+            },
+            (),
+            (),
+        )
+        .unwrap(),
+    );
+
+    let mut ctx = InvocationContext {
+        owner: ResourceScope::Port("11111111-1111-4111-8111-111111111111".parse().unwrap()),
+        generation: Arc::new(host.control().work().unwrap()),
+        source: CommandSource::Scheduler,
+        requires_grant: false,
+    };
+    let a = prepare_runtime_action(&json!({"action":"phone_manual_key"})).unwrap();
+    assert!(matches!(a.admit(&ctx, false), Err(ActionError::SourceOnly)));
+    let phone = PeerSignals::for_phone(
+        PhoneSource::new(
+            PhoneAccountId::new("account").unwrap(),
+            1,
+            PhoneCallId::new([3; 16]).unwrap(),
+            2,
+            3,
+        )
+        .unwrap(),
+    );
+    ctx.source = CommandSource::Connection {
+        reply: phone.reply_target(),
+        origin: PhoneCallId::new([3; 16]).unwrap().to_string(),
+    };
+
+    assert!(matches!(a.admit(&ctx, false), Err(ActionError::SourceOnly)));
+    assert!(phone.authenticate_phone());
+    assert!(a.admit(&ctx, false).is_ok());
+    let commands = CommandLanguage::standard();
+    let action = commands
+        .match_completed("*3")
+        .unwrap()
+        .admit(&ctx, false, true, false)
+        .expect("bare attach can only use the authenticated account port")
+        .action;
+    assert!(
+        matches!(action, Action::Host(HostAction::PhoneGrammar(action))
+        if matches!(&*action, PhoneDtmfAction::Attach(None)))
+    );
+    for command in ["*31234", "*49999"] {
+        assert!(matches!(
+            commands
+                .match_completed(command)
+                .unwrap()
+                .admit(&ctx, false, true, false),
+            Err(ActionError::SourceOnly)
+        ));
+    }
+    for command in ["*70", "*99"] {
+        let admitted = commands
+            .match_completed(command)
+            .unwrap()
+            .admit(&ctx, false, true, false)
+            .unwrap();
+        assert_eq!(admitted.context.owner, ctx.owner);
+        assert!(matches!(
+            &admitted.context.source,
+            CommandSource::Connection { reply, .. } if reply == &phone.reply_target()
+        ));
+    }
+    let receiver = InvocationContext {
+        source: CommandSource::Receiver,
+        ..ctx.clone()
+    };
+    assert!(matches!(
+        commands.match_completed("*49999").unwrap().admit(&receiver, false, true, false).unwrap().action,
+        Action::Link(action) if action.action == LinkAction::Command
+    ));
+    phone.end();
+    assert!(matches!(a.admit(&ctx, false), Err(ActionError::SourceOnly)));
 }

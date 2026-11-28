@@ -1,0 +1,25 @@
+# Use a private Keycloak realm for the radio's authorized browser operators.
+# Match the chosen nginx site's issuer and browser origin, and register the
+# exact redirect URL in Keycloak. Provide OAUTH2_PROXY_CLIENT_SECRET and
+# OAUTH2_PROXY_COOKIE_SECRET to the service through protected configuration.
+provider = "keycloak-oidc"
+oidc_issuer_url = "https://identity.example.invalid/realms/radio"
+client_id = "rpt-advanced-console"
+redirect_url = "https://console.example.invalid/oauth2/callback"
+email_domains = ["*"]
+user_id_claim = "sub"
+insecure_oidc_skip_nonce = false
+code_challenge_method = "S256"
+
+http_address = "127.0.0.1:4180"
+reverse_proxy = true
+set_xauthrequest = true
+upstreams = ["static://404"]
+cookie_name = "__Host-rpt-advanced-oidc"
+cookie_path = "/"
+cookie_secure = true
+cookie_httponly = true
+cookie_samesite = "lax"
+cookie_refresh = "0"
+request_logging = false
+auth_logging = false

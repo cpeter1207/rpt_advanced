@@ -14,26 +14,19 @@ pub mod foreground;
 pub mod host_services;
 /// Dynamically loaded outbound AllStarLink-compatible IAX2 client.
 pub mod iax;
-#[cfg(unix)]
-mod local_control;
-#[cfg(unix)]
-mod local_radio;
-pub(crate) mod processing;
 /// Runtime provider loading and version validation.
 pub mod providers;
 /// Safe ordered activation of one standalone CM119 radio path.
 pub mod radio_activation;
-/// Standalone product requests resolved to configured radio-channel reservations.
+/// Bound physical station reservations and their control callbacks.
 pub mod radio_host;
 /// ASL3-compatible HTTPS registration kept outside real-time audio callbacks.
+#[path = "../../peer-support/frontend/registration/mod.rs"]
 pub mod registration;
 /// Product start/reload/stop lifetime for the standalone process.
 pub mod runtime;
-/// Secure IAX credentials loaded separately from the ordinary node configuration.
-pub mod secrets;
+mod station_plan;
 
-/// Copied configuration records supplied by the shared controller product.
+/// Validate the managed service bootstrap and selected configuration.
 pub mod configuration;
-/// Owned native station requests copied from the product's synchronous visitor.
-pub mod native_configuration;
-pub use configuration::{ConfigError, ResolvedRadioNode, check_config, resolve_radio_nodes};
+pub use configuration::{ConfigError, check_config};

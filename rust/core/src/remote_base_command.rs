@@ -287,42 +287,77 @@ pub fn parse_remote_command(text: &str) -> Option<RemoteCommand> {
     if fixed.is_some() {
         return fixed;
     }
-    if let Some((prefix, rest)) = text.split_at_checked(3) {
-        match prefix {
-            "990" => {
-                return Some(C::Catalog {
-                    kind: CatalogKind::Capabilities,
-                    page: selector(rest)?,
-                });
-            }
-            "991" => {
-                return Some(C::Catalog {
-                    kind: CatalogKind::Memories,
-                    page: selector(rest)?,
-                });
-            }
-            "992" => {
-                return Some(C::Catalog {
-                    kind: CatalogKind::ScanLists,
-                    page: selector(rest)?,
-                });
-            }
-            "993" => return Some(C::ScanStatus(selector(rest)?)),
-            "995" => return Some(C::Dwell(number::<u64>(rest).filter(|value| *value != 0)?)),
-            "996" => return Some(C::ResumeDelay(number(rest)?)),
-            "997" => {
-                return Some(C::Priority(
-                    number::<u32>(rest).map(|value| (value != 0).then_some(value))?,
-                ));
-            }
-            "999" => return Some(C::Invoke(selector(rest)?)),
-            _ => (),
-        }
-    }
-    if let Some((prefix, rest)) = text.split_at_checked(2) {
-        match prefix {
-            "90" => return Some(C::GetSetting(selector(rest)?)),
-            "91" => {
+    ARGUMENT_PREFIXES
+        .iter()
+        .find_map(|(prefix, decoder)| text.strip_prefix(prefix).map(|tail| decoder.decode(tail)))
+        .flatten()
+}
+
+/// Existing radio payload grammars, shared by the family selector and explicit aliases.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ArgumentDecoder {
+    CatalogCapabilities,
+    CatalogMemories,
+    CatalogScanLists,
+    ScanStatus,
+    Dwell,
+    ResumeDelay,
+    Priority,
+    Invoke,
+    GetSetting,
+    SetSetting,
+    StartScan,
+    Memory,
+    Recall,
+    Frequency,
+    ReceiveTone,
+    TransmitTone,
+}
+
+const ARGUMENT_PREFIXES: &[(&str, ArgumentDecoder)] = &[
+    ("990", ArgumentDecoder::CatalogCapabilities),
+    ("991", ArgumentDecoder::CatalogMemories),
+    ("992", ArgumentDecoder::CatalogScanLists),
+    ("993", ArgumentDecoder::ScanStatus),
+    ("995", ArgumentDecoder::Dwell),
+    ("996", ArgumentDecoder::ResumeDelay),
+    ("997", ArgumentDecoder::Priority),
+    ("999", ArgumentDecoder::Invoke),
+    ("90", ArgumentDecoder::GetSetting),
+    ("91", ArgumentDecoder::SetSetting),
+    ("92", ArgumentDecoder::StartScan),
+    ("98", ArgumentDecoder::Memory),
+    ("0", ArgumentDecoder::Recall),
+    ("1", ArgumentDecoder::Frequency),
+    ("2", ArgumentDecoder::ReceiveTone),
+    ("3", ArgumentDecoder::TransmitTone),
+];
+
+impl ArgumentDecoder {
+    pub(crate) fn decode(self, rest: &str) -> Option<RemoteCommand> {
+        use RemoteCommand as C;
+        match self {
+            Self::CatalogCapabilities => Some(C::Catalog {
+                kind: CatalogKind::Capabilities,
+                page: selector(rest)?,
+            }),
+            Self::CatalogMemories => Some(C::Catalog {
+                kind: CatalogKind::Memories,
+                page: selector(rest)?,
+            }),
+            Self::CatalogScanLists => Some(C::Catalog {
+                kind: CatalogKind::ScanLists,
+                page: selector(rest)?,
+            }),
+            Self::ScanStatus => Some(C::ScanStatus(selector(rest)?)),
+            Self::Dwell => Some(C::Dwell(number::<u64>(rest).filter(|value| *value != 0)?)),
+            Self::ResumeDelay => Some(C::ResumeDelay(number(rest)?)),
+            Self::Priority => Some(C::Priority(
+                number::<u32>(rest).map(|value| (value != 0).then_some(value))?,
+            )),
+            Self::Invoke => Some(C::Invoke(selector(rest)?)),
+            Self::GetSetting => Some(C::GetSetting(selector(rest)?)),
+            Self::SetSetting => {
                 let [setting, sign, digits, places] = parts(rest)?;
                 let value = DecimalValue {
                     negative: match sign {
@@ -334,55 +369,54 @@ pub fn parse_remote_command(text: &str) -> Option<RemoteCommand> {
                     decimal_places: number(places)?,
                 };
                 value.at_decimal_places(value.decimal_places)?;
-                return Some(C::SetSetting {
+                Some(C::SetSetting {
                     selector: selector(setting)?,
                     value,
-                });
+                })
             }
-            "92" => return Some(C::StartScan(selector(rest)?)),
-            "98" => return Some(C::Memory(selector(rest)?)),
-            _ => (),
+            Self::StartScan => Some(C::StartScan(selector(rest)?)),
+            Self::Memory => Some(C::Memory(selector(rest)?)),
+            Self::Recall => Some(C::Recall(selector(rest)?)),
+            Self::Frequency => {
+                let [whole, fraction, offset] = parts(rest)?;
+                if !(1..=5).contains(&fraction.len()) {
+                    return None;
+                }
+                let hertz = number::<u64>(whole)?.checked_mul(1_000_000)?.checked_add(
+                    number::<u64>(fraction)?.checked_mul(10_u64.pow(6 - fraction.len() as u32))?,
+                )?;
+                if hertz == 0 {
+                    return None;
+                }
+                Some(C::Frequency {
+                    hertz,
+                    offset: match offset {
+                        "1" => RemoteOffset::Minus,
+                        "2" => RemoteOffset::Simplex,
+                        "3" => RemoteOffset::Plus,
+                        _ => return None,
+                    },
+                })
+            }
+            Self::ReceiveTone => tone(rest, false),
+            Self::TransmitTone => tone(rest, true),
         }
     }
-    let (prefix, rest) = text.split_at_checked(1)?;
-    match prefix {
-        "0" => Some(C::Recall(selector(rest)?)),
-        "1" => {
-            let [whole, fraction, offset] = parts(rest)?;
-            if !(1..=5).contains(&fraction.len()) {
-                return None;
-            }
-            let hertz = number::<u64>(whole)?.checked_mul(1_000_000)?.checked_add(
-                number::<u64>(fraction)?.checked_mul(10_u64.pow(6 - fraction.len() as u32))?,
-            )?;
-            if hertz == 0 {
-                return None;
-            }
-            Some(C::Frequency {
-                hertz,
-                offset: match offset {
-                    "1" => RemoteOffset::Minus,
-                    "2" => RemoteOffset::Simplex,
-                    "3" => RemoteOffset::Plus,
-                    _ => return None,
-                },
-            })
-        }
-        "2" | "3" => {
-            let [whole, tenth] = parts(rest)?;
-            if tenth.len() != 1 {
-                return None;
-            }
-            let tone = number::<u32>(whole)?
-                .checked_mul(10)?
-                .checked_add(number::<u32>(tenth)?)?;
-            (500..=3000).contains(&tone).then_some(C::Tone {
-                encode: prefix == "3",
-                tenths_hz: tone,
-            })
-        }
-        _ => None,
+}
+
+fn tone(rest: &str, encode: bool) -> Option<RemoteCommand> {
+    use RemoteCommand as C;
+    let [whole, tenth] = parts(rest)?;
+    if tenth.len() != 1 {
+        return None;
     }
+    let tone = number::<u32>(whole)?
+        .checked_mul(10)?
+        .checked_add(number::<u32>(tenth)?)?;
+    (500..=3000).contains(&tone).then_some(C::Tone {
+        encode,
+        tenths_hz: tone,
+    })
 }
 
 #[cfg(test)]

@@ -1,0 +1,26 @@
+{
+  "key": "connect_net",
+  "configuration": {
+    "actions": [
+      {
+        "action": "connect",
+        "parameter": "2001"
+      },
+      {
+        "action": "pause",
+        "timing": {
+          "duration_ms": 2000
+        }
+      },
+      {
+        "action": "execute_dtmf",
+        "digits": "*70#"
+      },
+      {
+        "action": "message",
+        "destination": "peers",
+        "message": "{ status_message }"
+      }
+    ]
+  }
+}

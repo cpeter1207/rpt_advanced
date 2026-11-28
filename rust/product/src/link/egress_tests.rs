@@ -246,3 +246,43 @@ fn failed_creation_releases_a_converter_returned_alongside_an_error() {
         assert!(Egress::from_descriptor(8000, 16, Box::leak(Box::new(api))).is_err());
     }
 }
+
+#[test]
+fn codec_egress_keeps_hot_waveform_shape_and_finite_duration_at_wire_rate() {
+    let quiet: Vec<_> = (0..961)
+        .map(|i| 0.7 * (std::f32::consts::TAU * 375.0 * i as f32 / 48_000.0).sin())
+        .collect();
+    let hot: Vec<_> = quiet.iter().map(|sample| 2.0 * sample).collect();
+    for rate in [8_000, 16_000, 48_000] {
+        let mut reference = Egress::new(rate, quiet.len()).unwrap();
+        let quiet_pcm = reference.process(&quiet).unwrap();
+        let peak = quiet_pcm.iter().fold(0.0_f32, |p, x| p.max(x.abs()));
+        assert!(peak > 0.6 && peak < 1.0);
+        let mut egress = Egress::new(rate, hot.len()).unwrap();
+        let pcm = egress.process(&hot).unwrap();
+        assert_eq!(pcm.len(), quiet_pcm.len());
+        for (&actual, &reference) in pcm.iter().zip(quiet_pcm) {
+            assert!((actual - reference * (0.9 / peak)).abs() < 0.0001);
+        }
+        let retained = pcm.to_vec();
+        let mut total = retained.len();
+        assert_eq!(egress.retained_output(total), retained);
+        for _ in 0..16 {
+            let (tail, done) = egress.finish().unwrap();
+            assert!(tail.iter().all(|x| x.is_finite() && x.abs() <= 1.0));
+            let (reference_tail, reference_done) = reference.finish().unwrap();
+            assert_eq!((tail.len(), done), (reference_tail.len(), reference_done));
+            total += tail.len();
+            if done {
+                break;
+            }
+        }
+        assert_eq!(total, (hot.len() * rate as usize).div_ceil(48_000));
+        egress.reset().unwrap();
+        reference.reset().unwrap();
+        assert_eq!(
+            egress.process(&quiet).unwrap(),
+            reference.process(&quiet).unwrap()
+        );
+    }
+}

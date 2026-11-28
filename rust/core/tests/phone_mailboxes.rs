@@ -1,7 +1,30 @@
 //! Mailbox credentials are private configuration, never an administrative grant.
 use argon2::{Argon2, PasswordHasher, password_hash::SaltString};
-use rpt_advanced_core::config::{ConfigDocument, Schema, resolve_phone_mailboxes};
-use std::fmt::Write;
+use rpt_advanced_core::config::{
+    self,
+    resources::{
+        PortKey,
+        candidate::{ResourceKind, ResourceScope},
+    },
+    valid_mailbox_pin_hash, verify_mailbox_pin,
+};
+use serde_json::json;
+#[path = "support/capture.rs"]
+mod capture;
+const SITE: &str = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+
+fn identity(
+    key: &str,
+    fields: serde_json::Value,
+) -> Result<
+    config::resources::profiles::mailbox::ScopedMailboxes,
+    config::resources::profiles::mailbox::MailboxError,
+> {
+    let fixture = capture::Fixture::new(&[], &[(SITE, ResourceKind::Mailbox, key, fields)]);
+    fixture
+        .candidate()
+        .mailbox_profiles(ResourceScope::Site(fixture.registry.site_id()))
+}
 
 fn hash() -> String {
     Argon2::default()
@@ -15,61 +38,38 @@ fn hash() -> String {
 
 #[test]
 fn mailbox_configuration_is_recognized_without_a_public_node() {
-    let document = ConfigDocument::parse(&format!(
-        "[1000]\n[mailbox 0012]\nfirst_name=Chris\ncallsign=KG0BP\npin_hash={}\n",
-        hash()
-    ))
-    .unwrap();
-    assert_eq!(document.nodes(), ["1000"]);
-    assert!(Schema::validate(&document).unwrap().warnings.is_empty());
-}
-
-#[test]
-fn invalid_mailbox_hash_is_diagnosed_without_echoing_the_secret() {
-    let document = ConfigDocument::parse(
-        "[1000]\n[mailbox 0012]\nfirst_name=Chris\ncallsign=KG0BP\npin_hash=PRIVATE_PIN_1234\n",
-    )
-    .unwrap();
-    let result = Schema::validate(&document).unwrap();
-    assert!(!result.warnings.is_empty());
-    assert!(!format!("{:?}", result.warnings).contains("PRIVATE_PIN_1234"));
-    assert!(
-        result
-            .warnings
-            .iter()
-            .any(|warning| warning.key == "pin_hash")
+    let accounts = identity("0012", json!({"first_name":"Chris","callsign":"KG0BP"})).unwrap();
+    assert!(accounts.warnings.is_empty());
+    assert_eq!(
+        accounts.effective[&PortKey::new("0012")].number.as_str(),
+        "0012"
     );
 }
 
 #[test]
-fn mailbox_document_debug_never_discloses_an_entered_or_stored_secret() {
-    let document =
-        ConfigDocument::parse("[mailbox 12]\npin=PRIVATE_PIN_1234\npin_hash=PRIVATE_HASH\n")
-            .unwrap();
-    let debug = format!("{document:?}");
-    assert!(!debug.contains("PRIVATE_PIN_1234"));
-    assert!(!debug.contains("PRIVATE_HASH"));
-    let ordinary = ConfigDocument::parse("[1000]\nradio_channel=fixture\n").unwrap();
-    assert!(format!("{ordinary:?}").contains("fixture"));
+fn malformed_private_input_is_not_echoed_by_mailbox_diagnostics() {
+    let malformed = "PRIVATE_PIN_1234";
+    assert!(!valid_mailbox_pin_hash(malformed));
+    let error = identity(
+        "0012",
+        json!({"first_name":"","callsign":"KG0BP","pin":malformed}),
+    )
+    .err()
+    .unwrap();
+    assert!(!format!("{error:?}").contains(malformed));
 }
-
 #[test]
 fn salted_record_verifies_only_bounded_digits_and_preserves_profile() {
     let digest = hash();
-    let document = ConfigDocument::parse(&format!(
-        "[mailbox 0012]\nfirst_name=Chris\ncallsign=KG0BP\npin_hash={digest}\n"
-    ))
-    .unwrap();
-    let result = resolve_phone_mailboxes(&document);
-    assert!(result.warnings.is_empty());
-    let mailbox = &result.value[0];
-    assert_eq!(mailbox.id.as_str(), "0012");
+    let result = identity("0012", json!({"first_name":"Chris","callsign":"KG0BP"})).unwrap();
+    let mailbox = &result.effective[&PortKey::new("0012")];
+    assert_eq!(mailbox.number.as_str(), "0012");
     assert_eq!(
         (&*mailbox.first_name, &*mailbox.callsign),
         ("Chris", "KG0BP")
     );
     assert!(!format!("{mailbox:?}").contains(&digest));
-    assert!(mailbox.verify_pin("1234"));
+    assert!(verify_mailbox_pin(&digest, "1234"));
     for input in [
         "",
         "123",
@@ -77,7 +77,7 @@ fn salted_record_verifies_only_bounded_digits_and_preserves_profile() {
         "1234#",
         "12345678901234567890123456789012345",
     ] {
-        assert!(!mailbox.verify_pin(input));
+        assert!(!verify_mailbox_pin(&digest, input));
     }
 }
 
@@ -111,33 +111,17 @@ fn incomplete_or_weak_mailboxes_remain_unavailable_without_secret_diagnostics() 
         ("callsign", "A".repeat(17)),
         ("callsign", "INVALID CALLSIGN".into()),
     ] {
-        let mut fields = [
-            ("first_name", "Chris".to_owned()),
-            ("callsign", "KG0BP".into()),
-            ("pin_hash", digest.clone()),
-        ];
-        fields.iter_mut().find(|(name, _)| *name == key).unwrap().1 = invalid.clone();
-        let mut body = String::new();
-        for (key, value) in fields {
-            writeln!(&mut body, "{key}={value}").unwrap();
-        }
-        let document = ConfigDocument::parse(&format!("[mailbox 0012]\n{body}")).unwrap();
-        assert!(resolve_phone_mailboxes(&document).value.is_empty());
-        let warnings = Schema::validate(&document).unwrap().warnings;
-        assert!(!warnings.is_empty());
         if key == "pin_hash" {
-            assert!(!format!("{warnings:?}").contains(&invalid));
+            assert!(!valid_mailbox_pin_hash(&invalid));
+        } else {
+            let mut fields = json!({"first_name":"Chris","callsign":"KG0BP"});
+            fields[key] = json!(invalid);
+            assert!(identity("0012", fields).is_err());
         }
     }
-    for section in [
-        "mailbox invalid",
-        "mailbox 123456789012345678901234567890123",
-        "mailbox 42",
-    ] {
-        let document = ConfigDocument::parse(&format!("[{section}]\npin=UNSAFE1234\n")).unwrap();
-        let warnings = Schema::validate(&document).unwrap().warnings;
-        assert!(resolve_phone_mailboxes(&document).value.is_empty());
-        assert!(!format!("{warnings:?}").contains("UNSAFE1234"));
+    for number in ["invalid", "123456789012345678901234567890123", "42"] {
+        let error = identity(number, json!({"pin":"UNSAFE1234"})).err().unwrap();
+        assert!(!format!("{error:?}").contains("UNSAFE1234"));
     }
 }
 
@@ -149,10 +133,5 @@ fn a_parseable_phc_with_short_digest_is_not_an_available_mailbox() {
         digest.rsplit_once('$').unwrap().0
     );
     assert!(argon2::password_hash::PasswordHash::new(&short).is_ok());
-    let document = ConfigDocument::parse(&format!(
-        "[mailbox 12]\nfirst_name=Chris\ncallsign=KG0BP\npin_hash={short}\n"
-    ))
-    .unwrap();
-    assert!(resolve_phone_mailboxes(&document).value.is_empty());
-    assert!(!Schema::validate(&document).unwrap().warnings.is_empty());
+    assert!(!valid_mailbox_pin_hash(&short));
 }

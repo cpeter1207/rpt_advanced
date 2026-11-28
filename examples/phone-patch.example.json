@@ -1,0 +1,28 @@
+{
+  "provider": {
+    "protocol": "sip",
+    "server": "sip.example.net",
+    "port": 5060,
+    "username": "example-user"
+  },
+  "vad": {
+    "enabled": true,
+    "mode": "continuous",
+    "timing": {
+      "hang_ms": 1000
+    }
+  },
+  "jitter": {
+    "timing": {
+      "minimum_ms": 20,
+      "initial_ms": 40,
+      "maximum_ms": 100
+    }
+  },
+  "playout_destination": "local",
+  "isolate_peers": true,
+  "timing": {
+    "target_latency_ms": 240,
+    "maximum_latency_ms": 500
+  }
+}

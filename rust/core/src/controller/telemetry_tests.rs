@@ -276,7 +276,15 @@ fn parrot_queue_rejects_status_and_resets_busy_after_full_ring() {
     assert!(!control.queue_prepared_parrot(
         PreparedMedia::new(Some(vec![0.5]), "E", MorseSettings::default()).unwrap()
     ));
-    control.parrot_pending.push(parrot_media(&[0.6])).unwrap();
+    assert!(
+        control
+            .parrot_pending
+            .push(super::QueuedParrot {
+                media: parrot_media(&[0.6]),
+                epoch: 0
+            })
+            .is_ok()
+    );
 
     assert!(!control.queue_prepared_parrot(parrot_media(&[0.7])));
     assert!(!control.parrot_busy.load(Ordering::Acquire));
@@ -288,7 +296,7 @@ fn parrot_queue_holds_one_item_until_callback_reclaims_it() {
     control.parrot_enabled = true;
     assert!(control.queue_prepared_parrot(parrot_media(&[0.4])));
     assert!(!control.queue_prepared_parrot(parrot_media(&[0.5])));
-    planner.start_parrot();
+    planner.start_parrot(0);
     assert!(planner.active.is_none());
     assert!(planner.parrot.is_some());
     planner.finish_parrot();
@@ -306,7 +314,119 @@ fn empty_parrot_planner_and_unconfigured_capture_recycle_are_noops() {
     control.recycle_parrot_capture(capture_control.take_completed().unwrap());
 
     let (mut planner, _) = TelemetryPlanner::new(MorseSettings::default(), -6);
-    planner.start_parrot();
+    planner.start_parrot(0);
     planner.finish_parrot();
     assert!(planner.parrot.is_none());
+}
+
+#[test]
+fn telemetry_observations_distinguish_queued_audio_from_pcm_and_terminal_results() {
+    use super::super::{ControllerSettings, CourtesySettings, NodeController};
+    use crate::controller::TelemetryPhase;
+
+    let (mut node, mut control) = NodeController::new(
+        ControllerSettings::default(),
+        vec![],
+        vec![],
+        CourtesySettings::default(),
+    )
+    .unwrap();
+    assert!(
+        control.queue_prepared_status(
+            PreparedMedia::new_stream(sequence_reader(&[0.2], false)).unwrap()
+        )
+    );
+    let mut rx = [0.0; 48];
+    node.process_audio(true, false, &[], &mut rx);
+    let queued = control.take_telemetry_observation().unwrap();
+    assert_eq!(queued.phase, TelemetryPhase::Queued);
+    assert!(control.take_telemetry_observation().is_none());
+
+    let mut quiet = [0.0; 12_480];
+    node.process_audio(false, false, &[], &mut quiet);
+    let started = control.take_telemetry_observation().unwrap();
+    assert_eq!(started.phase, TelemetryPhase::Started);
+    assert_eq!(started.id, queued.id);
+    assert!(started.sample_position > queued.sample_position);
+    let finished = control.take_telemetry_observation().unwrap();
+    assert_eq!(finished.phase, TelemetryPhase::Finished);
+    assert_eq!(finished.id, queued.id);
+
+    assert!(
+        control
+            .queue_prepared_status(PreparedMedia::new_stream(sequence_reader(&[], true)).unwrap())
+    );
+    node.process_audio(false, false, &[], &mut quiet);
+    let queued = control.take_telemetry_observation().unwrap();
+    let failed = control.take_telemetry_observation().unwrap();
+    assert_eq!(queued.phase, TelemetryPhase::Queued);
+    assert_eq!(failed.phase, TelemetryPhase::Failed);
+    assert_eq!(failed.id, queued.id);
+    assert!(control.take_telemetry_observation().is_none());
+}
+
+#[test]
+fn courtesy_observation_retires_its_own_queued_instance_before_pcm() {
+    use super::super::{ControllerSettings, CourtesySettings, NodeController, TelemetryPhase};
+
+    let courtesy = CourtesySettings {
+        link: Some(PreparedMedia::new_stream(sequence_reader(&[0.1], false)).unwrap()),
+        ..CourtesySettings::default()
+    };
+    let (mut node, mut control) = NodeController::new(
+        ControllerSettings {
+            courtesy_delay_ms: 250,
+            ..ControllerSettings::default()
+        },
+        vec![],
+        vec![],
+        courtesy,
+    )
+    .unwrap();
+    node.link_unkeyed("2000", "", false);
+    let queued = control.take_telemetry_observation().unwrap();
+    assert_eq!(queued.phase, TelemetryPhase::Queued);
+    assert_eq!(queued.category, "courtesy");
+    assert_eq!(queued.deadline_sample, Some(12_000));
+    node.link_keyed("3000");
+    assert!(control.take_telemetry_observation().is_none());
+    node.link_keyed("2000");
+    let cancelled = control.take_telemetry_observation().unwrap();
+    assert_eq!(cancelled.phase, TelemetryPhase::Cancelled);
+    assert_eq!(cancelled.id, queued.id);
+    assert_eq!(cancelled.reason, Some("source_rekeyed"));
+    assert!(control.take_telemetry_observation().is_none());
+}
+
+#[test]
+fn polite_id_observation_retains_its_deadline_without_a_pcm_start() {
+    use super::super::{
+        ControllerSettings, CourtesySettings, Identifier, NodeController, TelemetryPhase,
+    };
+
+    let identifier = Identifier {
+        media: PreparedMedia::new_stream(sequence_reader(&[0.2], false)).unwrap(),
+        interval_ms: 10,
+        priority: 1,
+        first_key_only: false,
+        regardless_of_activity: true,
+        polite_maximum_wait_ms: Some(300),
+    };
+    let (mut node, mut control) = NodeController::new(
+        ControllerSettings {
+            full_duplex: true,
+            ..ControllerSettings::default()
+        },
+        vec![identifier],
+        vec![],
+        CourtesySettings::default(),
+    )
+    .unwrap();
+    let mut traffic = [0.125; 960];
+    node.process_audio(true, false, &[], &mut traffic);
+    let queued = control.take_telemetry_observation().unwrap();
+    assert_eq!(queued.category, "id");
+    assert_eq!(queued.phase, TelemetryPhase::Queued);
+    assert_eq!(queued.deadline_sample, Some(14_880));
+    assert!(control.take_telemetry_observation().is_none());
 }

@@ -1,0 +1,35 @@
+{
+  "key": "weekday_net",
+  "sequence_number": 10,
+  "restart_recovery": true,
+  "start": {
+    "at": "every weekday at 19:00",
+    "politeness_minutes": 2,
+    "macro": "connect_window",
+    "warnings": [
+      {
+        "at": "every weekday at 18:55",
+        "macro": "warn_net_start_5_minutes"
+      },
+      {
+        "at": "every weekday at 18:59",
+        "macro": "warn_net_start_1_minute"
+      }
+    ]
+  },
+  "end": {
+    "at": "every weekday at 20:00",
+    "politeness_minutes": 2,
+    "macro": "disconnect_window",
+    "warnings": [
+      {
+        "at": "every weekday at 19:55",
+        "macro": "warn_net_end_5_minutes"
+      },
+      {
+        "at": "every weekday at 19:59",
+        "macro": "warn_net_end_1_minute"
+      }
+    ]
+  }
+}

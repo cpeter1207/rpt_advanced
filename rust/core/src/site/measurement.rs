@@ -58,6 +58,7 @@ impl SensorState {
     pub fn reconfigure(&mut self, settings: SensorSettings) {
         if self.settings.enabled != settings.enabled
             || self.settings.endpoint != settings.endpoint
+            || self.settings.interface != settings.interface
             || self.settings.calibration != settings.calibration
         {
             *self = Self::new(settings);

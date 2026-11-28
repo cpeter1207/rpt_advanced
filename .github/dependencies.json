@@ -1,12 +1,12 @@
 [
   {
     "repository": "librptadvradio",
-    "sha": "581eec7bc938ea8642fc270d54a1f6255aa9544f",
+    "sha": "83c715249516b176fca0297bffb2b145e98c8d27",
     "packages": ["librptadvradio5", "librptadvradio-dev"]
   },
   {
     "repository": "rptadv-gpio-adapter",
-    "sha": "a5bd54f310bbc98447c97d8f139d4fa503b2241a",
+    "sha": "66726ead2d43945d9e6e090d369288d950bba754",
     "packages": ["librptadv-gpio-adapter1", "librptadv-gpio-adapter-dev"]
   },
   {
@@ -16,7 +16,7 @@
   },
   {
     "repository": "rptadv-codec-adapters",
-    "sha": "5ed83bb4d52985e68a455fce4a3145ee6907c107",
+    "sha": "4f5d885af9d593b333671953a65343aca0d6204e",
     "packages": [
       "librptadv-codec-dev", "librptadv-codec-g7111", "librptadv-codec-pcm1",
       "librptadv-codec-gsm1", "librptadv-codec-speex1", "librptadv-codec-opus1",
@@ -27,7 +27,7 @@
   },
   {
     "repository": "librptadviax2",
-    "sha": "c9a6b67b7cba73d39916b68fa7da2a718f274f75",
+    "sha": "35ff86cb2a8546c90443ea55b8ec6e1963e22bee",
     "packages": ["librptadv-iax2-client2", "librptadv-iax2-client-dev"]
   },
   {
@@ -40,7 +40,7 @@
   },
   {
     "repository": "rptadv-ffmpeg-adapter",
-    "sha": "b3accbe01ed5c864a6b569ae0cbd52313f65a43d",
+    "sha": "60b06f6f7341fb4032e63156fee998aa9702eb0c",
     "packages": ["librptadv-ffmpeg-adapter1", "librptadv-ffmpeg-adapter-dev"]
   },
   {
@@ -50,17 +50,22 @@
   },
   {
     "repository": "rate_adjusting_pcm_ring",
-    "sha": "c8f32d5eb98f20f1be67230a43a76966ef8aa930",
+    "sha": "360e7312a4a367418ddac04bd81b8996d8a0ae80",
     "packages": ["librate-adjusting-pcm-ring3", "librate-adjusting-pcm-ring3-dev"]
   },
   {
     "repository": "librptadvschedule",
-    "sha": "9f4c39c2f1f0956c2c8ae3afbb34edf9dd30edc9",
+    "sha": "238811360fc34908a8ea9d4174bfe49d874d2a0e",
     "packages": ["librptadvschedule1", "librptadvschedule-dev"]
   },
   {
+    "repository": "USBRadioPlus",
+    "sha": "91f175c56a0b62c7dc84e24064f67ff49f142d8d",
+    "packages": ["libusbradioplus-product1", "libusbradioplus-product-dev"]
+  },
+  {
     "repository": "librptadvecholink",
-    "sha": "cb57a9f25591ffb3e8a48c82fad3ea5fe0bbad0c",
+    "sha": "e6032d96cc1ac850cc29a81651879ce36c6327ca",
     "packages": ["librptadvecholink1", "librptadvecholink-dev"]
   }
 ]

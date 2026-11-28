@@ -13,16 +13,12 @@ struct State {
     product: Product,
     registration: Option<Registration>,
     services: crate::services::HostServicesOwner,
-    configuration: String,
-    path: PathBuf,
-    control: EchoBackend,
 }
 
-#[derive(Clone, Copy)]
-struct EchoBackend(*const ffi::rptadv_control_descriptor_v1);
-// Immutable selected table/code is retained by the loader through product stop.
-unsafe impl Send for EchoBackend {}
 static STATE: Mutex<Option<State>> = Mutex::new(None);
+// A reload polls outside STATE so product callbacks can look up their owner. Keep the
+// loader's DSO and callback ownership through the final poll, including on reentry.
+static TRANSITION: Mutex<()> = Mutex::new(());
 #[cfg(test)]
 static TEST_PRODUCT: Mutex<Option<Product>> = Mutex::new(None);
 
@@ -40,6 +36,7 @@ pub struct Descriptor {
         unsafe extern "C" fn(
             *mut c_void,
             *const ffi::rptadv_product_descriptor_v1,
+            *const ffi::rptadv_product_management_v1,
             *const ffi::rptadv_control_descriptor_v1,
             *const ffi::rptadv_file_descriptor,
             *const ffi::rptadv_speech_descriptor,
@@ -51,68 +48,13 @@ pub struct Descriptor {
     pub unload: Option<extern "C" fn() -> i32>,
 }
 
-fn configuration_path() -> Option<PathBuf> {
+fn configuration_path(name: &str) -> Option<PathBuf> {
     let directory = unsafe { ffi::ast_config_AST_CONFIG_DIR };
     if directory.is_null() {
         return None;
     }
     let directory = unsafe { CStr::from_ptr(directory) }.to_str().ok()?;
-    Some(Path::new(directory).join("rpt_advanced.conf"))
-}
-
-/// Retain the resolved path with the document read from it for one load transaction.
-fn configuration() -> Option<(PathBuf, String)> {
-    let path = configuration_path()?;
-    let document = std::fs::read_to_string(&path).ok()?;
-    Some((path, document))
-}
-
-fn with_echo_preparation<T>(
-    path: &Path,
-    product: Product,
-    control: EchoBackend,
-    operation: impl FnOnce(rptadv_peer_support::echolink::host::Preparation<'_>) -> T,
-) -> T {
-    let jitter = Path::new(env!("RPT_ADVANCED_LIBDIR")).join("librptadv_jitter_adapter.so.1");
-    let bytes = |value: &str| rptadv_peer_support::echolink::abi::ByteSpan {
-        data: value.as_ptr(),
-        length: value.len(),
-    };
-    let resources = rptadv_peer_support::echolink::abi::RuntimeConfig {
-        gsm_library: bytes("librptadv_codec_gsm.so.1"),
-        speex_library: bytes("librptadv_codec_speex.so.1"),
-        jitter_library: bytes(
-            jitter
-                .to_str()
-                .expect("UTF-8 build path with an ASCII filename"),
-        ),
-        ..Default::default()
-    };
-    operation(unsafe {
-        rptadv_peer_support::echolink::host::Preparation::new(
-            path,
-            Path::new("librptadv_echolink.so.1"),
-            &resources,
-            control.0.cast(),
-            move |peer| product.incoming_echo(peer),
-        )
-        .with_notice(crate::services::echo_notice)
-    })
-}
-
-fn echo_reload_error(error: impl std::fmt::Debug) {
-    let text =
-        std::ffi::CString::new(format!("{error:?}")).expect("typed Echo errors contain no NUL");
-    unsafe {
-        ffi::ast_log(
-            ffi::__LOG_ERROR as i32,
-            c"rust/asterisk/lifecycle.rs".as_ptr(),
-            0,
-            c"reload".as_ptr(),
-            c"rpt_advanced: EchoLink reload: %s\n".as_ptr(),
-            text.as_ptr(),
-        )
-    };
+    Some(Path::new(directory).join(name))
 }
 
 /// Return the selected product while registrations retain its callback code.
@@ -131,143 +73,211 @@ pub(crate) fn product() -> Option<Product> {
         .map(|state| state.product)
 }
 
+pub(crate) fn asl_incoming(local: &str) -> Option<crate::services::Handoff> {
+    STATE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()?
+        .services
+        .asl_incoming(local)
+}
+
+unsafe fn register(module: *mut c_void) -> Result<Registration, crate::Error> {
+    // SAFETY: Asterisk keeps the module and callback code live through confirmed unload.
+    unsafe {
+        Registration::register(
+            module.cast(),
+            crate::application::callback,
+            [
+                crate::cli::link_callback,
+                crate::cli::alias_callback,
+                crate::cli::command_callback,
+                crate::cli::site_callback,
+            ],
+        )
+    }
+}
+
+/// Start from the trusted service document in Asterisk's configured directory.
+///
+/// # Safety
+/// The loader owns every descriptor and its DSO until this adapter confirms unload.
+/// The management table advertises its accessible immutable size prefix.
 unsafe extern "C" fn load(
     module: *mut c_void,
     product: *const ffi::rptadv_product_descriptor_v1,
+    management: *const ffi::rptadv_product_management_v1,
     control: *const ffi::rptadv_control_descriptor_v1,
     file: *const ffi::rptadv_file_descriptor,
     speech: *const ffi::rptadv_speech_descriptor,
 ) -> i32 {
     catch_unwind(AssertUnwindSafe(|| {
-        let mut selected = STATE.lock().unwrap_or_else(|error| error.into_inner());
-        if selected.is_some() {
+        let mut selected = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        if selected.is_some()
+            || module.is_null()
+            || management.is_null()
+            || !management.is_aligned()
+        {
             return 1;
         }
+        // SAFETY: the loader lends at least the public length word.
+        if unsafe { std::ptr::addr_of!((*management).struct_size).read() } as usize
+            != size_of::<ffi::rptadv_product_management_v1>()
+        {
+            return 1;
+        }
+        // SAFETY: complete table was checked before borrowing its fields.
+        let management = unsafe { &*management };
+        if management.abi_version != 1 || management.capability != *b"rptadv.mgmt1\0\0\0\0" {
+            return 1;
+        }
+        let Some(start) = management.start else {
+            return 1;
+        };
+        // SAFETY: this separately versioned table belongs to the same retained product DSO.
         let Some(product) = (unsafe { Product::open(product) }) else {
             return 1;
         };
-        let Some((path, configuration)) = configuration() else {
+        let Some(path) = configuration_path("rpt_advanced.service.json") else {
+            return 1;
+        };
+        let Ok(bytes) = rptadv_peer_support::working_files::read_service_provisioning(&path) else {
             return 1;
         };
         let mut services = crate::services::HostServicesOwner::new();
-        let prepared =
-            with_echo_preparation(&path, product, EchoBackend(control), |preparation| unsafe {
-                services.prepare_echo(product.descriptor(), &configuration, preparation)
-            });
-        if prepared.is_err() {
+        services.install_private(product.descriptor());
+        services.install_echo(product.descriptor(), control);
+        if services.install_asl().is_err() {
             return 1;
         }
-        if !unsafe { product.start(services.descriptor(), control, file, speech, &configuration) } {
+        // SAFETY: input is borrowed synchronously and the live host is retained
+        // after acceptance or uncertain startup, until the product confirms stop.
+        let result = unsafe {
+            start(
+                services.descriptor(),
+                control,
+                file,
+                speech,
+                bytes.as_ptr().cast(),
+                bytes.len(),
+            )
+        };
+        if !matches!(result, 0 | -2) {
             return 1;
         }
-        let registration = if unsafe { services.activate_echo() }.is_ok() {
-            unsafe {
-                Registration::register(
-                    module.cast(),
-                    crate::application::callback,
-                    [
-                        crate::cli::link_callback,
-                        crate::cli::alias_callback,
-                        crate::cli::command_callback,
-                        crate::cli::site_callback,
-                    ],
-                )
+        let registration = if result == 0 {
+            // SAFETY: these are Asterisk's current module and callbacks.
+            match unsafe { register(module) } {
+                Ok(registration) => Some(registration),
+                Err(_)
+                    if product.stop()
+                        && services.private_stopped()
+                        && services.echo_stopped()
+                        && crate::registration::drain_resolver() =>
+                {
+                    return 1;
+                }
+                Err(_) => None,
             }
         } else {
-            Err(crate::Error::Admission)
+            None
         };
-        match registration {
-            Ok(registration) => {
-                *selected = Some(State {
-                    product,
-                    registration: Some(registration),
-                    services,
-                    configuration,
-                    path,
-                    control: EchoBackend(control),
-                });
-                0
-            }
-            Err(_) => {
-                if services.stop_echo().is_ok() && product.stop() {
-                    1
-                } else {
-                    // A live product cannot be abandoned while its callback code unloads.
-                    *selected = Some(State {
-                        product,
-                        registration: None,
-                        services,
-                        configuration,
-                        path,
-                        control: EchoBackend(control),
-                    });
-                    0
-                }
-            }
-        }
+        *selected = Some(State {
+            product,
+            services,
+            registration,
+        });
+        0
     }))
     .unwrap_or(1)
 }
 
 extern "C" fn reload() -> i32 {
     catch_unwind(AssertUnwindSafe(|| {
-        let mut selected = STATE.lock().unwrap_or_else(|error| error.into_inner());
-        let Some(state) = selected.as_mut() else {
+        let Ok(_transition) = TRANSITION.try_lock() else {
             return -1;
         };
-        let Ok(configuration) = std::fs::read_to_string(&state.path) else {
-            return -1;
-        };
-        let result = with_echo_preparation(
-            &state.path,
-            state.product,
-            state.control,
-            |preparation| unsafe {
-                state.services.reload_echo(
-                    state.product.descriptor(),
-                    &configuration,
-                    preparation,
-                    || state.product.reload(&configuration),
-                    || state.product.reload(&state.configuration),
-                )
-            },
-        );
-        match result {
-            Ok(outcome) => {
-                if let Some(error) = outcome.retirement {
-                    echo_reload_error(error);
-                }
-                state.configuration = configuration;
-                0
-            }
-            Err(error) => {
-                echo_reload_error(error);
-                -1
-            }
+        let product = STATE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .map(|s| s.product);
+        if product.is_some_and(|p| p.reload_working()) {
+            0
+        } else {
+            -1
         }
     }))
     .unwrap_or(-1)
+}
+
+fn unload_deferred(reason: &'static CStr) -> i32 {
+    // SAFETY: format and reason are static and contain no provider or user data.
+    unsafe {
+        ffi::ast_log(
+            ffi::__LOG_WARNING as i32,
+            c"rust/asterisk/lifecycle.rs".as_ptr(),
+            0,
+            c"unload".as_ptr(),
+            c"rpt_advanced: unload deferred: %s\n".as_ptr(),
+            reason.as_ptr(),
+        )
+    };
+    -1
 }
 
 extern "C" fn unload() -> i32 {
     catch_unwind(AssertUnwindSafe(|| {
-        let mut selected = STATE.lock().unwrap_or_else(|error| error.into_inner());
-        let Some(state) = selected.as_ref() else {
-            return 0;
+        let Ok(_transition) = TRANSITION.try_lock() else {
+            return unload_deferred(c"another lifecycle operation is in progress");
         };
-        if state.services.stop_echo().is_err() || !state.product.stop() {
-            return -1;
+        // TRANSITION pins the module while product stop drains callbacks that may look up STATE.
+        let product = {
+            let selected = STATE.lock().unwrap_or_else(|e| e.into_inner());
+            let Some(state) = selected.as_ref() else {
+                return 0;
+            };
+            if !state.services.close_asl_ingress() {
+                drop(selected);
+                return unload_deferred(c"AllStarLink ingress is still draining");
+            }
+            state.product
+        };
+        // A healthy asynchronous withdrawal may need several Product stop polls.
+        // Keep all owners registered until Product confirms callback quiescence.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while !product.stop() {
+            if std::time::Instant::now() >= deadline {
+                return unload_deferred(c"controller did not quiesce before the unload deadline");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        let mut selected = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        let state = selected.as_ref().expect("transition retains lifecycle");
+        let deferred = if !state.services.echo_stopped() {
+            Some(c"EchoLink owner did not confirm shutdown")
+        } else if !state.services.private_stopped() {
+            Some(c"phone owner did not confirm shutdown")
+        } else if !crate::registration::drain_resolver() {
+            Some(c"registration resolver is still draining")
+        } else {
+            None
+        };
+        if let Some(reason) = deferred {
+            drop(selected);
+            return unload_deferred(reason);
         }
         let state = selected.take().expect("selected lifecycle remains owned");
+        drop(selected);
         drop(state.registration);
         0
     }))
-    .unwrap_or(-1)
+    .unwrap_or_else(|_| unload_deferred(c"lifecycle callback failed"))
 }
 
 static DESCRIPTOR: Descriptor = Descriptor {
     struct_size: size_of::<Descriptor>() as u32,
-    abi_version: 1,
+    abi_version: 2,
     capability: *b"rptadv.asterisk\0",
     load: Some(load),
     reload: Some(reload),
@@ -276,7 +286,7 @@ static DESCRIPTOR: Descriptor = Descriptor {
 
 /// Return immutable process-lifetime Asterisk entry metadata.
 #[unsafe(no_mangle)]
-pub extern "C" fn rptadv_asterisk_descriptor_v1() -> *const Descriptor {
+pub extern "C" fn rptadv_asterisk_descriptor_v2() -> *const Descriptor {
     &DESCRIPTOR
 }
 

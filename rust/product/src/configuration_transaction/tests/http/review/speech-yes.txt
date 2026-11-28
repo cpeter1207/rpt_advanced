@@ -1,0 +1,5 @@
+The one-second spoken “yes” recording is from the Google Speech Commands dataset, Pete Warden (2018), licensed under Creative Commons Attribution 4.0 (https://creativecommons.org/licenses/by/4.0/).
+
+The original TensorFlow Lite Micro fixture is https://github.com/tensorflow/tflite-micro/blob/4eaa491c1c8dedd9a3baf421968afd0d5b82f6aa/tensorflow/lite/micro/examples/micro_speech/testdata/yes_1000ms.wav (SHA-256 b40e137a9d25bbdf135e03fa0f6bff4696d0bfc203aef8bc73b27c9428ba5a92). The radio provider's tests/fixtures/vad/yes-48000-s16le.pcm is a 48 kHz signed 16-bit mono conversion (SHA-256 46173e596860b29db01b4daa9f7ad7cfd2d58d5d9395daa2b2840ba45d3a61ba).
+
+For this independent RTP caller, each consecutive group of six little-endian samples was averaged with nearest-even rounding and encoded as G.711 mu-law. The resulting 8,000 bytes are the PCMU wire payload; the test transports them unchanged. Output SHA-256 24e930126da640b67231092be81b894c717a3b1ef104895a3d9b049ce93638e2.

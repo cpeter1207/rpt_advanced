@@ -15,22 +15,8 @@ pub(crate) unsafe extern "C" fn callback(
         }
         let identity = unsafe { IncomingIdentity::inspect(channel.cast(), CStr::from_ptr(data)) }
             .map_err(|_| Error::Admission)?;
-        let product = crate::lifecycle::product().ok_or(Error::Admission)?;
-        if !product.authorize_incoming(&identity.local, &identity.remote, &identity.address) {
-            return Err(Error::Admission);
-        }
-        let peer = unsafe { identity.handoff(channel.cast(), 4096) }?;
-        let peer = crate::services::into_raw(peer, &identity.local, &identity.remote);
-        match unsafe {
-            product.incoming(&identity.local, &identity.remote, &identity.address, peer)
-        } {
-            0 => Ok(()),
-            1 => {
-                unsafe { crate::services::destroy_raw(peer) };
-                Err(Error::Admission)
-            }
-            _ => Err(Error::Admission),
-        }
+        let handoff = crate::lifecycle::asl_incoming(&identity.local).ok_or(Error::Admission)?;
+        handoff.answer(&identity, channel.cast())
     }))
     .ok()
     .and_then(Result::ok)

@@ -11,6 +11,30 @@ impl Executor {
     }
 }
 
+impl Executor {
+    /// A preparation-only runtime with independent storage and no global counters.
+    pub(crate) fn playout_fixture(
+        configure: unsafe extern "C" fn(*mut c_void, *const c_void) -> i32,
+        setter: super::super::playout::Set,
+    ) -> Self {
+        unsafe extern "C" fn create_runtime(out: *mut *mut c_void) -> i32 {
+            unsafe { out.write(Box::into_raw(Box::new(1_u8)).cast()) };
+            0
+        }
+        unsafe extern "C" fn destroy_runtime(raw: *mut c_void) {
+            unsafe { drop(Box::from_raw(raw.cast::<u8>())) };
+        }
+        let mut api = descriptor();
+        api.runtime_create = Some(create_runtime);
+        api.runtime_destroy = Some(destroy_runtime);
+        api.peer_configure_jitter = Some(configure);
+        // All descriptor storage is readable here; Executor copies its checked prefix.
+        let mut executor = unsafe { Self::new(ptr::from_ref(&api).cast()) }.unwrap();
+        executor.ordinary = Some(setter);
+        executor
+    }
+}
+
 unsafe extern "C" fn create(out: *mut *mut c_void) -> i32 {
     CREATED.fetch_add(1, Ordering::Relaxed);
     unsafe { *out = Box::into_raw(Box::new(7_u8)).cast() };
@@ -68,6 +92,10 @@ fn descriptor() -> Descriptor {
         peer_observe: Some(observe),
         peer_wake: Some(stop),
         peer_set_deadline: Some(deadline),
+        peer_configure_private_jitter: None,
+        peer_set_private_jitter: None,
+        // Optional operations after the tested private prefix are null on either SDK.
+        ..unsafe { std::mem::zeroed() }
     }
 }
 unsafe extern "C" fn deadline(_: *mut c_void, _: u64) -> i32 {
@@ -122,6 +150,23 @@ fn retained_runtime_forwards_callback_and_quiesces_before_destroy() {
     );
     drop(executor);
     assert_eq!(DESTROYED.load(Ordering::Relaxed), before + 1);
+}
+
+#[test]
+fn ordinary_executor_accepts_the_complete_released_prefix_without_private_jitter() {
+    let mut api = descriptor();
+    let end = std::mem::offset_of!(Descriptor, peer_set_deadline)
+        + std::mem::size_of_val(&api.peer_set_deadline);
+    api.struct_size = end as u32;
+    // Borrow exactly the released extent; the private setter slots are absent.
+    let prefix =
+        unsafe { std::slice::from_raw_parts(std::ptr::from_ref(&api).cast::<u8>(), end) }.to_vec();
+    assert!(
+        unsafe { valid_descriptor(prefix.as_ptr().cast()) },
+        "ordinary executor must admit the released deadline prefix"
+    );
+    api.struct_size -= 1;
+    assert!(!unsafe { valid_descriptor(std::ptr::from_ref(&api).cast()) });
 }
 
 #[test]

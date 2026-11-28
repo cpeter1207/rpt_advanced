@@ -8,12 +8,14 @@ pub const NATIVE_SAMPLE_RATE_HZ: u32 = 48_000;
 pub mod access;
 pub mod audio;
 pub mod command;
+pub mod command_language;
 pub mod composition;
 pub mod config;
 pub mod control;
 pub mod controller;
 pub mod dtmf_macro;
 pub mod link;
+pub mod management;
 pub mod media;
 pub mod messages;
 pub mod phone_dtmf;
@@ -33,3 +35,10 @@ mod composition_tests;
 
 #[cfg(test)]
 mod time_tests;
+
+#[cfg(test)]
+#[path = "../tests/support/capture.rs"]
+mod capture;
+#[cfg(test)]
+#[path = "runtime/station_fixture_tests.rs"]
+mod station_fixture;

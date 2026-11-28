@@ -3,10 +3,7 @@
 use super::prepare::RuntimeError;
 use crate::{
     link::LinkManager,
-    messages::{Daypart, LinkDisplayMode, Message, MessageCatalog, MessageForms},
-    schedule::CivilTime,
-    template::{MessageTemplate, TemplateValues},
-    time::{TimeAnnouncement, TimeFormat},
+    messages::{LinkDisplayMode, Message, MessageCatalog, MessageForms},
 };
 
 pub(super) fn direct_status(
@@ -41,66 +38,7 @@ pub(super) fn direct_status(
         .map_err(|_| RuntimeError::Preparation)
 }
 
-pub(super) fn message(
-    template: &MessageTemplate,
-    clock: CivilTime,
-    format: u64,
-    node: &str,
-    callsign: &str,
-    links: &LinkManager,
-    catalog: &MessageCatalog,
-) -> Result<String, RuntimeError> {
-    let (status, _) = direct_status(links, catalog)?;
-    message_with_status(
-        template,
-        clock,
-        TimeFormat::try_from(format).map_err(|_| RuntimeError::Preparation)?,
-        node,
-        callsign,
-        &status.text,
-        catalog,
-    )
-}
-
-/// Expand the existing template language against an already captured link-status value.
-pub(super) fn message_with_status(
-    template: &MessageTemplate,
-    clock: CivilTime,
-    format: TimeFormat,
-    node: &str,
-    callsign: &str,
-    link_status: &str,
-    catalog: &MessageCatalog,
-) -> Result<String, RuntimeError> {
-    let (year, month, day, weekday, hour, minute) = clock.components();
-    let day_name = catalog
-        .format(&Message::DayOfWeek { day: weekday })
-        .map_err(|_| RuntimeError::Preparation)?;
-    let date = format!("{year:04}-{month:02}-{day:02}");
-    let time = TimeAnnouncement::format(hour.into(), minute.into(), format, catalog)
-        .map_err(|_| RuntimeError::Preparation)?;
-    let daypart = match hour {
-        0..=11 => Daypart::Morning,
-        12..=16 => Daypart::Afternoon,
-        _ => Daypart::Evening,
-    };
-    let greeting = catalog
-        .format(&Message::Greeting { daypart })
-        .map_err(|_| RuntimeError::Preparation)?;
-    template
-        .render(&TemplateValues {
-            day_of_week: &day_name.text,
-            date: &date,
-            time: time.morse(),
-            greeting: &greeting.text,
-            link_status,
-            node,
-            callsign,
-        })
-        .map_err(|_| RuntimeError::Preparation)
-}
-
-pub(super) fn morse(source: &str) -> Option<String> {
+pub(crate) fn morse(source: &str) -> Option<String> {
     const ALLOWED: &[u8] =
         b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789/.,?-=+@()'!\":;_$& \t\r\n";
     let text: String = source
@@ -151,44 +89,6 @@ pub fn telemetry_speech(source: &str, nodes: &[&str]) -> String {
             output.push_str(word);
         }
     }
-    output
-}
-
-pub(super) fn scheduled_speech(source: &str, node: &str, callsign: &str, peer: &str) -> String {
-    let mut output = String::new();
-    let mut index = 0;
-    let mut fragment = 0;
-    while index < source.len() {
-        let matched = [(node, true), (peer, true), (callsign, false)]
-            .into_iter()
-            .find(|(identity, _)| {
-                !identity.is_empty()
-                    && source[index..].starts_with(identity)
-                    && (index == 0 || !source.as_bytes()[index - 1].is_ascii_alphanumeric())
-                    && source
-                        .as_bytes()
-                        .get(index + identity.len())
-                        .is_none_or(|b| !b.is_ascii_alphanumeric())
-            });
-        if let Some((identity, is_node)) = matched {
-            output.push_str(&telemetry_speech(&source[fragment..index], &[]));
-            if is_node {
-                output.push_str("node,");
-            }
-            output.push_str(
-                &identity
-                    .chars()
-                    .map(|c| c.to_string())
-                    .collect::<Vec<_>>()
-                    .join(","),
-            );
-            index += identity.len();
-            fragment = index;
-        } else {
-            index += source[index..].chars().next().map_or(1, char::len_utf8);
-        }
-    }
-    output.push_str(&telemetry_speech(&source[fragment..], &[]));
     output
 }
 

@@ -3,6 +3,7 @@ use crate::{ChildReaper, Config, Preparation, abi::*};
 use crate::{MediaError, process::PcmStream};
 use std::{
     ffi::{CStr, c_char, c_void},
+    mem::MaybeUninit,
     panic::{AssertUnwindSafe, catch_unwind},
     path::PathBuf,
     ptr,
@@ -23,7 +24,7 @@ pub(crate) static DESCRIPTOR: Descriptor = Descriptor {
     open_file: Some(open_file),
     #[cfg(speech_adapter)]
     open_speech: Some(open_speech),
-    read_stream: Some(read_stream),
+    step_stream: Some(step_stream),
     close_stream: Some(close_stream),
 };
 
@@ -126,24 +127,17 @@ unsafe extern "C" fn destroy(context: *mut c_void) {
     }
 }
 
-fn empty_stream() -> RawStream {
-    RawStream {
-        handle: ptr::null_mut(),
-        sample_rate_hz: 0,
-    }
-}
-
 unsafe fn open_arguments<'a>(
     context: *const c_void,
     cancellation: *const RawCancellation,
-    output: *mut RawStream,
+    output: *mut *mut c_void,
 ) -> Result<(&'a Preparation, &'a RawCancellation), MediaError> {
     if output.is_null() {
         return Err(MediaError::InvalidRequest);
     }
     // SAFETY: all checked arguments must point to their specified live ABI objects.
     unsafe {
-        *output = empty_stream();
+        *output = ptr::null_mut();
     }
     let preparation =
         unsafe { context.cast::<Preparation>().as_ref() }.ok_or(MediaError::InvalidRequest)?;
@@ -151,23 +145,12 @@ unsafe fn open_arguments<'a>(
     Ok((preparation, cancellation))
 }
 
-unsafe fn publish(
-    cancellation: &RawCancellation,
-    output: *mut RawStream,
-    stream: PcmStream,
-) -> Result<(), MediaError> {
-    if cancelled(cancellation) {
-        return Err(MediaError::Cancelled);
-    }
-    let view = RawStream {
-        sample_rate_hz: stream.sample_rate_hz(),
-        handle: Box::into_raw(Box::new(stream)).cast(),
-    };
-    // SAFETY: output now owns view.handle; samples remain owned by that handle.
+unsafe fn publish(output: *mut *mut c_void, stream: PcmStream) {
+    // SAFETY: output receives the sole ownership handle. After successful setup
+    // the caller owns retirement, including when cancellation races publication.
     unsafe {
-        *output = view;
+        output.write(Box::into_raw(Box::new(stream)).cast());
     }
-    Ok(())
 }
 
 #[cfg(file_adapter)]
@@ -175,13 +158,14 @@ unsafe extern "C" fn open_file(
     context: *const c_void,
     source: *const c_char,
     cancellation: *const RawCancellation,
-    output: *mut RawStream,
+    output: *mut *mut c_void,
 ) -> i32 {
     // SAFETY: the foreign caller provides valid arguments; prepare validates nulls.
     boundary(catch_unwind(AssertUnwindSafe(|| unsafe {
         let (preparation, cancellation) = open_arguments(context, cancellation, output)?;
         let stream = preparation.open_file(&path(source)?, &|| cancelled(cancellation))?;
-        publish(cancellation, output, stream)
+        publish(output, stream);
+        Ok(())
     })))
 }
 
@@ -190,7 +174,7 @@ unsafe extern "C" fn open_speech(
     context: *const c_void,
     request: *const RawSpeechRequest,
     cancellation: *const RawCancellation,
-    output: *mut RawStream,
+    output: *mut *mut c_void,
 ) -> i32 {
     // SAFETY: request and strings are borrowed for this synchronous call only.
     boundary(catch_unwind(AssertUnwindSafe(|| unsafe {
@@ -206,22 +190,26 @@ unsafe extern "C" fn open_speech(
             request.level_db,
             &|| cancelled(cancellation),
         )?;
-        publish(cancellation, output, stream)
+        publish(output, stream);
+        Ok(())
     })))
 }
 
-unsafe extern "C" fn read_stream(
+unsafe extern "C" fn step_stream(
     handle: *mut c_void,
     cancellation: *const RawCancellation,
     output: *mut f32,
     capacity: usize,
-    read_count: *mut usize,
+    result: *mut RawStep,
 ) -> i32 {
     boundary(catch_unwind(AssertUnwindSafe(|| unsafe {
-        if read_count.is_null() || output.is_null() || capacity == 0 {
+        if result.is_null() {
             return Err(MediaError::InvalidRequest);
         }
-        *read_count = 0;
+        result.write(RawStep::default());
+        if output.is_null() || capacity == 0 || capacity > isize::MAX as usize / size_of::<f32>() {
+            return Err(MediaError::InvalidRequest);
+        }
         let cancellation = cancellation.as_ref().ok_or(MediaError::InvalidRequest)?;
         if cancelled(cancellation) {
             return Err(MediaError::Cancelled);
@@ -230,9 +218,9 @@ unsafe extern "C" fn read_stream(
             .cast::<PcmStream>()
             .as_mut()
             .ok_or(MediaError::InvalidRequest)?;
-        let samples = std::slice::from_raw_parts_mut(output, capacity);
-        let count = stream.read(samples, &|| cancelled(cancellation))?;
-        *read_count = count;
+        // The C caller's output storage need not be initialized.
+        let samples = std::slice::from_raw_parts_mut(output.cast::<MaybeUninit<f32>>(), capacity);
+        result.write(stream.step(samples, &|| cancelled(cancellation))?);
         Ok(())
     })))
 }

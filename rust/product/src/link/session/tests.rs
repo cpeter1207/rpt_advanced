@@ -16,6 +16,7 @@ pub(crate) enum Input {
 pub(crate) struct State {
     pub(crate) rate: u32,
     capabilities: u32,
+    protocol_local: Option<&'static str>,
     pub(crate) input: VecDeque<Input>,
     pub(crate) texts: Vec<Vec<u8>>,
     pub(crate) digits: Vec<u8>,
@@ -35,7 +36,8 @@ pub(crate) struct State {
     pub(crate) async_stops: usize,
     pub(crate) async_detaches: usize,
     pub(crate) fail_async_attach: bool,
-    no_async_thread: bool,
+    pub(crate) no_async_thread: bool,
+    pub(crate) finish_first_step_before_registration: bool,
     pub(crate) continuous_async: bool,
     pub(crate) observe_calls: usize,
     pub(crate) echo_observation: Option<abi::rptadv_peer_observation_v1>,
@@ -58,6 +60,7 @@ pub(crate) struct State {
     call_elapsed: u32,
     deadlines: Vec<u64>,
     source_position: u64,
+    before_audio: Option<Arc<std::sync::Barrier>>,
     source_keyed: bool,
     source_closed: bool,
     source_finish: bool,
@@ -94,6 +97,7 @@ fn echo_source_never_detects_a_new_burst_before_the_previous_finite_token_retire
     control
         .send(Command::Redirect {
             inbound,
+            ingress_graph_generation: 0,
             outbound,
             dtmf_muting: true,
         })
@@ -155,7 +159,7 @@ fn echo_source_never_detects_a_new_burst_before_the_previous_finite_token_retire
         }
     }
     assert_eq!(state.lock().unwrap().source_acknowledgements, 2);
-    assert_eq!(digits, ['5', '#']);
+    assert_eq!(digits, ['5']);
 }
 
 #[test]
@@ -174,6 +178,7 @@ fn echo_source_never_joins_detector_qualification_across_loss_or_codec_plc() {
         control
             .send(Command::Redirect {
                 inbound,
+                ingress_graph_generation: 0,
                 outbound,
                 dtmf_muting: true,
             })
@@ -230,6 +235,7 @@ fn echo_source_decodes_dtmf_and_retains_mute_spans_but_never_decodes_codec_plc()
         control
             .send(Command::Redirect {
                 inbound,
+                ingress_graph_generation: 0,
                 dtmf_muting: muting,
                 outbound,
             })
@@ -245,13 +251,17 @@ fn echo_source_decodes_dtmf_and_retains_mute_spans_but_never_decodes_codec_plc()
             Input::Audio(vec![0.0; 640]),
         ]);
         session.step(0).unwrap();
-        let mut decoded = Vec::new();
-        while let Some(event) = control.event() {
-            if let Event::Digit(digit) = event {
-                decoded.push(digit);
-            }
+        let signals: Vec<_> = std::iter::from_fn(|| control.event())
+            .filter(|event| matches!(event, Event::Digit(_) | Event::LegacyDigitBoundary))
+            .collect();
+        if digits == 0 {
+            assert!(signals.is_empty());
+        } else {
+            assert!(matches!(
+                signals.as_slice(),
+                [Event::Digit('5'), Event::LegacyDigitBoundary]
+            ));
         }
-        assert_eq!(decoded, if digits == 0 { vec![] } else { vec!['5', '#'] });
         let mut heard = false;
         for now in 1..20 {
             let mut pcm = [0.0; 960];
@@ -294,6 +304,7 @@ fn echo_source_drains_the_finite_burst_before_unkey_without_asl_signaling() {
     control
         .send(Command::Redirect {
             inbound,
+            ingress_graph_generation: 0,
             dtmf_muting: true,
             outbound,
         })
@@ -329,7 +340,10 @@ fn echo_source_drains_the_finite_burst_before_unkey_without_asl_signaling() {
     session.step(20).unwrap();
     session.step(30).unwrap();
     assert!(!control.ended());
-    assert_eq!(session.pending_remote_unkey, Some(20));
+    assert_eq!(
+        session.pending_remote_unkey.as_ref().map(|r| r.at),
+        Some(20)
+    );
     assert_eq!((0..64).filter_map(|_| control.event()).count(), 64);
     session.step(40).unwrap();
     assert!(matches!(control.event(), Some(Event::RemoteUnkey(20))));
@@ -358,6 +372,7 @@ fn echo_source_returns_ring_credit_without_copying_the_provider_owned_suffix() {
     control
         .send(Command::Redirect {
             inbound,
+            ingress_graph_generation: 0,
             dtmf_muting: true,
             outbound,
         })
@@ -413,6 +428,7 @@ fn echo_source_retirement_never_reports_a_cancelled_tail_as_played() {
         control
             .send(Command::Redirect {
                 inbound,
+                ingress_graph_generation: 0,
                 dtmf_muting: true,
                 outbound,
             })
@@ -440,6 +456,7 @@ fn echo_source_retirement_never_reports_a_cancelled_tail_as_played() {
             control
                 .send(Command::Redirect {
                     inbound,
+                    ingress_graph_generation: 0,
                     dtmf_muting: true,
                     outbound,
                 })
@@ -721,7 +738,7 @@ fn echo_source_command_timeout_runs_while_a_bounded_read_turn_still_has_pcm() {
     assert!(session.inbound.signals().dtmf_muted());
     assert_eq!(state.lock().unwrap().source_position, 1342);
     session.step(3000).unwrap();
-    assert!(matches!(control.event(), Some(Event::Digit('#'))));
+    assert!(matches!(control.event(), Some(Event::LegacyDigitBoundary)));
     assert!(control.event().is_none());
     assert!(!session.inbound.signals().dtmf_muted());
     assert_eq!(state.lock().unwrap().input.len(), 4);
@@ -782,6 +799,7 @@ fn echo_source_metadata_backpressure_delays_finish_and_errors_do_not_acknowledge
         control
             .send(Command::Redirect {
                 inbound,
+                ingress_graph_generation: 0,
                 outbound,
                 dtmf_muting: true,
             })
@@ -820,7 +838,7 @@ fn echo_source_metadata_backpressure_delays_finish_and_errors_do_not_acknowledge
                 break;
             }
         }
-        assert_eq!(digits, ['5', '#']);
+        assert_eq!(digits, ['5']);
         assert_eq!(state.lock().unwrap().source_acknowledgements, 1);
     }
 }
@@ -1116,6 +1134,27 @@ fn radio_key_control_waits_for_peer_negotiation() {
     assert!(session.inbound.signals().radio_keyed());
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn status_keeps_an_entire_received_key_pulse_between_control_polls() {
+    let (mut session, control, state, _) = make_session("1000");
+    state.lock().unwrap().input.extend([
+        Input::Text(b"!NEWKEY!"),
+        Input::RadioKey,
+        Input::RadioKey,
+        Input::RadioUnkey,
+    ]);
+    for at in 10..14 {
+        session.step(at).unwrap();
+    }
+
+    assert_eq!(control.take_receive_status_edge(), Some((11, true)));
+    assert_eq!(control.take_receive_status_edge(), Some((13, false)));
+    assert_eq!(control.take_receive_status_edge(), None);
+    assert_eq!(control.receive_status_key(), Some(false));
+    assert!(!control.receive_status_lost());
+}
+
 #[test]
 fn radio_key_control_falls_back_after_two_seconds_without_newkey1() {
     let (mut session, _control, state, _) = make_session("1000");
@@ -1195,7 +1234,7 @@ fn remote_dtmf_actual_unkey_survives_event_backpressure_without_hangup() {
     assert!(!control.ended());
     assert!(!session.inbound.signals().radio_keyed());
     session.step(3).unwrap();
-    assert_eq!(session.pending_remote_unkey, Some(2));
+    assert_eq!(session.pending_remote_unkey.as_ref().map(|r| r.at), Some(2));
     assert!(!session.inbound.signals().radio_keyed());
     assert_eq!((0..64).filter_map(|_| control.event()).count(), 64);
     session.step(4).unwrap();
@@ -1306,7 +1345,7 @@ unsafe extern "C" fn async_attach(
     state.lock().unwrap().async_attaches += 1;
     let address = step_context as usize;
     let worker_state = state.clone();
-    let thread = (!state.lock().unwrap().no_async_thread).then(|| {
+    let mut thread = (!state.lock().unwrap().no_async_thread).then(|| {
         thread::spawn(move || {
             loop {
                 let result = unsafe { step.unwrap()(address as *mut c_void) };
@@ -1319,6 +1358,13 @@ unsafe extern "C" fn async_attach(
             }
         })
     });
+    let finish_first = state.lock().unwrap().finish_first_step_before_registration;
+    if finish_first
+        && let Some(worker) = thread.take()
+        && worker.join().is_err()
+    {
+        return -1;
+    }
     unsafe {
         *registration = Box::into_raw(Box::new(AsyncRegistration {
             state,
@@ -1401,26 +1447,34 @@ pub(crate) fn peer_with_egress(
     async_enabled: bool,
     egress: bool,
 ) -> (PeerIo, Shared) {
-    make_peer(rate_hz, async_enabled, egress, false, true, false)
+    make_peer(rate_hz, async_enabled, egress, None, true, false)
 }
 pub(crate) fn source_peer() -> (PeerIo, Shared) {
-    make_peer(8000, true, true, true, true, false)
+    source_peer_on("1000")
+}
+pub(crate) fn source_peer_on(local: &'static str) -> (PeerIo, Shared) {
+    make_peer(8000, true, true, Some(local), true, false)
 }
 pub(crate) fn phone_peer() -> (PeerIo, Shared) {
-    make_peer(8000, false, false, false, false, true)
+    phone_peer_on("1000")
+}
+pub(crate) fn phone_peer_on(local: &'static str) -> (PeerIo, Shared) {
+    make_peer(8000, false, false, Some(local), false, true)
 }
 pub(crate) fn peer_without_text(rate_hz: u32) -> (PeerIo, Shared) {
-    make_peer(rate_hz, false, false, false, false, false)
+    make_peer(rate_hz, false, false, None, false, false)
 }
 fn make_peer(
     rate_hz: u32,
     async_enabled: bool,
     egress: bool,
-    source: bool,
+    protocol_local: Option<&'static str>,
     forward_text: bool,
     phone: bool,
 ) -> (PeerIo, Shared) {
+    let source = !phone && protocol_local.is_some();
     let state = Arc::new(Mutex::new(State {
+        protocol_local,
         rate: rate_hz,
         capabilities: if phone {
             32
@@ -1432,6 +1486,20 @@ fn make_peer(
         fail_ready: source,
         ..State::default()
     }));
+    let mut table = peer_table(async_enabled, egress, source);
+    if source && protocol_local.is_some_and(|local| local.len() == 36) {
+        table.managed_echo_provider = &crate::fixture::echo::PROVIDER;
+    }
+    let services = unsafe { HostServices::open(Box::leak(Box::new(table))) }.unwrap();
+    let handle = Box::into_raw(Box::new(state.clone())).cast();
+    (unsafe { services.peer(handle) }.unwrap(), state)
+}
+
+pub(crate) fn peer_table(
+    async_enabled: bool,
+    egress: bool,
+    source: bool,
+) -> abi::rptadv_host_services_v11 {
     let mut table = unsafe { crate::fixture::host_descriptor().read() };
     table.peer_rate = Some(rate);
     table.peer_info = Some(peer_info);
@@ -1460,9 +1528,7 @@ fn make_peer(
     if source {
         table.peer_read_source = Some(read_source);
     }
-    let services = unsafe { HostServices::open(Box::leak(Box::new(table))) }.unwrap();
-    let handle = Box::into_raw(Box::new(state.clone())).cast();
-    (unsafe { services.peer(handle) }.unwrap(), state)
+    table
 }
 
 unsafe extern "C" fn peer_info(
@@ -1471,10 +1537,8 @@ unsafe extern "C" fn peer_info(
     output: *mut abi::rptadv_peer_info_v1,
 ) -> i32 {
     unsafe { crate::fixture::peer_info(context, peer, output) };
-    let capabilities = unsafe { state(peer.cast_mut()) }
-        .lock()
-        .unwrap()
-        .capabilities;
+    let guard = unsafe { state(peer.cast_mut()) }.lock().unwrap();
+    let capabilities = guard.capabilities;
     unsafe {
         (*output).capabilities = capabilities;
         if capabilities & 32 != 0 {
@@ -1488,6 +1552,12 @@ unsafe extern "C" fn peer_info(
             (*output).provider_account = abi::rptadv_peer_bytes_v1 {
                 data: b"provider".as_ptr(),
                 length: 8,
+            };
+        }
+        if let Some(local) = guard.protocol_local {
+            (*output).local = abi::rptadv_peer_bytes_v1 {
+                data: local.as_ptr(),
+                length: local.len(),
             };
         }
         if capabilities & 16 != 0 {
@@ -1557,6 +1627,10 @@ unsafe extern "C" fn read_source(
         let (accepted, offered, remaining) = match input {
             Input::Audio(mut pcm) | Input::Concealed(mut pcm) => {
                 let offered = pcm.len();
+                if let Some(gate) = state.before_audio.take() {
+                    gate.wait();
+                    gate.wait();
+                }
                 let accepted = unsafe {
                     sink.audio.unwrap()(
                         sink.context,
@@ -1917,18 +1991,12 @@ fn egress_host_contract_and_asterisk_pcm() {
     table.peer_step_detach = None;
     assert!(unsafe { HostServices::open(&table) }.is_err());
     table = unsafe { crate::fixture::host_descriptor().read() };
-    let boundary = std::mem::offset_of!(abi::rptadv_host_services_v10, peer_prepare_audio);
-    // Each complete prefix is valid without its optional capability tails.
-    let complete_prefixes = [
-        std::mem::offset_of!(abi::rptadv_host_services_v10, peer_processing_prepare),
-        std::mem::offset_of!(abi::rptadv_host_services_v10, radio_control),
-        std::mem::offset_of!(abi::rptadv_host_services_v10, radio_update),
-        std::mem::offset_of!(abi::rptadv_host_services_v10, radio_metadata_bind),
-        std::mem::offset_of!(abi::rptadv_host_services_v10, radio_service),
-        std::mem::offset_of!(abi::rptadv_host_services_v10, radio_ready),
-        std::mem::size_of_val(&table),
-    ];
-    for length in boundary..=std::mem::size_of_val(&table) {
+    // Optional protocol groups may be absent in a complete Host11 table.
+    table.phone_provider = ptr::null();
+    table.asl_provider = ptr::null();
+    table.managed_echo_provider = ptr::null();
+    let full = std::mem::size_of_val(&table);
+    for length in std::mem::size_of::<u32>()..=full {
         table.struct_size = length as u32;
         let mut prefix = vec![0_u64; length.div_ceil(8)];
         unsafe {
@@ -1940,7 +2008,7 @@ fn egress_host_contract_and_asterisk_pcm() {
         };
         assert_eq!(
             unsafe { HostServices::open(prefix.as_ptr().cast()) }.err(),
-            (!complete_prefixes.contains(&length)).then_some(Error::Admission),
+            (length != full).then_some(Error::Admission),
             "host prefix length {length}"
         );
     }
@@ -2154,6 +2222,68 @@ fn egress_late_wake_keeps_absolute_cadence() {
             .collect::<Vec<_>>(),
         [1939, 1959, 1979]
     );
+}
+
+#[test]
+fn late_public_station_handoff_keeps_the_codec_and_fir_contiguous() {
+    for (rate, unit, blocks) in [(8000, 160, 2), (16000, 320, 2), (8000, 640, 4)] {
+        let tone: Vec<_> = (0..960 * blocks)
+            .map(|i| 0.5 + 0.4 * (std::f32::consts::TAU * 375.0 * i as f32 / 48_000.0).sin())
+            .collect();
+        let run = |delay_ms: u64| {
+            let (io, state) = peer_with_egress(rate, true, true);
+            state.lock().unwrap().encode_unit = Some(unit);
+            let (mut input, queue) = rpt_advanced_core::audio::LinkAudioQueue::new(1920, 2)
+                .unwrap()
+                .into_endpoints();
+            let (mut session, _control) =
+                PeerSession::prepare(io, queue, "1000", "2000", true).unwrap();
+            let clock = Arc::new(SourceClock::new(std::time::Instant::now()));
+            clock.restart();
+            let stream = clock.stream();
+            session.bind_clock(clock);
+            for (block, pcm) in tone.chunks_exact(960).enumerate() {
+                let born = 1000 + 20 * block as u64;
+                if block != 0 && delay_ms != 0 {
+                    // The executor sees an empty handoff before the radio callback.
+                    session.step(born).unwrap();
+                    if block == 1 {
+                        assert!(
+                            state.lock().unwrap().prepared.is_empty(),
+                            "an empty handoff must not flush a partial station packet"
+                        );
+                    }
+                }
+                let mut span = timed_span(960 * block as u64, born);
+                span.stream = stream;
+                assert_eq!(input.write(span, pcm), 0);
+                let arrival = born + if block == 0 { 0 } else { delay_ms };
+                session.step(arrival).unwrap();
+                session.step(arrival + 1).unwrap();
+            }
+            let end = 1000 + 20 * blocks as u64;
+            for now in end..end + 200 {
+                session.step(now).unwrap();
+            }
+            let state = state.lock().unwrap();
+            let media = rate as usize / 50 * blocks / unit;
+            assert_eq!(state.prepared.len(), media + 1);
+            assert_eq!(state.prepared_frames[..media], vec![unit as u32; media]);
+            assert_eq!(state.prepared_frames[media], 0);
+            assert!(state.prepared[media].0.is_empty());
+            let duration = (unit * 1000 / rate as usize) as u32;
+            for pair in state.prepared.windows(2) {
+                assert_eq!(pair[1].1.wrapping_sub(pair[0].1), duration);
+            }
+            state.prepared[..media]
+                .iter()
+                .map(|(pcm, _)| pcm.clone())
+                .collect::<Vec<_>>()
+        };
+        let on_time = run(0);
+        assert!(on_time[0].windows(2).any(|s| s[0] != s[1]));
+        assert_eq!(run(3), on_time);
+    }
 }
 
 #[test]
@@ -2375,6 +2505,7 @@ fn egress_future_reopen_and_redirect_discard_uncommitted_media() {
         control
             .send(Command::Redirect {
                 inbound,
+                ingress_graph_generation: 0,
                 dtmf_muting: true,
                 outbound
             })
@@ -2490,9 +2621,19 @@ fn disconnected_async_peer_is_reaped_before_the_worker_stops() {
     let (session, control, state, _) = make_async_session("1000");
     let mut worker = PeerIoWorker::start(Instant::now()).unwrap();
     worker.attach(session).ok().unwrap();
+    let (healthy, _control, healthy_state, _output) = make_async_session("1001");
+    worker.attach(healthy).ok().unwrap();
     control.stop();
     worker.reap();
-    assert!(worker.async_peers.is_empty());
+    assert_eq!(worker.async_peers.len(), 1);
+    worker.reap();
+    {
+        let alive = healthy_state.lock().unwrap();
+        assert_eq!(
+            (alive.async_stops, alive.async_detaches, alive.drops),
+            (0, 0, 0)
+        );
+    }
     {
         let state = state.lock().unwrap();
         assert_eq!(
@@ -2502,6 +2643,11 @@ fn disconnected_async_peer_is_reaped_before_the_worker_stops() {
     }
     worker.stop();
     assert_eq!(state.lock().unwrap().drops, 1);
+    let other = healthy_state.lock().unwrap();
+    assert_eq!(
+        (other.async_stops, other.async_detaches, other.drops),
+        (1, 1, 1)
+    );
 }
 
 #[test]
@@ -2916,6 +3062,75 @@ fn missing_sync_queue_and_spawn_failure_return_unconsumed_sessions() {
 }
 
 #[test]
+fn peer_meter_pcm_keeps_the_installed_graph_until_redirect() {
+    let (mut session, mut control, state, _) = make_session("1000");
+    let endpoints = || {
+        let (inbound, input) = InboundRing::open(48_000, InboundPolicy::Peer).unwrap();
+        let (_, outbound) = rpt_advanced_core::audio::LinkAudioQueue::new(960, 64)
+            .unwrap()
+            .into_endpoints();
+        (inbound, input, outbound)
+    };
+    let offer = |at, session: &mut PeerSession| {
+        state
+            .lock()
+            .unwrap()
+            .input
+            .push_back(Input::Audio(vec![0.25; 2_400]));
+        session.step(at).unwrap();
+    };
+    assert_eq!(control.status_meters().ingress_graph_generation, None);
+    control.bind_text_generation(92);
+    let (inbound, _input, outbound) = endpoints();
+    control
+        .send(Command::Redirect {
+            inbound,
+            ingress_graph_generation: 92,
+            outbound,
+            dtmf_muting: false,
+        })
+        .ok()
+        .unwrap();
+    offer(50, &mut session);
+    let installed = control.status_meters();
+    assert_eq!(installed.ingress_graph_generation, Some(92));
+    let first = installed.decoded.measurement.unwrap();
+    assert_eq!(first.graph_generation, 92);
+
+    control.bind_text_generation(7);
+    offer(100, &mut session);
+    let pending = control.status_meters();
+    assert_eq!(pending.ingress_graph_generation, Some(92));
+    let still_installed = pending.decoded.measurement.unwrap();
+    assert_eq!(still_installed.graph_generation, 92);
+    assert_eq!(still_installed.valid_samples, 4_800);
+
+    let (inbound, _input, outbound) = endpoints();
+    control
+        .send(Command::Redirect {
+            inbound,
+            outbound,
+            ingress_graph_generation: 7,
+            dtmf_muting: false,
+        })
+        .ok()
+        .unwrap();
+    session.step(101).unwrap();
+    let warming = control.status_meters();
+    assert_eq!(warming.ingress_graph_generation, Some(7));
+    assert!(
+        warming
+            .decoded
+            .measurement
+            .is_none_or(|reading| reading.graph_generation != 7)
+    );
+    offer(150, &mut session);
+    let first = control.status_meters().decoded.measurement.unwrap();
+    assert_eq!(first.graph_generation, 7);
+    assert_eq!(first.valid_samples, 2_400);
+}
+
+#[test]
 fn serial_reader_routes_protocol_digits_audio_and_exact_redirect_ack() {
     let (mut session, mut control, state, mut output) = make_session("1000");
     assert_eq!(state.lock().unwrap().texts, [b"!NEWKEY1!".to_vec()]);
@@ -2980,7 +3195,7 @@ fn serial_reader_routes_protocol_digits_audio_and_exact_redirect_ack() {
     session.step(21).unwrap();
     assert!(matches!(control.event(), Some(Event::Digit('6'))));
     session.step(3021).unwrap();
-    assert!(matches!(control.event(), Some(Event::Digit('#'))));
+    assert!(matches!(control.event(), Some(Event::LegacyDigitBoundary)));
     let old = control.observer.clone();
     let (inbound, input) = InboundRing::open(48000, InboundPolicy::Peer).unwrap();
     let observer = inbound.observer();
@@ -2990,6 +3205,7 @@ fn serial_reader_routes_protocol_digits_audio_and_exact_redirect_ack() {
     control
         .send(Command::Redirect {
             inbound,
+            ingress_graph_generation: 0,
             dtmf_muting: true,
             outbound,
         })
@@ -3038,6 +3254,7 @@ fn failed_or_overreported_ring_admission_ends_audio_and_gap_ingress() {
             control
                 .send(Command::Redirect {
                     inbound,
+                    ingress_graph_generation: 0,
                     dtmf_muting: true,
                     outbound: rpt_advanced_core::audio::LinkAudioQueue::new(960, 64)
                         .unwrap()
@@ -3065,6 +3282,7 @@ fn pending_gap_rejects_a_ring_that_overreports_its_next_acceptance() {
     control
         .send(Command::Redirect {
             inbound,
+            ingress_graph_generation: 0,
             dtmf_muting: true,
             outbound: rpt_advanced_core::audio::LinkAudioQueue::new(960, 64)
                 .unwrap()
@@ -3088,6 +3306,7 @@ fn counted_gap_is_staged_before_following_peer_events_when_ring_is_full() {
     control
         .send(Command::Redirect {
             inbound,
+            ingress_graph_generation: 0,
             dtmf_muting: true,
             outbound: rpt_advanced_core::audio::LinkAudioQueue::new(960, 64)
                 .unwrap()
@@ -3143,6 +3362,7 @@ fn partial_pcm_is_staged_before_a_following_counted_gap() {
     control
         .send(Command::Redirect {
             inbound,
+            ingress_graph_generation: 0,
             dtmf_muting: true,
             outbound: rpt_advanced_core::audio::LinkAudioQueue::new(960, 64)
                 .unwrap()
@@ -3297,7 +3517,7 @@ fn fatal_io_and_full_events_end_ingress_but_advisory_failure_does_not() {
             text: c"D 2000 1000 1 2".into(),
             advisory: false
         }),
-        Err(Command::Text { .. })
+        Err(command) if matches!(*command, Command::Text { .. })
     ));
     session.step(0).unwrap();
     assert!(!control.snapshot().unwrap().ended);
@@ -3335,7 +3555,7 @@ fn preparation_rejects_invalid_identity_rate_and_negotiation_without_leaking_pee
         assert!(PeerSession::prepare(io, outbound, local, remote, true).is_err());
         assert_eq!(state.lock().unwrap().drops, 1);
     }
-    let (io, state) = make_peer(16000, true, true, true, true, false);
+    let (io, state) = make_peer(16000, true, true, Some("1000"), true, false);
     let (_, outbound) = rpt_advanced_core::audio::LinkAudioQueue::new(960, 64)
         .unwrap()
         .into_endpoints();
@@ -3388,4 +3608,532 @@ fn sub_codec_frame_does_not_send_empty_conversion_output() {
     let writes = state.lock().unwrap().writes.clone();
     assert!(!writes.is_empty());
     assert!(writes.iter().all(|count| *count > 0));
+}
+
+#[test]
+fn registered_ordinary_resident_pcm_pending_suffix_and_first_signal_lose_muted_epoch() {
+    crate::host::tests::with_ingress_mute(|signals, host, port, clock, _| {
+        let (io, state) = peer(48000);
+        let output = || {
+            rpt_advanced_core::audio::LinkAudioQueue::new(9600, 64)
+                .unwrap()
+                .into_endpoints()
+                .1
+        };
+        let (mut session, mut control) =
+            PeerSession::prepare(io, output(), "1000", "2000", false).unwrap();
+        let (input, mut ring) =
+            InboundRing::redirected(48000, InboundPolicy::Peer, &signals.reply_target()).unwrap();
+        control
+            .send(Command::Redirect {
+                inbound: input,
+                outbound: output(),
+                dtmf_muting: false,
+                ingress_graph_generation: 1,
+            })
+            .ok()
+            .unwrap();
+        session.step(1).unwrap();
+        state.lock().unwrap().input.push_back(Input::Digit(b'5'));
+        session.step(2).unwrap();
+        for n in 3..24 {
+            state
+                .lock()
+                .unwrap()
+                .input
+                .push_back(Input::Audio(vec![0.625; 4096]));
+            session.step(n).unwrap();
+            if session.pending_input.is_some() {
+                break;
+            }
+        }
+        assert!(matches!(
+            session.pending_input,
+            Some(PendingInput::Audio { .. })
+        ));
+        assert!(ring.available() > 0);
+        let action = rpt_advanced_core::command_language::prepare_runtime_action(
+            &serde_json::json!({"action":"rx_mute_toggle","target":"peer","parameter":"2000"}),
+        )
+        .unwrap();
+        host.runtime
+            .management_action(port, "mgr", &action, clock)
+            .unwrap();
+        state
+            .lock()
+            .unwrap()
+            .input
+            .push_back(Input::Audio(vec![0.; 960]));
+        session.step(25).unwrap();
+        assert!(
+            session.pending_input.is_some(),
+            "the native FIFO still owns its space"
+        );
+        for _ in 0..10 {
+            assert_eq!(ring.render(&mut [0.; 960]).unwrap(), 0);
+            session.step(25).unwrap();
+            if session.pending_input.is_none() && state.lock().unwrap().input.is_empty() {
+                break;
+            }
+        }
+        assert!(session.pending_input.is_none() && state.lock().unwrap().input.is_empty());
+        host.runtime
+            .management_action(port, "mgr", &action, clock)
+            .unwrap();
+        let stamped = std::iter::from_fn(|| control.received_event())
+            .find_map(|e| match e {
+                Event::ReceivedDigit('5', r) => Some(r),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(stamped.at, 2);
+        assert!(stamped.regeneration.is_some_and(|r| !r.current()));
+        assert!(!session.inbound.signals().radio_keyed());
+        let mut pcm = [9.; 960];
+        for _ in 0..20 {
+            assert_eq!(
+                ring.render(&mut pcm).unwrap(),
+                0,
+                "stale samples supply no receive/key evidence"
+            );
+            assert_eq!(pcm, [0.; 960]);
+        }
+        for n in 0..8 {
+            state
+                .lock()
+                .unwrap()
+                .input
+                .push_back(Input::Audio(vec![0.25; 2048]));
+            session.step(26 + n).unwrap();
+        }
+        assert!(
+            (0..12).any(|_| ring.render(&mut pcm).unwrap() > 0 && pcm.iter().any(|v| *v > 0.1))
+        );
+        assert!(!session.inbound.signals().ended());
+        session.stop();
+    });
+}
+
+fn round2_echo(
+    signals: &rpt_advanced_core::link::PeerSignals,
+) -> (
+    PeerSession,
+    PeerControl,
+    crate::link::ring::InboundConsumer,
+    Shared,
+) {
+    let (io, state) = source_peer();
+    let output = || {
+        rpt_advanced_core::audio::LinkAudioQueue::new(9600, 64)
+            .unwrap()
+            .into_endpoints()
+            .1
+    };
+    let (mut session, mut control) =
+        PeerSession::prepare(io, output(), "1000", "2000", false).unwrap();
+    let (inbound, consumer) =
+        InboundRing::redirected(8000, InboundPolicy::Echo, &signals.reply_target()).unwrap();
+    control
+        .send(Command::Redirect {
+            inbound,
+            ingress_graph_generation: 0,
+            dtmf_muting: false,
+            outbound: output(),
+        })
+        .ok()
+        .unwrap();
+    session.step(0).unwrap();
+    (session, control, consumer, state)
+}
+
+#[test]
+fn round2_echo_muted_tagged_prefix_and_zero_credit_keep_call_and_digits_live() {
+    crate::host::tests::with_ingress_mute(|signals, host, port, clock, _| {
+        let (mut s, mut control, mut ring, state) = round2_echo(signals);
+        let action = rpt_advanced_core::command_language::prepare_runtime_action(
+            &serde_json::json!({"action":"rx_mute_toggle","target":"peer","parameter":"2000"}),
+        )
+        .unwrap();
+        host.runtime
+            .management_action(port, "mgr", &action, clock)
+            .unwrap();
+        ring.render(&mut [0.; 960]).unwrap();
+        state.lock().unwrap().input.extend([
+            Input::Audio(vec![0.25; 4096]),
+            Input::Audio(vec![0.5; 4096]),
+            Input::Audio(five_tone(640)),
+            Input::Audio(vec![0.; 640]),
+        ]);
+        s.step(1).unwrap();
+        assert_eq!(
+            state.lock().unwrap().source_credits,
+            [(0, 4096), (4096, 2080)]
+        );
+        s.step(2).unwrap();
+        assert_eq!(
+            state.lock().unwrap().source_credits.last(),
+            Some(&(6176, 0))
+        );
+        for now in 3..140 {
+            let mut pcm = [9.; 960];
+            assert_eq!(ring.render(&mut pcm).unwrap(), 0);
+            assert_eq!(pcm, [0.; 960]);
+            s.step(now).unwrap();
+            if state.lock().unwrap().source_acknowledgements == 1 {
+                break;
+            }
+        }
+        {
+            let state = state.lock().unwrap();
+            assert_eq!(state.source_acknowledgements, 1);
+            let mut next = 0;
+            for &(start, n) in &state.source_credits {
+                assert_eq!(start, next);
+                next += n as u64;
+            }
+            assert_eq!(next, 9472);
+        }
+        assert!(std::iter::from_fn(|| control.event()).any(|e| matches!(e, Event::Digit('5'))));
+        assert!(!control.ended());
+        host.runtime
+            .management_action(port, "mgr", &action, clock)
+            .unwrap();
+        state
+            .lock()
+            .unwrap()
+            .input
+            .push_back(Input::Audio(vec![0.3; 1600]));
+        s.step(150).unwrap();
+        assert!((0..32).any(|_| {
+            let mut pcm = [0.; 960];
+            ring.render(&mut pcm).unwrap() > 0 && pcm.iter().any(|v| *v > 0.1)
+        }));
+        s.stop();
+    });
+}
+
+#[test]
+fn round2_echo_unmute_during_provider_delivery_cannot_reauthorize_old_pcm() {
+    crate::host::tests::with_ingress_mute(|signals, host, port, clock, _| {
+        let (mut s, _control, mut ring, state) = round2_echo(signals);
+        let action = rpt_advanced_core::command_language::prepare_runtime_action(
+            &serde_json::json!({"action":"rx_mute_toggle","target":"peer","parameter":"2000"}),
+        )
+        .unwrap();
+        host.runtime
+            .management_action(port, "mgr", &action, clock)
+            .unwrap();
+        ring.render(&mut [0.; 960]).unwrap();
+        let gate = Arc::new(std::sync::Barrier::new(2));
+        {
+            let mut state = state.lock().unwrap();
+            state.before_audio = Some(gate.clone());
+            state.input.push_back(Input::Audio(vec![0.7; 1600]));
+        }
+        std::thread::scope(|scope| {
+            let io = scope.spawn(|| s.step(2));
+            gate.wait();
+            host.runtime
+                .management_action(port, "mgr", &action, clock)
+                .unwrap();
+            ring.render(&mut [0.; 960]).unwrap();
+            gate.wait();
+            io.join().unwrap().unwrap();
+        });
+        assert!(ring.signals().radio_keyed());
+        assert!(
+            !ring
+                .signals()
+                .output_radio_keyed(ring.signals().receive_epoch()),
+            "the old finite burst cannot key on its delayed acknowledgement"
+        );
+        for now in 3..48 {
+            let mut pcm = [0.; 960];
+            assert_eq!(ring.render(&mut pcm).unwrap(), 0, "capture epoch");
+            assert_eq!(pcm, [0.; 960]);
+            s.step(now).unwrap();
+            if state.lock().unwrap().source_acknowledgements == 1 {
+                break;
+            }
+        }
+        assert_eq!(state.lock().unwrap().source_acknowledgements, 1);
+        state
+            .lock()
+            .unwrap()
+            .input
+            .push_back(Input::Audio(vec![0.3; 1600]));
+        s.step(50).unwrap();
+        assert!((0..32).any(|_| {
+            let mut pcm = [0.; 960];
+            ring.render(&mut pcm).unwrap() > 0 && pcm.iter().any(|v| *v > 0.1)
+        }));
+        s.stop();
+    });
+}
+
+#[test]
+fn round2_healthy_source_keeps_native_priming_and_cursor_through_mute() {
+    crate::host::tests::with_ingress_mute(|signals, host, port, clock, _| {
+        let action = rpt_advanced_core::command_language::prepare_runtime_action(
+            &serde_json::json!({"action":"rx_mute_toggle","target":"peer","parameter":"2000"}),
+        )
+        .unwrap();
+        let (mut p, mut c) =
+            InboundRing::redirected(48000, InboundPolicy::Peer, &signals.reply_target()).unwrap();
+        for n in 0..3 {
+            assert_eq!(
+                p.write_tagged(&[0.4; 4096], 18, n * 4096, &[]).unwrap(),
+                4096
+            );
+        }
+        let mut pcm = [0.; 960];
+        for _ in 0..4 {
+            c.render(&mut pcm).unwrap();
+        }
+        assert!(pcm.iter().any(|v| *v > 0.1));
+        let before = c.observe().unwrap().available_samples;
+        assert!(before > 4096);
+        host.runtime
+            .management_action(port, "mgr", &action, clock)
+            .unwrap();
+        let timed = c.render_timed_sample().unwrap();
+        assert_eq!(timed.sample, 0.);
+        assert!(
+            timed.provenance.unwrap().position.is_some(),
+            "native source coordinate must survive mute"
+        );
+        assert!(
+            c.observe().unwrap().available_samples > 0,
+            "primed FIFO kept"
+        );
+        host.runtime
+            .management_action(port, "mgr", &action, clock)
+            .unwrap();
+        assert_eq!(p.write_tagged(&[0.2; 960], 18, 12288, &[]).unwrap(), 960);
+        for _ in 0..16 {
+            c.render(&mut pcm).unwrap();
+            if pcm.iter().any(|v| *v > 0.1) {
+                assert!(pcm.iter().all(|v| *v < 0.35));
+                return;
+            }
+        }
+        panic!("post-unmute input never played on the continuing converter");
+    });
+}
+
+#[test]
+fn round2_muted_gap_keeps_the_same_native_plc_and_source_coordinates_as_live_reference() {
+    crate::host::tests::with_ingress_mute(|signals, host, port, clock, _| {
+        let action = rpt_advanced_core::command_language::prepare_runtime_action(
+            &serde_json::json!({"action":"rx_mute_toggle","target":"peer","parameter":"2000"}),
+        )
+        .unwrap();
+        let (mut source, mut reader) =
+            InboundRing::redirected(48000, InboundPolicy::Peer, &signals.reply_target()).unwrap();
+        let (mut reference_source, mut reference) =
+            InboundRing::open(48000, InboundPolicy::Peer).unwrap();
+        for producer in [&mut source, &mut reference_source] {
+            for n in 0..3 {
+                assert_eq!(
+                    producer
+                        .write_tagged(&[0.4; 4096], 21, n * 4096, &[])
+                        .unwrap(),
+                    4096
+                );
+            }
+            assert_eq!(producer.gap(800).unwrap(), 800);
+        }
+        for _ in 0..10 {
+            let mut a = [0.; 960];
+            let mut b = [0.; 960];
+            reader.render(&mut a).unwrap();
+            reference.render(&mut b).unwrap();
+            assert_eq!(a, b);
+        }
+        host.runtime
+            .management_action(port, "mgr", &action, clock)
+            .unwrap();
+        let mut plc = 0;
+        for _ in 0..4096 {
+            let a = reader.render_timed_sample().unwrap();
+            let b = reference.render_timed_sample().unwrap();
+            let ap = a.provenance.unwrap();
+            let bp = b.provenance.unwrap();
+            assert_eq!(ap.position, bp.position);
+            assert_eq!((ap.gap, ap.plc), (bp.gap, bp.plc));
+            assert_eq!(a.sample, 0.);
+            assert!(!ap.real);
+            if bp.gap && bp.plc {
+                plc += 1;
+            }
+        }
+        assert!(
+            plc > 0,
+            "the native provider synthesized the mapped missing interval"
+        );
+        let a = reader.observe().unwrap();
+        let b = reference.observe().unwrap();
+        assert_eq!(a.missing_samples, b.missing_samples);
+        assert_eq!(
+            a.consecutive_shortfall_samples,
+            b.consecutive_shortfall_samples
+        );
+        host.runtime
+            .management_action(port, "mgr", &action, clock)
+            .unwrap();
+        assert_eq!(
+            source.write_tagged(&[0.25; 2048], 21, 13088, &[]).unwrap(),
+            2048
+        );
+        assert!((0..10).any(|_| {
+            let mut pcm = [0.; 960];
+            reader.render(&mut pcm).unwrap() > 0 && pcm.iter().any(|v| *v > 0.1)
+        }));
+    });
+}
+
+#[test]
+fn round3_deferred_echo_burst_keeps_first_key_epoch_through_retry_and_finite_ack() {
+    use crate::link::ring::InboundConsumer;
+    use rpt_advanced_core::{
+        audio::LinkAudioQueue,
+        controller::{ControllerSettings, CourtesySettings, NodeController},
+        link::{AudioPeer, LinkAudio, Mode, PeerSignals, SourcePosition},
+    };
+    use std::sync::atomic::AtomicUsize;
+
+    // Observe the actual ring's returned credit without replacing any receive decision.
+    struct Observed(InboundConsumer, Arc<AtomicUsize>);
+    impl PeerInput for Observed {
+        fn source_rate(&self) -> u32 {
+            self.0.source_rate()
+        }
+        fn signals(&self) -> &PeerSignals {
+            self.0.signals()
+        }
+        fn available(&self) -> u64 {
+            self.0.available()
+        }
+        fn finite_playout(&self) -> Option<bool> {
+            self.0.finite_playout()
+        }
+        fn receive_audio_current(&self) -> bool {
+            self.0.receive_audio_current()
+        }
+        fn native_real_count(&self, audible: usize) -> usize {
+            self.0.native_real_count(audible)
+        }
+        fn render(&mut self, samples: &mut [f32]) -> Option<usize> {
+            let accepted = self.0.render(samples).ok()?;
+            self.1.fetch_add(accepted, Ordering::Relaxed);
+            Some(accepted)
+        }
+    }
+
+    crate::host::tests::with_ingress_mute(|signals, host, port, clock, _| {
+        let (mut session, _control, consumer, state) = round2_echo(signals);
+        let credit = Arc::new(AtomicUsize::new(0));
+        let (outbound, _) = LinkAudioQueue::new(9600, 64).unwrap().into_endpoints();
+        let peer = AudioPeer::new(
+            "2000",
+            Mode::TRANSCEIVE,
+            Observed(consumer, credit.clone()),
+            outbound,
+            960,
+            0,
+        )
+        .unwrap();
+        let (mut links, _dispatch) = LinkAudio::new(vec![peer], 960).unwrap();
+        let (mut controller, _owner) = NodeController::new(
+            ControllerSettings {
+                hang_ms: 0,
+                ..ControllerSettings::default()
+            },
+            vec![],
+            vec![],
+            CourtesySettings::default(),
+        )
+        .unwrap();
+        let mut render = || {
+            let mut pcm = [0.; 960];
+            let keyed = links
+                .process(&mut controller, false, &mut pcm, SourcePosition::default())
+                .unwrap();
+            (keyed, pcm, credit.swap(0, Ordering::Relaxed))
+        };
+        let mute = rpt_advanced_core::command_language::prepare_runtime_action(
+            &serde_json::json!({"action":"rx_mute_toggle","target":"peer","parameter":"2000"}),
+        )
+        .unwrap();
+        state
+            .lock()
+            .unwrap()
+            .input
+            .push_back(Input::Audio(vec![0.25; 1600]));
+        session.step(1).unwrap();
+        assert!(session.source_finish.is_some());
+        let (key, pcm, real) = render();
+        assert!(key && real > 0 && pcm.iter().any(|v| *v > 0.1));
+        host.runtime
+            .management_action(port, "manager", &mute, clock)
+            .unwrap();
+        {
+            let mut state = state.lock().unwrap();
+            state.source_interleave = true;
+            state.input.push_back(Input::Audio(vec![0.75; 1600]));
+        }
+        session.step(2).unwrap();
+        assert_eq!(
+            state.lock().unwrap().source_credits.last(),
+            Some(&(1600, 0))
+        );
+        assert_eq!(state.lock().unwrap().source_acknowledgements, 0);
+        host.runtime
+            .management_action(port, "manager", &mute, clock)
+            .unwrap();
+
+        let mut raw_second = false;
+        for now in 3..80 {
+            let ack = state.lock().unwrap().source_acknowledgements;
+            if ack == 2 {
+                break;
+            }
+            if ack == 1 && session.inbound.signals().radio_keyed() {
+                raw_second = true;
+            }
+            let (key, pcm, real) = render();
+            assert_eq!(real, 0);
+            assert_eq!(pcm, [0.; 960]);
+            assert!(
+                !key,
+                "deferred finite audio keyed the transmitter, acknowledgements={ack}"
+            );
+            session.step(now).unwrap();
+        }
+        assert!(
+            raw_second,
+            "the provider selected the held burst on a later read"
+        );
+        assert_eq!(state.lock().unwrap().source_completions, [1, 1]);
+
+        state
+            .lock()
+            .unwrap()
+            .input
+            .push_back(Input::Audio(vec![0.4; 1600]));
+        session.step(80).unwrap();
+        let mut heard = false;
+        for now in 81..120 {
+            let (key, pcm, real) = render();
+            heard |= key && real > 0 && pcm.iter().any(|v| *v > 0.1);
+            session.step(now).unwrap();
+            if state.lock().unwrap().source_acknowledgements == 3 {
+                break;
+            }
+        }
+        assert!(heard, "fresh third burst must produce PCM and PTT");
+        assert_eq!(state.lock().unwrap().source_completions, [1, 1, 1]);
+        assert!(!session.inbound.signals().radio_keyed());
+        session.stop();
+    });
 }

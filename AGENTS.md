@@ -6,6 +6,108 @@ not retain compatibility-only code or interfaces. Preserve required current
 behavior and external interoperability; update consumers and artifact-version
 checks together so incompatible combinations fail safely.
 
+## Approved JSON/REST implementation (2026-11-19)
+
+Follow `docs/superpowers/plans/2026-11-19-json-rest-implementation-checklist.md`
+and its linked design. Update the checklist only after each step is verified.
+The 2026-11-20 instruction supersedes intermediate user-facing milestone pauses:
+continue across verified milestones until the JSON/REST runtime cutover, then
+pause. Retain native node build/test checkpoints; they do not authorize altering
+the installed service. Reuse the current worktree and completed Task 1-20 work.
+The controller's coordinated configuration cutover removes INI; USBRadioPlus
+retains its public INI format. Keep protocol connections live when possible and
+preserve local-repeat and phone audio across link changes. Normal jitter/PLC
+adjustment must not retire a connection.
+
+For JSON, log warnings and ignore unknown keys and unknown, invalid or
+unsupported setting values, using inherited/default values. Canonical schemas
+describe normalized output; they do not require rejecting recoverable input.
+Core resolution returns value-free diagnostics for host logging. Syntax errors,
+duplicate-member ambiguity and unsafe relationships fail only when no safe
+deterministic candidate can be constructed. Never log credentials or supplied
+values. Log recoverable failures as warnings and fatal connection/controller
+failures as errors. Reuse existing code and libraries; do not invent requirements
+or extra edge cases. Build/test at major milestones on node524950.local in a
+home-directory workspace; this does not authorize changing the installed
+service or its live configuration.
+
+Registry-backed candidates own resource IDs, exact keys, kinds and owners.
+Captured payloads cannot reassign those bindings. Keep unvalidated section data
+separate from normalized public/effective views. All ordinary section kinds can
+have site defaults, including control, memories and scan lists. Site protocol
+defaults do not create port protocol instances; presence is explicit.
+
+Protocol profiles resolve each descendant from recognized sparse public fields,
+with value-free source warnings and field-specific inherited fallback. Preserve
+independent protocol presence and final account identities; local names are not
+network node numbers. Validate canonical hostnames after normalization and keep
+directory members typed instead of joining and reparsing a delimited list.
+
+JSON Patch operates on one bounded sparse authoring projection, then resolves
+inheritance and validates the final candidate. Seed write-only slots from public
+ownership rather than hidden credential existence; reject secret/ancestor reads
+and indirect writes. Extract explicit private edits into zeroizing ownership,
+with no actual stored secret in the public stage. HTTP owns wiping request bytes.
+
+Registered working-file capture is a read-only host/product boundary. Use the
+preprovisioned edit lock, descriptor-relative no-follow access and caller-supplied
+bounds; never create or repair inputs while reading. Fingerprints cover only the
+explicit registered selection, not undiscovered resources or a complete reload.
+Keep raw snapshot bytes and path diagnostics out of logs and public output.
+
+Immutable installation is separate from configuration acceptance. The raw-byte
+installer exposes public object/manifest targets only; prepared encrypted
+private artifacts use their typed bridge over the same guarded primitives.
+Keep stable edit locking and protected preprovisioned parents. Never overwrite conflicting immutable bytes or treat a
+post-rename synchronization failure as unchanged state. Exact-byte retries may
+confirm durability. State-pointer, journal, private-record and working-file
+publication use their own coordinated protocols; opaque candidates are not
+validated public settings.
+
+Public-manifest readback takes a trusted manifest ID, logical revision and
+SHA-256 from its selecting owner. Verify manifest/object hashes and canonical
+resource references before assembling a staged candidate. Preserve exact port
+keys independently of paths. Unknown extra fields warn; unsafe identity,
+integrity or unsupported private graphs cannot default. Readback must not select
+state or imply domain validation/activation.
+
+Sealed private-record primitives use opaque zeroizing key/plaintext owners and
+fixed versioned authenticated context. Generate a new sealed version and nonce
+per encryption; missing systemd key material never creates a replacement key.
+Read keys only from the delivered credential namespace, accepting systemd's
+root/service-owned ACL-backed modes rather than the legacy password-file mode.
+Authentication is not account-binding validation; private graph adoption and
+payload semantics stay with the later credential owner. No secret Debug/Serialize
+or implicit plaintext logging, and no private-record work in audio callbacks.
+
+Private object writes accept only a prepared envelope created by seal, not raw
+bytes, decoded envelopes or arbitrary paths. Retries reuse the same identity
+and encoded bytes. Read back by trusted identity/hash, enforce ciphertext and
+sealed limits before key loading, and authenticate before exposing opaque
+plaintext. Account binding/private manifest adoption still require resolved
+profiles; successful decryption is not configured-state evidence.
+
+Local protected-store maintenance uses the existing product transaction/private
+owners and a separately checked optional dynamic descriptor. Writing, deletion
+and key rotation require the anchored same-directory WriterLease as well as the
+edit guard; a caller boolean is never stop proof. Preserve optional bounded
+retained_recovery roots in every normal state reconstruction. Authenticate history
+for maintenance, but do not require historical keys merely to start a valid
+current graph. Backups copy exact authenticated immutable bytes with keys retained
+separately; corrupt or incomplete graphs cannot prove garbage. Explicit retain/forget
+publishes state and therefore requires the external delivered write-key policy,
+including public-only stores. Read-only backup adds no write-key requirement.
+Rotation refuses unresolved working edits and selected journals; preserve that
+prior evidence and reconcile under old credentials before rotating.
+
+Accepted state selects verified manifests and publication journals by exact digest.
+Only explicit provisioning initializes an empty store; a protected matching UUID marker supports interrupted bootstrap. Keep full-inventory
+capture and final rechecks under the stable guard. Reconcile only recorded
+source or target bytes, preserve third-party edits, and retain the journal
+until complete readback. Prove the visible pointer durable before replay, and sync the full working baseline before recording clean. Historical activation outcomes do not establish a
+current process generation. New-token imports receive fresh IDs; exact local
+keys never become path components.
+
 ## Shared rpt_advanced project baseline
 
 This baseline applies to every production, shared-library, and workflow
@@ -171,6 +273,17 @@ checks have resolved every recorded component-level issue.
 Keep workflow implementations in rpt_advanced-workflows; this repository may
 contain only the thin callers needed to invoke them. Workflow maintenance must
 not depend on production tests passing.
+
+All production configuration transactions must supply the externally selected
+write-key ID, including empty/public-only stores. Never use the keyless fixture
+constructor as a host policy. Validate every public envelope and reserved secret
+container before immutable installation; keep private decoding in zeroizing
+storage and require one selected key across each encrypted index and leaves.
+
+The loopback HTTPS worker authenticates queued requests before coordinator
+claim. Preserve its bounded nonblocking handoff and consume its coalesced
+listener diagnostics in each host; never perform WebPKI or network work on
+the serialized runtime owner or an audio callback.
 
 Never deploy to a node or alter its configuration without explicit approval.
 Do not add features or requirements that the user has not requested.

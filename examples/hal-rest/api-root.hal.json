@@ -1,0 +1,29 @@
+{
+  "_links": {
+    "self": {
+      "href": "/api/v1/"
+    },
+    "curies": [
+      {
+        "name": "rpt",
+        "href": "/api/v1/rels/{rel}",
+        "templated": true
+      }
+    ],
+    "rpt:site": {
+      "href": "/api/v1/configuration/site/"
+    },
+    "rpt:ports": {
+      "href": "/api/v1/configuration/ports/"
+    },
+    "rpt:status": {
+      "href": "/api/v1/status/"
+    },
+    "rpt:operations": {
+      "href": "/api/v1/operations/"
+    },
+    "describedby": {
+      "href": "/api/v1/openapi.json"
+    }
+  }
+}

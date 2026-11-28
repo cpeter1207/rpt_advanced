@@ -248,6 +248,17 @@ pub struct NodeControl<'a, R: Send, T: Send> {
     store: &'a mut Store<R, T>,
 }
 
+/// Disposition of a same-device configuration update on the physical owner.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DeviceUpdate {
+    /// The owner retained a reversible change.
+    Staged,
+    /// Nothing changed; select a quiesced close/open.
+    Handoff,
+    /// Poll the same candidate until the owner gives a terminal disposition.
+    Pending,
+}
+
 /// Control-only radio lease operations supplied by the selected device adapter.
 pub trait DeviceHandoff: Send {
     /// Stage and acknowledge a same-device radio edit without closing callbacks.
@@ -260,6 +271,27 @@ pub trait DeviceHandoff: Send {
     /// retained reverse after another device fails. Default adapters have no update.
     fn finish_update(&mut self, _commit: bool) -> Result<(), super::RuntimeError> {
         Ok(())
+    }
+    /// Poll reversible staging; synchronous adapters retain the original update contract.
+    fn poll_update(
+        &mut self,
+        settings: &GenerationSettings,
+    ) -> Result<DeviceUpdate, super::RuntimeError> {
+        self.update(settings).map(|staged| {
+            if staged {
+                DeviceUpdate::Staged
+            } else {
+                DeviceUpdate::Handoff
+            }
+        })
+    }
+    /// Poll final confirmation or reverse; false retains both the operation and its owner.
+    fn poll_finish_update(&mut self, commit: bool) -> Result<bool, super::RuntimeError> {
+        self.finish_update(commit).map(|()| true)
+    }
+    /// Reopen the prior retained station during rollback.
+    fn restore(&mut self, settings: &GenerationSettings) -> bool {
+        self.open(settings)
     }
     /// Poll TX-safe idle, PTT deassertion, callback detachment and external users.
     /// Return true only once complete; false leaves the old device retained for retry.

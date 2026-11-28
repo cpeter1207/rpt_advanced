@@ -1,10 +1,14 @@
 //! Client of the composed, codec-neutral jitter ABI. No jitter implementation lives here.
 #![deny(missing_docs)]
 
+mod provider;
+pub use provider::{JITTER_LIBRARY_NAME, JitterProvider};
+
 use std::{
     ffi::c_void,
     mem::size_of,
     ptr::{self, NonNull},
+    sync::Arc,
 };
 
 const CAPABILITY: [u8; 16] = *b"rptadv.jitter\0\0\0";
@@ -95,6 +99,8 @@ pub mod abi {
         pub observe: Option<unsafe extern "C" fn(*const c_void, *mut Observation) -> i32>,
     }
 }
+type UpdateDelays = unsafe extern "C" fn(*mut c_void, u32, u32, u32) -> i32;
+
 pub use abi::Observation;
 use abi::{Config, Descriptor, Packet, RawDecision};
 
@@ -155,6 +161,10 @@ pub struct Jitter {
     api: Descriptor,
     context: NonNull<c_void>,
     release_span: u32,
+    rate: u32,
+    delays_ms: [u32; 3],
+    update_delays: Option<UpdateDelays>,
+    _provider: Option<Arc<JitterProvider>>,
 }
 
 // The capability contract permits thread migration and forbids simultaneous calls.
@@ -203,8 +213,19 @@ impl Jitter {
         }
     }
 
-    /// Prepare either fixed policy through the same validated descriptor/lifecycle.
-    unsafe fn with_delays(
+    /// Prepare packet jitter with the selected minimum, initial and maximum in milliseconds.
+    /// The native configuration stores sample counts at the negotiated PCM rate.
+    /// An unordered tuple or a delay outside the native 32-bit range is rejected
+    /// before allocating a context.
+    ///
+    /// # Safety
+    /// `descriptor` must point to a valid `rptadv_jitter_descriptor_v1` readable
+    /// for its declared size. Its callbacks must obey ABI 1. Each successful
+    /// creation must return an independent, exclusively owned context that can
+    /// move between threads for serial use. Callbacks must never retain borrowed
+    /// arguments or unwind across the ABI boundary. The provider's DSO must
+    /// remain loaded until the context is destroyed.
+    pub unsafe fn with_delays(
         descriptor: *const c_void,
         rate: u32,
         loss_unit: u32,
@@ -242,13 +263,29 @@ impl Jitter {
         {
             return Err(Error::InvalidDescriptor);
         }
+        let [minimum_delay, initial_delay, maximum_delay] = delay_samples(rate, delays_ms)?;
+        // The Rust Descriptor mirrors the complete released ABI 1 prefix.
+        // Read the nullable suffix only when the provider declares every byte.
+        let update_delays = if (prefix[0] as usize)
+            >= size_of::<Descriptor>() + size_of::<Option<UpdateDelays>>()
+        {
+            unsafe {
+                descriptor
+                    .cast::<u8>()
+                    .add(size_of::<Descriptor>())
+                    .cast::<Option<UpdateDelays>>()
+                    .read_unaligned()
+            }
+        } else {
+            None
+        };
         let options = Config {
             struct_size: size_of::<Config>() as u32,
             abi_version: 1,
             clock_rate_hz: rate,
-            minimum_delay: rate * delays_ms[0] / 1000,
-            initial_delay: rate * delays_ms[1] / 1000,
-            maximum_delay: rate * delays_ms[2] / 1000,
+            minimum_delay,
+            initial_delay,
+            maximum_delay,
             adjustment_step: rate / 100,
             concealment_span: loss_unit,
             maximum_packets: 64,
@@ -262,7 +299,33 @@ impl Jitter {
             api,
             context: NonNull::new(context).ok_or(Error::OperationFailed)?,
             release_span: (rate / 50).div_ceil(loss_unit) * loss_unit,
+            rate,
+            delays_ms,
+            update_delays,
+            _provider: None,
         })
+    }
+
+    /// Whether the loaded provider can edit bounds while retaining this context.
+    pub fn supports_delay_update(&self) -> bool {
+        self.update_delays.is_some()
+    }
+
+    /// Change this context's minimum, initial and maximum milliseconds. The
+    /// existing source clock and queued packets survive. The new initial
+    /// delay applies when the provider next primes. A changed tuple requires
+    /// the optional native operation; an identical tuple needs no callback.
+    pub fn set_delays(&mut self, delays_ms: [u32; 3]) -> Result<(), Error> {
+        if self.delays_ms == delays_ms {
+            return Ok(());
+        }
+        let [minimum, initial, maximum] = delay_samples(self.rate, delays_ms)?;
+        let update = self.update_delays.ok_or(Error::InvalidDescriptor)?;
+        // SAFETY: construction checked this suffix, and self owns the only
+        // mutable access to a context created by this same retained provider.
+        status(unsafe { update(self.context.as_ptr(), minimum, initial, maximum) })?;
+        self.delays_ms = delays_ms;
+        Ok(())
     }
 
     /// Closest complete coding-unit request at least the ordinary 20 ms quantum.
@@ -364,6 +427,16 @@ impl Jitter {
         }
         Ok(result)
     }
+}
+
+fn delay_samples(rate: u32, [minimum, initial, maximum]: [u32; 3]) -> Result<[u32; 3], Error> {
+    if minimum > initial || initial > maximum {
+        return Err(Error::InvalidDescriptor);
+    }
+    let convert = |ms: u32| {
+        u32::try_from(u64::from(rate) * u64::from(ms) / 1000).map_err(|_| Error::InvalidDescriptor)
+    };
+    Ok([convert(minimum)?, convert(initial)?, convert(maximum)?])
 }
 
 impl Drop for Jitter {

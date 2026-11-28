@@ -60,3 +60,5 @@ completion does not imply hardware qualification, release, or deployment.
 | [0042](0042-activity-scoped-ctcss-encode.md) | Implemented | Activity-scoped CTCSS transmit control is returned independently from PTT by the native radio callback. |
 | [0043](0043-shared-loudness-and-receive-vad.md) | Implemented, released, and installed; listening/RF qualification remains separate | Shared LUFS gain control, fixed limiting/output metering, and local Earshot speech qualification retain existing owners. |
 | [0044](0044-phone-peers-and-rf-presentation-pacing.md) | Accepted; implementation pending | Private SIP/IAX phone peers, source-scoped macros/replies, and bounded RF presentation pacing retain the existing owners. |
+| [0045](0045-modular-json-and-hal-management.md) | Accepted; implementation in progress | Modular JSON inheritance/store, warning/default resolution, mTLS HAL/JSON Patch and preserved USBRadioPlus INI. |
+| [0046](0046-connection-admission-and-webrtc.md) | Accepted; implementation and qualification in progress | Shared exact connection admission, authorized WebRTC media and optional status correlation. |

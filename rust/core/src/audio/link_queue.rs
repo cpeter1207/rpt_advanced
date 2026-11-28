@@ -34,6 +34,8 @@ pub struct ReadSpan {
     pub span: AudioSpan,
     /// Real samples copied to the output prefix.
     pub frames: usize,
+    /// Station PCM isolation epoch carried separately from source provenance.
+    pub isolation_epoch: u64,
 }
 
 #[derive(Default)]
@@ -102,6 +104,16 @@ impl LinkAudioQueue {
 impl LinkAudioProducer {
     /// Write leading samples that fit and return the rejected newest-sample count.
     pub fn write(&mut self, span: AudioSpan, audio: &[f32]) -> usize {
+        self.write_at_isolation_epoch(span, audio, 0)
+    }
+
+    /// Publish PCM under the station epoch captured at mix time.
+    pub(crate) fn write_at_isolation_epoch(
+        &mut self,
+        span: AudioSpan,
+        audio: &[f32],
+        isolation_epoch: u64,
+    ) -> usize {
         // Sole producer: a free descriptor cannot be taken by another writer.
         // Publish samples first; the consumer reads only after acquiring this span.
         let written = if self.spans.slots() == 0 {
@@ -114,6 +126,7 @@ impl LinkAudioProducer {
                 .push(ReadSpan {
                     span,
                     frames: written,
+                    isolation_epoch,
                 })
                 .expect("reserved span");
         }
@@ -159,6 +172,7 @@ impl LinkAudioConsumer {
         let read = ReadSpan {
             span: pending.span,
             frames: count,
+            isolation_epoch: pending.isolation_epoch,
         };
         let next = pending.span.source_start.wrapping_add(count as u64);
         let elapsed = (u128::from(next) * 1_000_000_000 / 48_000)
@@ -178,12 +192,19 @@ impl LinkAudioConsumer {
     /// Unclocked PCM for synchronous hosts; asynchronous egress uses `read_span`.
     /// Fill any shortfall with silence and return its length.
     pub fn read(&mut self, output: &mut [f32]) -> usize {
+        self.read_at_isolation_epoch(output, 0)
+    }
+
+    /// Drop buffered samples from earlier station epochs before reading normal PCM.
+    pub fn read_at_isolation_epoch(&mut self, output: &mut [f32], epoch: u64) -> usize {
         let mut read = 0;
         while read < output.len() {
             let Some(span) = self.read_span(&mut output[read..]) else {
                 break;
             };
-            read += span.frames;
+            if span.isolation_epoch == epoch {
+                read += span.frames;
+            }
         }
         output[read..].fill(0.0);
         let shortfall = output.len() - read;

@@ -3,23 +3,29 @@
 use super::*;
 
 #[derive(Default)]
-struct Calls {
+pub(super) struct Calls {
     handle: Option<usize>,
     operations: Vec<u32>,
+    unsupported: usize,
 }
 
-unsafe fn record(context: *mut c_void, radio: *mut c_void, operation: u32) {
+unsafe fn record(context: *mut c_void, radio: *mut c_void, operation: u32) -> bool {
     // SAFETY: the test retains this shared fixture until host destruction.
     let mut calls = unsafe { &*context.cast::<Mutex<Calls>>() }.lock().unwrap();
-    assert!(!radio.is_null());
-    assert_eq!(*calls.handle.get_or_insert(radio as usize), radio as usize);
+    if radio.is_null() || *calls.handle.get_or_insert(radio as usize) != radio as usize {
+        return false;
+    }
     calls.operations.push(operation);
+    true
 }
 
 unsafe extern "C" fn update(context: *mut c_void, radio: *mut c_void, phase: u32) -> i32 {
     // SAFETY: the unique host control owner serializes these fixture calls.
-    unsafe { record(context, radio, 10 + phase) };
-    0
+    if matches!(phase, 1 | 2) && unsafe { record(context, radio, 10 + phase) } {
+        0
+    } else {
+        -1
+    }
 }
 
 unsafe extern "C" fn maintenance(
@@ -37,7 +43,9 @@ unsafe extern "C" fn maintenance(
         return 0;
     }
     // SAFETY: this shared tracker remains retained through the synchronous call.
-    unsafe { record(context, radio, request.operation) };
+    if !unsafe { record(context, radio, request.operation) } {
+        return -1;
+    }
     if request.operation == 2 {
         request.command.value = 333;
     }
@@ -48,167 +56,180 @@ unsafe extern "C" fn maintenance(
     0
 }
 
+unsafe extern "C" fn stage(context: *mut c_void, radio: *mut c_void, plan: *const c_void) -> i32 {
+    // SAFETY: fixture::station creates a boxed port UUID string for each borrowed plan.
+    let Some(owner) = (unsafe { plan.cast::<String>().as_ref() }) else {
+        return -1;
+    };
+    if radio.is_null() || unsafe { crate::fixture::radio_name(radio) } != *owner {
+        return -1;
+    }
+    if owner == SECOND_LOCAL {
+        unsafe { &*context.cast::<Mutex<Calls>>() }
+            .lock()
+            .unwrap()
+            .unsupported += 1;
+        return 1;
+    }
+    if owner == LOCAL && unsafe { record(context, radio, 10) } {
+        0
+    } else {
+        -1
+    }
+}
+
+pub(super) fn tracked_services(calls: &Mutex<Calls>) -> HostServices {
+    let mut table = service_table();
+    table.context = ptr::from_ref(calls).cast_mut().cast();
+    let mut binding = station::BINDING.0;
+    binding.stage_update = Some(stage);
+    table.station_binding = Box::leak(Box::new(binding));
+    table.radio_update = Some(update);
+    table.radio_control = Some(maintenance);
+    // SAFETY: tests retain their boxed tracker beyond all radio owners; both tables are static.
+    unsafe { HostServices::open(Box::leak(Box::new(table))) }.unwrap()
+}
+
+fn device_counts() -> (usize, usize) {
+    use std::sync::atomic::Ordering;
+    (
+        crate::fixture::RADIO_OPENS.load(Ordering::Relaxed),
+        crate::fixture::RADIO_DROPS.load(Ordering::Relaxed),
+    )
+}
+
+fn physical_query(host: &Host, operation: u32) {
+    // Exercise the serialized physical worker. The native-maintenance-session HTTP case
+    // covers grant ownership, stale requests, and clearing keyed/tone state on disconnect.
+    let lease = &host
+        .leases
+        .iter()
+        .find(|(owner, _)| owner == LOCAL)
+        .unwrap()
+        .1;
+    let mut lease = lease.lock().unwrap();
+    assert!(!lease.quiesced && !lease.quiescing);
+    // SAFETY: the complete initialized request contains scalar fields and nullable pointers.
+    let mut request: abi::rptadv_radio_control_v1 = unsafe { std::mem::zeroed() };
+    request.struct_size = std::mem::size_of_val(&request) as u32;
+    request.abi_version = 1;
+    request.operation = operation;
+    request.command.struct_size = std::mem::size_of_val(&request.command) as u32;
+    request.command.abi_version = 1;
+    request.command.command = abi::URP_AST_COMMAND_GET_MIXER;
+    request.command.target = abi::URP_AST_MIXER_RECEIVE;
+    assert_eq!(
+        lease
+            .worker
+            .as_mut()
+            .unwrap()
+            .maintenance(&mut request)
+            .unwrap(),
+        "physical=ready\n"
+    );
+    if operation == 2 {
+        assert_eq!(request.command.value, 333);
+    }
+}
+
 #[test]
 fn physical_status_mixer_and_cleanup_keep_the_live_lease_during_controller_retirement() {
-    struct Resume(Arc<Barrier>);
-    impl Drop for Resume {
-        fn drop(&mut self) {
-            self.0.wait();
-        }
-    }
     let _serial = crate::fixture::LIFECYCLE
         .lock()
         .unwrap_or_else(|error| error.into_inner());
     let calls = Box::new(Mutex::new(Calls::default()));
-    // SAFETY: the released fixture supplies all required host operations.
-    let mut table = unsafe { crate::fixture::host_descriptor().read() };
-    table.context = std::ptr::from_ref(calls.as_ref()).cast_mut().cast();
-    table.radio_update = Some(update);
-    table.radio_control = Some(maintenance);
-    // SAFETY: the immutable table and tracker outlive all host workers.
-    let services = unsafe { HostServices::open(Box::leak(Box::new(table))) }.unwrap();
-    let mut host = Host::start(
-        document("usb", ""),
+    let mut host = Host::fixture_start(
+        configuration("usb", &[]),
         media(),
-        services,
+        tracked_services(&calls),
         Instant::now(),
         clock(),
     )
     .unwrap();
-    let state = attach(&mut host, "2000", LinkAction::Transceive, Mode::TRANSCEIVE);
-    let pause = Arc::new(Barrier::new(2));
-    state.lock().unwrap().pause = Some(pause.clone());
-    pause.wait();
-    let resume = Resume(pause);
-    let opens = crate::fixture::RADIO_OPENS.load(std::sync::atomic::Ordering::Relaxed);
-    let drops = crate::fixture::RADIO_DROPS.load(std::sync::atomic::Ordering::Relaxed);
-    host.reload(
-        document("usb", "[radio 1000]\nreceive_output_gain_db=-6\n"),
-        clock(),
-    )
-    .unwrap();
-    assert!(host.runtime.status(10)[0].1.retiring.is_some());
-
-    let backends =
-        Arc::new(crate::site::backends::SiteBackends::load(host.runtime.document()).unwrap());
-    let mut acquisition = Some(
-        crate::site::acquisition::Acquisition::prepare_reload(
-            &Default::default(),
-            backends,
-            host.epoch,
-            host.site_acquisition.keys(),
+    let held = host.runtime.node(LOCAL).unwrap().work().unwrap();
+    let before = device_counts();
+    let mut adoption = host
+        .fixture_begin_reload(
+            configuration("usb", &[(Kind::RxAudio, "", json!({"output_gain_db":-6}))]),
+            clock(),
         )
-        .unwrap(),
-    );
-    let mut radio = Some(crate::site::radio::RadioSite::default());
-    host.begin_site_reload(
-        host.runtime.revision(),
-        &mut acquisition,
-        &mut radio,
-        &Default::default(),
-    )
-    .unwrap();
-    assert!(host.site_transition.is_some());
-    for operation in [1, 2, 4] {
-        // SAFETY: the ABI request contains only scalar fields and nullable pointers.
-        let mut request: abi::rptadv_radio_control_v1 = unsafe { std::mem::zeroed() };
-        request.struct_size = std::mem::size_of_val(&request) as u32;
-        request.abi_version = 1;
-        request.operation = operation;
-        request.command.struct_size = std::mem::size_of_val(&request.command) as u32;
-        request.command.abi_version = 1;
-        request.command.command = abi::URP_AST_COMMAND_GET_MIXER;
-        request.command.target = abi::URP_AST_MIXER_RECEIVE;
-        let reply = host.radio_control("1000", request).unwrap();
-        assert_eq!(reply.text, "physical=ready\n");
-        if operation == 2 {
-            assert_eq!(reply.request.command.value, 333);
-        }
-        assert!(host.runtime.status(10)[0].1.retiring.is_some());
+        .unwrap();
+    pump_until(&mut host, |host| {
+        host.runtime.status(10)[0].1.retiring == Some(held.id())
+    });
+    for op in [1, 2, 4] {
+        physical_query(&host, op);
+        assert_eq!(host.runtime.status(10)[0].1.retiring, Some(held.id()));
     }
     assert_eq!(calls.lock().unwrap().operations, [10, 11, 1, 2, 4]);
-    assert_eq!(
-        crate::fixture::RADIO_OPENS.load(std::sync::atomic::Ordering::Relaxed),
-        opens
-    );
-    assert_eq!(
-        crate::fixture::RADIO_DROPS.load(std::sync::atomic::Ordering::Relaxed),
-        drops
-    );
-    drop(host.abort_sites());
-    drop(resume);
+    assert_eq!(device_counts(), before);
+    drop(held);
     pump_until(&mut host, |host| {
-        host.runtime.status(10)[0].1.retiring.is_none()
+        adoption.poll(host, clock()).unwrap() && host.runtime.status(10)[0].1.retiring.is_none()
     });
-    // Physical maintenance must reject the handoff's quiesced radio owner.
-    assert!(host.leases[0].1.lock().unwrap().quiesce());
-    // SAFETY: this complete scalar request never retains borrowed pointers.
-    let mut request: abi::rptadv_radio_control_v1 = unsafe { std::mem::zeroed() };
-    request.struct_size = std::mem::size_of_val(&request) as u32;
-    request.abi_version = 1;
-    request.operation = 1;
-    assert!(matches!(host.radio_control("1000", request), Err(-7)));
-    assert!(host.stop(20));
+    let lease = host
+        .leases
+        .iter()
+        .find(|(owner, _)| owner == LOCAL)
+        .unwrap()
+        .1
+        .clone();
+    {
+        let mut lease = lease.lock().unwrap();
+        assert!(lease.quiesce());
+        assert!(lease.worker.is_none());
+    }
+    assert!(host.fixture_stop(20));
 }
 
 #[test]
 fn unsupported_physical_update_uses_handoff_and_later_failure_aborts_the_retained_radio() {
-    unsafe extern "C" fn selective_update(
-        context: *mut c_void,
-        radio: *mut c_void,
-        phase: u32,
-    ) -> i32 {
-        // SAFETY: the fixture retains this radio while its serialized update runs.
-        if unsafe { crate::fixture::radio_name(radio) }.starts_with("2000\0") {
-            assert_eq!(phase, 0);
-            1
-        } else {
-            // SAFETY: this is the existing first radio's shared tracker/lease.
-            unsafe { update(context, radio, phase) }
-        }
-    }
     let _serial = crate::fixture::LIFECYCLE
         .lock()
         .unwrap_or_else(|error| error.into_inner());
     let calls = Box::new(Mutex::new(Calls::default()));
-    // SAFETY: the fixture supplies the complete released host table.
-    let mut table = unsafe { crate::fixture::host_descriptor().read() };
-    table.context = std::ptr::from_ref(calls.as_ref()).cast_mut().cast();
-    table.radio_update = Some(selective_update);
-    table.radio_control = Some(maintenance);
-    // SAFETY: the immutable table and tracker outlive all host workers.
-    let services = unsafe { HostServices::open(Box::leak(Box::new(table))) }.unwrap();
-    let source = document("usb", "[2000]\nradio_channel=usb2\n");
-    let mut host = Host::start(source.clone(), media(), services, Instant::now(), clock()).unwrap();
-    let opens = crate::fixture::RADIO_OPENS.load(std::sync::atomic::Ordering::Relaxed);
-    let drops = crate::fixture::RADIO_DROPS.load(std::sync::atomic::Ordering::Relaxed);
+    let ports = [
+        (LOCAL, "1000", "usb", json!({})),
+        (SECOND_LOCAL, "2000", "usb2", json!({})),
+    ];
+    let source = stations(&ports, &[]);
+    let previous = Arc::clone(source.runtime());
+    let mut host = Host::fixture_start(
+        source,
+        media(),
+        tracked_services(&calls),
+        Instant::now(),
+        clock(),
+    )
+    .unwrap();
+    let revision = host.runtime.revision();
+    let (opens, drops) = device_counts();
+    let changes = [
+        (LOCAL, Kind::RxAudio, "", json!({"output_gain_db":-6})),
+        (
+            SECOND_LOCAL,
+            Kind::RxAudio,
+            "",
+            json!({"output_gain_db":-9}),
+        ),
+    ];
     crate::fixture::RADIO_OPEN_RESULT.store(1, std::sync::atomic::Ordering::Relaxed);
-    let candidate = document(
-        "usb",
-        "[2000]\nradio_channel=usb2\n[radio 1000]\nreceive_output_gain_db=-6\n[radio 2000]\ndevice_selection=exact\ndevice_identifier=another-device\n",
-    );
-    assert_eq!(host.reload(candidate, clock()), Err(RuntimeError::Device));
-    assert_eq!(host.runtime.revision(), 1);
-    assert_eq!(host.runtime.document(), &source);
-    // SAFETY: a complete initialized request is borrowed by the current serialized lease.
-    let mut request: abi::rptadv_radio_control_v1 = unsafe { std::mem::zeroed() };
-    request.struct_size = std::mem::size_of_val(&request) as u32;
-    request.abi_version = 1;
-    request.operation = 1;
     assert_eq!(
-        host.radio_control("1000", request).unwrap().text,
-        "physical=ready\n"
+        host.fixture_reload(stations(&ports, &changes), clock()),
+        Err(RuntimeError::Device)
     );
-    assert_eq!(calls.lock().unwrap().operations, [10, 12, 1]);
-    // Only the unsupported second radio closes and reopens; the accepted first
-    // radio restores its prepared reverse without losing its original stream.
-    assert_eq!(
-        crate::fixture::RADIO_OPENS.load(std::sync::atomic::Ordering::Relaxed),
-        opens + 1
-    );
-    assert_eq!(
-        crate::fixture::RADIO_DROPS.load(std::sync::atomic::Ordering::Relaxed),
-        drops + 1
-    );
-    assert!(host.stop(20));
+    assert_eq!(host.runtime.revision(), revision);
+    assert!(Arc::ptr_eq(
+        host.runtime.modular_configuration().unwrap(),
+        &previous
+    ));
+    physical_query(&host, 1);
+    let calls = calls.lock().unwrap();
+    assert_eq!(calls.unsupported, 1);
+    assert_eq!(calls.operations, [10, 12, 1]);
+    drop(calls);
+    // The unsupported station was closed and restored after its new open failed.
+    // The first station used its staged reverse on the same live handle.
+    assert_eq!(device_counts(), (opens + 1, drops + 1));
+    assert!(host.fixture_stop(20));
 }

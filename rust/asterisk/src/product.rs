@@ -17,30 +17,22 @@ impl Product {
         self.0
     }
 
-    /// Admit a claimed Echo QSO without a channel or lifecycle-global lookup.
-    pub(crate) fn incoming_echo(
-        &self,
-        peer: std::sync::Arc<rptadv_peer_support::echolink::host::Peer>,
-    ) {
-        unsafe { crate::services::incoming_echo(self.0.incoming.unwrap(), peer) };
-    }
-
     /// Validate an immutable complete product table.
     ///
     /// # Safety
     /// `pointer` provides a readable size/version prefix and remains loaded through unload.
     pub unsafe fn open(pointer: *const ffi::rptadv_product_descriptor_v1) -> Option<Self> {
         if pointer.is_null()
+            || !pointer.is_aligned()
             || unsafe { ptr::addr_of!((*pointer).struct_size).read() }
                 != size_of::<ffi::rptadv_product_descriptor_v1>() as u32
-            || unsafe { ptr::addr_of!((*pointer).abi_version).read() } != 7
+            || unsafe { ptr::addr_of!((*pointer).abi_version).read() } != 8
         {
             return None;
         }
         let descriptor = unsafe { &*pointer };
-        (descriptor.capability == *b"rptadv.prod7\0\0\0\0"
-            && descriptor.start.is_some()
-            && descriptor.reload.is_some()
+        (descriptor.capability == *b"rptadv.prod8\0\0\0\0"
+            && descriptor.reload_working.is_some()
             && descriptor.reload_poll.is_some()
             && descriptor.stop.is_some()
             && descriptor.authorize_incoming.is_some()
@@ -48,71 +40,23 @@ impl Product {
             && descriptor.link_command.is_some()
             && descriptor.site_command.is_some()
             && descriptor.link_status.is_some()
-            && descriptor.digit.is_some()
-            && descriptor.inspect_configuration.is_some()
-            && descriptor.inspect_secrets.is_some())
+            && descriptor.digit.is_some())
         .then_some(Self(descriptor))
     }
-    /// Start the portable owner with validated provider tables and copied configuration.
-    ///
-    /// # Safety
-    /// Every descriptor points to a complete compatible immutable table whose code
-    /// remains loaded until a successful product stop.
-    pub unsafe fn start(
-        &self,
-        host: *const ffi::rptadv_host_services_v10,
-        control: *const ffi::rptadv_control_descriptor_v1,
-        file: *const ffi::rptadv_file_descriptor,
-        speech: *const ffi::rptadv_speech_descriptor,
-        configuration: &str,
-    ) -> bool {
-        unsafe {
-            self.0.start.unwrap()(
-                host,
-                control,
-                file,
-                speech,
-                configuration.as_ptr().cast(),
-                configuration.len(),
-            ) == 0
+    /// Request and wait for the checked working-store reload on the product owner.
+    pub(crate) fn reload_working(&self) -> bool {
+        // SAFETY: the loader retains the product through the final reload receipt.
+        let mut code = unsafe { self.0.reload_working.expect("checked reload group")() };
+        while code == 1 {
+            std::thread::sleep(std::time::Duration::from_millis(2));
+            // SAFETY: the same retained table owns the pending receipt.
+            code = unsafe { self.0.reload_poll.expect("checked reload group")() };
         }
-    }
-    /// Replace configuration without discarding a working generation on failure.
-    pub fn reload(&self, configuration: &str) -> bool {
-        // The module reload caller waits; the taskprocessor continues servicing peers/radios.
-        let mut status =
-            unsafe { self.0.reload.unwrap()(configuration.as_ptr().cast(), configuration.len()) };
-        while status == 1 {
-            std::thread::sleep(std::time::Duration::from_millis(1));
-            status = unsafe { self.0.reload_poll.unwrap()() };
-        }
-        status == 0
+        code == 0
     }
     /// Stop every product owner and drain accepted calls.
     pub fn stop(&self) -> bool {
         unsafe { self.0.stop.unwrap()() == 0 }
-    }
-    /// Check current policy and topology before answering an incoming channel.
-    pub fn authorize_incoming(&self, local: &str, remote: &str, source: &str) -> bool {
-        unsafe {
-            self.0.authorize_incoming.unwrap()(
-                &incoming_request(local, remote, source),
-                std::ptr::null_mut(),
-            ) == 0
-        }
-    }
-    /// Transfer one answered peer to current product admission.
-    /// # Safety
-    /// `peer` is a unique live handle from the selected host table. Return zero or
-    /// minus one transfers it; return one leaves it caller-owned.
-    pub unsafe fn incoming(
-        &self,
-        local: &str,
-        remote: &str,
-        source: &str,
-        peer: *mut c_void,
-    ) -> i32 {
-        unsafe { self.0.incoming.unwrap()(&incoming_request(local, remote, source), peer) }
     }
     /// Apply one stable link action number.
     pub fn link_command(&self, local: &str, remote: &str, action: u32) -> bool {
@@ -167,25 +111,5 @@ impl Product {
         (code == 0)
             .then_some(completed != 0)
             .ok_or(crate::Error::Admission)
-    }
-}
-
-fn incoming_request(local: &str, remote: &str, source: &str) -> ffi::rptadv_incoming_peer_v1 {
-    ffi::rptadv_incoming_peer_v1 {
-        struct_size: std::mem::size_of::<ffi::rptadv_incoming_peer_v1>() as u32,
-        abi_version: 1,
-        protocol: 1,
-        local: ffi::rptadv_peer_bytes_v1 {
-            data: local.as_ptr(),
-            length: local.len(),
-        },
-        remote: ffi::rptadv_peer_bytes_v1 {
-            data: remote.as_ptr(),
-            length: remote.len(),
-        },
-        source: ffi::rptadv_peer_bytes_v1 {
-            data: source.as_ptr(),
-            length: source.len(),
-        },
     }
 }

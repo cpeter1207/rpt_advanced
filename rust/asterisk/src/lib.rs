@@ -18,6 +18,9 @@ pub mod link;
 pub mod module;
 pub mod product;
 pub mod radio;
+/// Shared HTTPS registration and credential ownership for managed ASL accounts.
+#[path = "../../peer-support/frontend/registration/mod.rs"]
+pub mod registration;
 pub mod services;
 
 /// Failure at the external Asterisk boundary.

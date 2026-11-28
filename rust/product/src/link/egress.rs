@@ -1,5 +1,6 @@
 //! Persistent native-to-codec conversion through the released shared adapter.
 use crate::abi as ffi;
+use rpt_advanced_core::audio::PeakGuard;
 use std::{
     ffi::CStr,
     mem::offset_of,
@@ -15,6 +16,7 @@ pub struct Egress {
     api: ffi::rptadv_samplerate_adapter_descriptor,
     converter: NonNull<ffi::rptadv_samplerate_converter>,
     rate: u32,
+    peak_guard: PeakGuard,
     maximum: usize,
     pending: Vec<f32>,
     used: usize,
@@ -92,6 +94,7 @@ impl Egress {
                 api,
                 converter: NonNull::new(converter).ok_or(EgressError)?,
                 rate,
+                peak_guard: PeakGuard::new(rate),
                 maximum,
                 pending: vec![0.0; maximum * 2],
                 used: 0,
@@ -131,8 +134,7 @@ impl Egress {
             .ok_or(EgressError)?;
         if self.rate == 48000 {
             self.output[..input.len()].copy_from_slice(input);
-            self.output_frames += input.len() as u64;
-            return Ok(&self.output[..input.len()]);
+            return Ok(self.finish_output(input.len()));
         }
         self.pending[self.used..self.used + input.len()].copy_from_slice(input);
         self.used += input.len();
@@ -162,17 +164,23 @@ impl Egress {
         self.skip -= skip;
         let count = (generated as usize - skip).min(limit);
         self.output.copy_within(skip..skip + count, 0);
+        Ok(self.finish_output(count))
+    }
+
+    // Protect only newly generated frames. A partial codec write may reborrow
+    // the same samples without advancing release or applying gain again.
+    fn finish_output(&mut self, count: usize) -> &[f32] {
         self.output_frames += count as u64;
-        Ok(&self.output[..count])
+        let pcm = &mut self.output[..count];
+        self.peak_guard.apply(pcm);
+        pcm
     }
     /// Drain the finite source, trimming startup history and zero padding. One
     /// bounded step returns real source-rate output and whether its budget ended.
     /// Subsequent real input starts a fresh burst; no shared adapter ABI change.
     pub fn finish(&mut self) -> Result<(&[f32], bool), EgressError> {
         self.finishing = true;
-        let budget = (u128::from(self.input_frames) * u128::from(self.rate)).div_ceil(48000);
-        let remaining = usize::try_from(budget.saturating_sub(u128::from(self.output_frames)))
-            .map_err(|_| EgressError)?;
+        let remaining = usize::try_from(self.remaining_frames()).map_err(|_| EgressError)?;
         if remaining == 0 {
             return Ok((&self.output[..0], true));
         }
@@ -182,6 +190,16 @@ impl Egress {
         let count = self.convert(remaining)?.len();
         Ok((&self.output[..count], count == remaining))
     }
+    /// Whether a bounded finite drain has already begun.
+    pub(super) fn finishing(&self) -> bool {
+        self.finishing
+    }
+    /// Real codec-rate samples still owed by the finite native stream.
+    pub(super) fn remaining_frames(&self) -> u128 {
+        let budget = (u128::from(self.input_frames) * u128::from(self.rate)).div_ceil(48000);
+        budget.saturating_sub(u128::from(self.output_frames))
+    }
+
     /// Borrow the previous process result until its encoder has consumed it.
     /// `frames` is exactly the length returned by that process call.
     pub(super) fn retained_output(&self, frames: usize) -> &[f32] {
@@ -192,6 +210,7 @@ impl Egress {
         self.used = 0;
         self.input_frames = 0;
         self.output_frames = 0;
+        self.peak_guard.reset();
         self.skip = self.delay;
         self.finishing = false;
         // SAFETY: this owner exclusively holds the validated converter.

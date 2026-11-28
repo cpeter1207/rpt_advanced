@@ -1,13 +1,20 @@
 //! Serialized private call ownership; no radio binding, topology, or ASL session.
-use crate::{Error, services::PeerIo};
+pub(crate) mod accounts;
+mod login;
+pub(crate) use login::LoginField;
+
+use crate::{Error, link::private_phone::Digit, services::PeerIo};
 use rpt_advanced_core::{
     audio::{PcmStreamReader, Playback, PlaybackOutcome},
-    config::PhoneMailbox,
-    link::{PeerReply, PeerSignals, PhoneCallId, PhoneSource},
+    link::{MailboxId, MediaIsolationClaim, PeerReply, PeerSignals, PhoneCallId, PhoneSource},
+    messages::PhoneAuthenticationPrompt,
 };
 use std::{
-    collections::VecDeque,
-    sync::atomic::{AtomicU64, Ordering},
+    collections::{BTreeMap, BTreeSet, VecDeque},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 static NEXT_INGRESS: AtomicU64 = AtomicU64::new(1);
@@ -26,8 +33,32 @@ pub struct PrivatePhoneReply {
     source: PhoneSource,
     reply: PeerReply,
     playback: Playback,
+    login_prompt: Option<Arc<LoginPrompt>>,
+    auth_success_revision: Option<u64>,
 }
 impl PrivatePhoneReply {
+    pub(crate) fn tracks_login_prompt(&self) -> bool {
+        self.login_prompt.is_some()
+    }
+
+    pub(crate) fn obsolete_before_output(&self, revision: Option<u64>) -> bool {
+        let prepared = self
+            .login_prompt
+            .as_ref()
+            .map(|prompt| prompt.revision)
+            .or(self.auth_success_revision);
+        !self.playback.has_output() && prepared.is_some_and(|origin| Some(origin) != revision)
+    }
+
+    pub(crate) fn played_login_prompt(&self, at: u64, revision: Option<u64>) {
+        if let Some(prompt) = &self.login_prompt
+            && Some(prompt.revision) == revision
+            && self.playback.has_output()
+        {
+            prompt.played.store(at.saturating_add(1), Ordering::Release);
+        }
+    }
+
     /// Exact account, call, generation, and actual ingress retained at preparation.
     pub fn source(&self) -> &PhoneSource {
         &self.source
@@ -59,11 +90,44 @@ impl PrivatePhoneReply {
     }
 }
 
+/// Public mailbox identity retained by one authenticated private call.
+pub struct CallerMailbox {
+    /// Exact declaring resource of a modular scoped login.
+    pub(crate) binding: Option<rpt_advanced_core::config::resources::candidate::ResourceId>,
+    /// Exact configured number, including leading zeros.
+    pub id: MailboxId,
+    /// Configured first name.
+    pub first_name: String,
+    /// Configured callsign.
+    pub callsign: String,
+}
+
+/// An exact prompt's completion in Engine milliseconds. Zero means it has
+/// not finished sending. A detached receipt can never arm a later field.
+struct LoginPrompt {
+    revision: u64,
+    played: AtomicU64,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Attachment {
+    Detached,
+    Publishing,
+    Attached,
+}
+
 struct Call {
-    _io: PeerIo,
+    local: String,
+    io: Option<PeerIo>,
+    transport: Option<crate::link::private_phone::Control>,
+    login: login::Collector,
+    login_revision: u64,
+    login_prompt: Option<Arc<LoginPrompt>>,
+    attachment: Attachment,
+    _isolation: Option<MediaIsolationClaim>,
     source: PhoneSource,
-    signals: PeerSignals,
-    mailbox: Option<PhoneMailbox>,
+    signals: std::sync::Arc<PeerSignals>,
+    mailbox: Option<CallerMailbox>,
     attempts: u8,
     login_deadline_ms: u64,
     replies: VecDeque<PrivatePhoneReply>,
@@ -79,48 +143,80 @@ pub enum PhoneLogin {
     /// Third failure or 60-second admission deadline revoked this call.
     Closed,
 }
+impl Call {
+    fn finish_login_prompt(&mut self, now: u64) {
+        if let Some(at) = self
+            .login_prompt
+            .as_ref()
+            .filter(|prompt| prompt.revision == self.login_revision)
+            .and_then(|prompt| prompt.played.load(Ordering::Acquire).checked_sub(1))
+            .filter(|at| *at <= now)
+        {
+            self.login_prompt = None;
+            self.login.prompt_played(at);
+        }
+    }
+}
+
 impl Drop for Call {
     fn drop(&mut self) {
         self.signals.end();
     }
 }
 
-/// Bounded command-only calls owned by station control, separate from radio peer slots.
+/// Private calls owned by station control, separate from radio peer slots.
 pub struct PhoneCalls {
     calls: Vec<Call>,
-    maximum_calls: usize,
     maximum_replies: usize,
 }
 impl PhoneCalls {
-    /// Prepare explicit transport/prompt bounds; these are not RF attachment limits.
-    pub fn new(maximum_calls: usize, maximum_replies: usize) -> Result<Self, Error> {
-        if maximum_calls == 0 || maximum_replies == 0 {
+    /// Reserve initial call storage and bound each call's reply queue.
+    pub fn new(initial_reservation: usize, maximum_replies: usize) -> Result<Self, Error> {
+        if initial_reservation == 0 || maximum_replies == 0 {
             return Err(Error::Admission);
         }
         let mut calls = Vec::new();
         calls
-            .try_reserve_exact(maximum_calls)
+            .try_reserve_exact(initial_reservation)
             .map_err(|_| Error::Allocation)?;
         Ok(Self {
             calls,
-            maximum_calls,
             maximum_replies,
         })
     }
     /// Adopt a validated private handle without starting any ASL/radio media session.
     /// A duplicate is rejected rather than replacing another live call implicitly.
     pub fn admit(&mut self, io: PeerIo, now_ms: u64) -> Result<PhoneSource, Error> {
+        self.admit_call(io, now_ms, false, None)
+    }
+    /// Prepare the answered leg for route installation and retain its exact isolation claim.
+    pub(crate) fn admit_outgoing(
+        &mut self,
+        io: PeerIo,
+        now_ms: u64,
+        isolation: Option<MediaIsolationClaim>,
+    ) -> Result<PhoneSource, Error> {
+        self.admit_call(io, now_ms, true, isolation)
+    }
+    fn admit_call(
+        &mut self,
+        io: PeerIo,
+        now_ms: u64,
+        outgoing: bool,
+        isolation: Option<MediaIsolationClaim>,
+    ) -> Result<PhoneSource, Error> {
         let call = io.identity().call_id().ok_or(Error::Admission)?;
         let account = io.phone_account().ok_or(Error::Admission)?.clone();
-        if self.calls.len() == self.maximum_calls
-            || self
-                .calls
-                .iter()
-                .any(|existing| existing.source.call_id() == call)
-        {
+        let (account_generation, call_generation) = io.generations();
+        if self.calls.iter().any(|existing| {
+            existing.source.call_id() == call
+                || (existing.source.account() == &account
+                    && existing.source.account_generation() == account_generation
+                    && existing.source.call_generation() == call_generation)
+        }) {
             return Err(Error::Admission);
         }
-        let (account_generation, call_generation) = io.generations();
+        self.calls.try_reserve(1).map_err(|_| Error::Allocation)?;
         let source = PhoneSource::new(
             account,
             account_generation,
@@ -134,9 +230,24 @@ impl PhoneCalls {
             .try_reserve_exact(self.maximum_replies)
             .map_err(|_| Error::Allocation)?;
         self.calls.push(Call {
-            _io: io,
+            local: io.local().to_owned(),
+            io: Some(io),
+            transport: None,
+            login: login::Collector::default(),
+            login_revision: 0,
+            login_prompt: None,
+            attachment: if outgoing {
+                Attachment::Publishing
+            } else {
+                Attachment::Detached
+            },
+            _isolation: isolation,
             source: source.clone(),
-            signals: PeerSignals::for_phone(source.clone()),
+            signals: std::sync::Arc::new(if outgoing {
+                PeerSignals::for_outgoing_phone(source.clone())
+            } else {
+                PeerSignals::for_reverse_phone(source.clone())
+            }),
             mailbox: None,
             attempts: 0,
             login_deadline_ms: now_ms.saturating_add(60_000),
@@ -144,6 +255,291 @@ impl PhoneCalls {
         });
         Ok(source)
     }
+    pub(crate) fn start_transport(
+        &mut self,
+        source: &PhoneSource,
+        reply: &PeerReply,
+        worker: &mut crate::link::session::PeerIoWorker,
+    ) -> Result<(), Error> {
+        let capacity = self.maximum_replies;
+        let call = self.current(source, reply)?;
+        let io = call.io.take().ok_or(Error::Admission)?;
+        call.transport = Some(worker.attach_private(io, reply.clone(), capacity)?);
+        Ok(())
+    }
+
+    /// Queue the authenticated call for publication on its account's port.
+    pub(crate) fn attach_radio(
+        &mut self,
+        source: &PhoneSource,
+        reply: &PeerReply,
+    ) -> Result<(), Error> {
+        let call = self.current(source, reply)?;
+        if call.transport.is_none() || call.mailbox.is_none() || !reply.phone_authenticated() {
+            return Err(Error::Admission);
+        }
+        if call.attachment == Attachment::Detached {
+            call.attachment = Attachment::Publishing;
+        }
+        Ok(())
+    }
+
+    /// Return reverse calls awaiting the mailbox attachment retry path.
+    pub(crate) fn pending_radio_attachments(&self) -> BTreeMap<String, BTreeSet<usize>> {
+        let mut pending = BTreeMap::<String, BTreeSet<usize>>::new();
+        for call in &self.calls {
+            if call.attachment == Attachment::Publishing {
+                let reply = call.signals.reply_target();
+                if !reply.ended() && !reply.outgoing_phone() {
+                    pending
+                        .entry(call.local.clone())
+                        .or_default()
+                        .insert(reply.identity());
+                }
+            }
+        }
+        pending
+    }
+
+    pub(crate) fn confirm_radio_attachment(&mut self, reply: &PeerReply) {
+        if let Some(source) = reply.phone_source()
+            && let Ok(call) = self.current(source, reply)
+            && call.attachment == Attachment::Publishing
+        {
+            call.attachment = Attachment::Attached;
+        }
+    }
+
+    /// Check the same live call and reply that received route installation acknowledgement.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn radio_attachment_confirmed(
+        &mut self,
+        source: &PhoneSource,
+        reply: &PeerReply,
+    ) -> bool {
+        self.current(source, reply)
+            .is_ok_and(|call| call.attachment == Attachment::Attached)
+    }
+
+    pub(crate) fn fail_radio_attachments(
+        &mut self,
+        local: &str,
+        missing: &BTreeSet<usize>,
+    ) -> Vec<(PhoneSource, PeerReply)> {
+        let mut failed = Vec::new();
+        for call in &mut self.calls {
+            if call.local == local
+                && call.attachment == Attachment::Publishing
+                && missing.contains(&call.signals.reply_target().identity())
+            {
+                call.attachment = Attachment::Detached;
+                failed.push((call.source.clone(), call.signals.reply_target()));
+            }
+        }
+        failed
+    }
+    pub(crate) fn audio_routes(
+        &self,
+        local: &str,
+    ) -> impl Iterator<
+        Item = (
+            &PhoneSource,
+            &std::sync::Arc<PeerSignals>,
+            &crate::link::private_phone::Control,
+        ),
+    > {
+        self.calls.iter().filter_map(move |call| {
+            let reply = call.signals.reply_target();
+            if call.local != local
+                || !reply.phone_media_allowed()
+                || call.attachment == Attachment::Detached
+            {
+                return None;
+            }
+            Some((&call.source, &call.signals, call.transport.as_ref()?))
+        })
+    }
+
+    pub(crate) fn settle_inputs(&self, mut idle: impl FnMut(&str, &PeerReply) -> bool) {
+        for call in &self.calls {
+            let reply = call.signals.reply_target();
+            if reply.phone_authenticated() && idle(&call.local, &reply) {
+                if let Some(transport) = &call.transport {
+                    transport.collection_ended();
+                }
+            }
+        }
+    }
+
+    pub(crate) fn poll_inputs(&mut self) -> Vec<(String, PhoneSource, PeerReply, Digit)> {
+        let mut inputs = Vec::new();
+        for call in &mut self.calls {
+            let Some(transport) = &mut call.transport else {
+                continue;
+            };
+            let reply = call.signals.reply_target();
+            if reply.ended() || reply.outgoing_phone() {
+                continue;
+            }
+            // Capture each bounded queue length once so newer symbols cannot
+            // starve another caller or move its inactivity deadline.
+            for _ in 0..transport.pending_digits() {
+                if let Some(digit) = transport.digit() {
+                    inputs.push((
+                        call.local.clone(),
+                        call.source.clone(),
+                        reply.clone(),
+                        digit,
+                    ));
+                }
+            }
+        }
+        inputs
+    }
+
+    pub(crate) fn login_digit(
+        &mut self,
+        source: &PhoneSource,
+        reply: &PeerReply,
+        digit: Digit,
+        timeout: u64,
+    ) -> Result<Option<LoginField>, Error> {
+        let call = self.current(source, reply)?;
+        let Digit {
+            symbol,
+            received,
+            revision,
+        } = digit;
+        if call.mailbox.is_some()
+            || received >= call.login_deadline_ms
+            || revision <= call.login_revision
+        {
+            return Err(Error::Admission);
+        }
+        call.finish_login_prompt(received);
+        call.login_revision = revision;
+        call.login_prompt = None;
+        if call.login.expired(received, timeout) {
+            let _ = call.login.digit(symbol, received);
+            return Ok(Some(LoginField::Expired));
+        }
+        Ok(call.login.digit(symbol, received))
+    }
+
+    /// Advance partial mailbox/PIN fields on the owning port clock, including the
+    /// pause between the mailbox terminator and the first PIN digit.
+    pub(crate) fn expired_login_fields(
+        &mut self,
+        now: u64,
+        mut timeout: impl FnMut(&str) -> Option<u64>,
+    ) -> Vec<(PhoneSource, PeerReply)> {
+        let mut expired = Vec::new();
+        for call in &mut self.calls {
+            let reply = call.signals.reply_target();
+            if call.mailbox.is_none()
+                && !reply.outgoing_phone()
+                && !reply.ended()
+                && now < call.login_deadline_ms
+            {
+                call.finish_login_prompt(now);
+                if timeout(&call.local).is_some_and(|ms| call.login.expired(now, ms)) {
+                    expired.push((call.source.clone(), reply));
+                }
+            }
+        }
+        expired
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn outgoing_sources(&self, local: &str) -> impl Iterator<Item = &PhoneSource> {
+        self.calls.iter().filter_map(move |call| {
+            let reply = call.signals.reply_target();
+            (call.local == local && reply.outgoing_phone() && !reply.ended())
+                .then_some(&call.source)
+        })
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn observations(
+        &self,
+    ) -> impl Iterator<Item = (&str, crate::management::live::Call)> {
+        self.observations_with_control()
+            .map(|(local, call, _)| (local, call))
+    }
+
+    /// Pair public call state with the status lane of the exact live private control.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn observations_with_control(
+        &self,
+    ) -> impl Iterator<
+        Item = (
+            &str,
+            crate::management::live::Call,
+            Option<&crate::link::private_phone::Control>,
+        ),
+    > {
+        self.calls.iter().filter_map(|call| {
+            let reply = call.signals.reply_target();
+            let attached = call.attachment == Attachment::Attached;
+            let outgoing = reply.outgoing_phone();
+            // An outgoing leg remains represented by its dial attempt until installed.
+            if reply.ended() || (outgoing && !attached) {
+                return None;
+            }
+            let muted = reply.rx_muted();
+            let authenticated = reply.phone_authenticated();
+            Some((
+                call.local.as_str(),
+                crate::management::live::Call {
+                    call_id: call.source.call_id().to_string(),
+                    account: call.source.account().as_str().to_owned(),
+                    generation: call.source.call_generation(),
+                    direction: if outgoing { "outgoing" } else { "incoming" },
+                    phase: if attached {
+                        "attached"
+                    } else if authenticated {
+                        "authenticated"
+                    } else {
+                        "private"
+                    },
+                    authenticated,
+                    attached,
+                    muted: (attached || authenticated).then_some(muted),
+                    active: attached.then_some(!muted && reply.active()),
+                },
+                call.transport.as_ref(),
+            ))
+        })
+    }
+
+    /// Only confirmed, current call routes may publish their independently measured audio.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn attached_meters(
+        &self,
+    ) -> impl Iterator<
+        Item = (
+            &str,
+            PhoneCallId,
+            u64,
+            crate::link::status_audio::PeerMeasurements,
+        ),
+    > {
+        self.calls.iter().filter_map(|call| {
+            let reply = call.signals.reply_target();
+            if call.attachment != Attachment::Attached || !reply.phone_media_allowed() {
+                return None;
+            }
+            let generation = call.source.call_generation();
+            let meters = call.transport.as_ref()?.status_meters(generation);
+            Some((
+                call.local.as_str(),
+                call.source.call_id(),
+                generation,
+                meters,
+            ))
+        })
+    }
+
     /// Lookup a provider call without manufacturing a public numeric node alias.
     pub fn source(&self, call: PhoneCallId) -> Option<&PhoneSource> {
         self.calls
@@ -165,7 +561,7 @@ impl PhoneCalls {
             .find(|call| {
                 &call.source == source && call.signals.reply_target() == *reply && !reply.ended()
             })
-            .map(|call| call._io.local())
+            .map(|call| call.local.as_str())
     }
     fn current(&mut self, source: &PhoneSource, reply: &PeerReply) -> Result<&mut Call, Error> {
         self.calls
@@ -175,20 +571,44 @@ impl PhoneCalls {
             })
             .ok_or(Error::Admission)
     }
-    /// Verify a configured mailbox/PIN on serialized control. Three failures or
-    /// 60 seconds from admission revoke the call; new input never renews that
-    /// deadline. Provider credentials and successful login grant no node unlock.
-    pub fn authenticate(
+    /// Verify against the effective whole mailbox and its declaring private slot.
+    /// The borrowed verifier selects the current permitted record and its authenticated PIN.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn authenticate_scoped<'s>(
         &mut self,
         source: &PhoneSource,
         reply: &PeerReply,
-        mailboxes: &[PhoneMailbox],
-        mailbox: &str,
-        pin: &str,
+        mailboxes: &rpt_advanced_core::config::resources::profiles::mailbox::ScopedMailboxes,
+        selected_pin: impl FnOnce(
+            &rpt_advanced_core::config::resources::profiles::mailbox::PublicMailbox,
+        )
+            -> Option<&'s rptadv_peer_support::sealed_records::SecretBytes>,
+        (number, pin): (&str, &str),
         now_ms: u64,
     ) -> Result<PhoneLogin, Error> {
+        use rpt_advanced_core::config::verify_mailbox_pin;
+        self.authenticate_with(source, reply, now_ms, || {
+            let record = mailboxes.effective.get(number)?;
+            let secret = selected_pin(record)?;
+            let phc = std::str::from_utf8(secret.expose_bytes()).ok()?;
+            verify_mailbox_pin(phc, pin).then(|| CallerMailbox {
+                binding: Some(record.binding.id),
+                id: record.number.clone(),
+                first_name: record.first_name.clone(),
+                callsign: record.callsign.clone(),
+            })
+        })
+    }
+
+    fn authenticate_with(
+        &mut self,
+        source: &PhoneSource,
+        reply: &PeerReply,
+        now_ms: u64,
+        verify: impl FnOnce() -> Option<CallerMailbox>,
+    ) -> Result<PhoneLogin, Error> {
         let call = self.current(source, reply)?;
-        if call.mailbox.is_some() {
+        if reply.outgoing_phone() || call.mailbox.is_some() {
             return Err(Error::Admission);
         }
         if now_ms >= call.login_deadline_ms {
@@ -196,11 +616,7 @@ impl PhoneCalls {
             return Ok(PhoneLogin::Closed);
         }
         call.attempts += 1;
-        let record = mailboxes
-            .iter()
-            .find(|record| record.id.as_str() == mailbox)
-            .filter(|record| record.verify_pin(pin));
-        let Some(record) = record else {
+        let Some(record) = verify() else {
             if call.attempts >= 3 {
                 call.signals.end();
                 return Ok(PhoneLogin::Closed);
@@ -212,11 +628,12 @@ impl PhoneCalls {
         if !call.signals.authenticate_phone() {
             return Err(Error::Admission);
         }
-        call.mailbox = Some(record.clone());
+        call.login_prompt = None;
+        call.mailbox = Some(record);
         Ok(PhoneLogin::Authenticated)
     }
     /// The configured profile is visible only for the same authenticated call.
-    pub fn mailbox(&self, source: &PhoneSource, reply: &PeerReply) -> Option<&PhoneMailbox> {
+    pub fn mailbox(&self, source: &PhoneSource, reply: &PeerReply) -> Option<&CallerMailbox> {
         self.calls
             .iter()
             .find(|call| {
@@ -230,7 +647,10 @@ impl PhoneCalls {
     pub fn expire_authentication(&mut self, now_ms: u64) -> Vec<PeerReply> {
         let mut retired = Vec::new();
         self.calls.retain(|call| {
-            if call.mailbox.is_none() && (now_ms >= call.login_deadline_ms || call.signals.ended())
+            if call.signals.ended()
+                || (!call.signals.reply_target().outgoing_phone()
+                    && call.mailbox.is_none()
+                    && now_ms >= call.login_deadline_ms)
             {
                 call.signals.end();
                 retired.push(call.signals.reply_target());
@@ -248,16 +668,64 @@ impl PhoneCalls {
         reply: &PeerReply,
         stream: Box<dyn PcmStreamReader>,
     ) -> Result<(), Error> {
+        self.queue_prepared_reply(source, reply, stream, None)
+    }
+
+    pub(crate) fn queue_login_prompt(
+        &mut self,
+        source: &PhoneSource,
+        reply: &PeerReply,
+        stream: Box<dyn PcmStreamReader>,
+        prompt: PhoneAuthenticationPrompt,
+    ) -> Result<(), Error> {
+        self.queue_prepared_reply(source, reply, stream, Some(prompt))
+    }
+
+    fn queue_prepared_reply(
+        &mut self,
+        source: &PhoneSource,
+        reply: &PeerReply,
+        stream: Box<dyn PcmStreamReader>,
+        prompt: Option<PhoneAuthenticationPrompt>,
+    ) -> Result<(), Error> {
+        use PhoneAuthenticationPrompt::{Authenticated, Login, Password, Retry};
+
         let maximum = self.maximum_replies;
+        if reply.outgoing_phone() {
+            return Err(Error::Admission);
+        }
         let call = self.current(source, reply)?;
+        let login_prompt = if let Some(prompt @ (Login | Password | Retry)) = prompt {
+            if !call.login.waiting_for_prompt(prompt) {
+                return Ok(());
+            }
+            Some(Arc::new(LoginPrompt {
+                revision: call.login_revision,
+                played: AtomicU64::new(0),
+            }))
+        } else {
+            None
+        };
         if call.replies.len() == maximum {
             return Err(Error::Allocation);
         }
-        call.replies.push_back(PrivatePhoneReply {
+        let prepared = PrivatePhoneReply {
             source: source.clone(),
             reply: reply.clone(),
             playback: Playback::new_stream(stream),
-        });
+            login_prompt: login_prompt.clone(),
+            auth_success_revision: (prompt == Some(Authenticated)).then_some(call.login_revision),
+        };
+        if let Some(transport) = &mut call.transport {
+            transport.send(prepared)?;
+        } else {
+            call.replies.push_back(prepared);
+        }
+        if let Some(prompt) = login_prompt {
+            // An unsuccessful queue request leaves the active timer unchanged.
+            call.login.await_prompt();
+            call.login_prompt = Some(prompt);
+        }
         Ok(())
     }
     /// Transfer a prepared private stream to its serial egress owner, never an RF mixer.
@@ -274,6 +742,30 @@ impl PhoneCalls {
         let call = self.calls.remove(index);
         call.signals.end();
         Some(call.signals.reply_target())
+    }
+    /// Close only the actual retired call. Each exact PeerReply is revoked
+    /// before the transport, media queue or mailbox can be reclaimed.
+    pub(crate) fn retain_current(
+        &mut self,
+        mut keep: impl FnMut(&str, &PhoneSource, Option<&CallerMailbox>) -> bool,
+    ) -> Vec<PeerReply> {
+        let mut retired = Vec::new();
+        self.calls.retain(|call| {
+            if keep(call.local.as_str(), &call.source, call.mailbox.as_ref()) {
+                return true;
+            }
+            call.signals.end();
+            #[cfg(test)]
+            if crate::fixture::WATCH_PHONE_PCM.load(std::sync::atomic::Ordering::Relaxed)
+                && call.mailbox.is_some()
+                && call.signals.ended()
+            {
+                eprintln!("private PHONE retirement: scoped mailbox call ended");
+            }
+            retired.push(call.signals.reply_target());
+            false
+        });
+        retired
     }
     /// Retire all calls at committed configuration replacement or module stop.
     pub fn retire_all(&mut self) -> Vec<PeerReply> {

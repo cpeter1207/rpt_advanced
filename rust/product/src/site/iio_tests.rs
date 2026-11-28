@@ -6,7 +6,7 @@ use crate::site::backends::{
 };
 use crate::site::iio::IioReader;
 use rpt_advanced_core::{
-    config::{ConfigDocument, SiteBackend, SiteEndpoint},
+    config::{SiteBackend, SiteEndpoint},
     site::ReadingQuality,
 };
 use std::{
@@ -44,9 +44,7 @@ impl Drop for Fixture {
 fn site_endpoint_iio_uses_normalized_input_and_never_claims_output() {
     let fixture = Fixture::new();
     fixture.put("in_temp_input", "25000\n");
-    let providers = std::sync::Arc::new(
-        SiteBackends::load(&ConfigDocument::parse("[1000]\n").unwrap()).unwrap(),
-    );
+    let providers = std::sync::Arc::new(SiteBackends::load_scopes([]).unwrap());
     let settings = SiteEndpoint {
         backend: SiteBackend::Iio,
         device: fixture.0.join("adc").to_str().unwrap().to_owned(),

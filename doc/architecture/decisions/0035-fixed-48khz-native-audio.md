@@ -45,8 +45,12 @@ Sample-rate conversion belongs at a real source/sink boundary:
   precedes its ring; transmit performs no sample-rate conversion and fills the
   adapter output buffer directly.
 - Peer ingress decodes at the negotiated codec rate and leaves inbound rate
-  conversion to that peer's ring. Egress converts native PCM to the codec rate
-  before encoding; this outbound boundary is not an inbound correction stage.
+  conversion to that peer's ring. For 8 and 16 kHz public link input, the
+  controller stores half-amplitude PCM in the normalized ring and restores
+  amplitude after conversion. The 6 dB of internal headroom preserves
+  intersample peaks and the configured receive gain. The peer DSP graph
+  processes the converted PCM at 48 kHz and uses the float callback when
+  available. Egress converts native PCM to the codec rate before encoding.
 - The app_rpt compatibility adapter retains its 8 kHz interface: inbound
   conversion belongs to its program ring, outbound conversion to its egress.
 - The rpt_advanced radio interface exchanges native 48 kHz PCM directly.

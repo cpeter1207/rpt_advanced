@@ -234,9 +234,9 @@ The standalone application still has no Asterisk dependency.
 
 At acceptance, the C module directly used Asterisk's taskprocessor and thread
 helper. The Rust migration has replaced that implementation: the metadata-only
-C loader selects versioned descriptors; `librptadv_product.so.2` owns lifecycle,
+C loader selects versioned descriptors; `librptadv_product.so.3` owns lifecycle,
 workers, and the single embedded controller core. It has no Asterisk imports.
-`librptadv_asterisk_adapter.so.1` supplies public host services through a C table,
+`librptadv_asterisk_adapter.so.2` supplies public host services through a C table,
 and `librptadv_control_asterisk_adapter.so.1` alone owns taskprocessor resources.
 The periodic trigger and radio/peer workers use Rust-owned threads. File and
 speech providers receive paired child-reaper callbacks through the product's
@@ -252,3 +252,20 @@ deployment environment: the ordinary Asterisk/ASL3 independence checks and
 full platform/integration gate above remain required. Current release and
 live-radio limits are tracked in
 [implementation status](../../implementation-status.md).
+
+The v2 lifecycle loader reads `rpt_advanced.service.json` from the Asterisk configuration directory and starts the same working-store owner as the standalone service. Reload waits for its receipt. A refused stop keeps the module and provider callbacks resident. The managed Direct Echo account owner and transition journal are shared by both frontends.
+
+Both frontends use the same ASL account selection, HTTPS registrar, credential
+generation and apply/publish/reverse/finish receipts. Asterisk keeps ownership
+of its existing IAX2 listener. The adapter checks the process-owned IPv4 UDP
+socket and matches a local IAX2 PONG before acknowledging a configured port.
+A missing endpoint or different simultaneous local ports cause activation to
+fail. The adapter never changes the global PBX bind configuration.
+
+Managed ASL provider ABI 2 identifies the owner of media playout. Standalone
+owns asynchronous playout and applies the resolved jitter timing. The Asterisk
+channel owns codec negotiation, translation and PCM pacing. An explicit
+controller jitter setting therefore prevents PBX adoption until the channel
+driver can apply that setting. The product verifies directory identity and
+source before the adapter answers an incoming channel. Module unload waits for
+channel and registration ownership, including any pending DNS lookup.

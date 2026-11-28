@@ -18,7 +18,7 @@ fn main() {
     println!("cargo:rerun-if-changed=../control-abi/include/rptadv_control_adapter.h");
     println!("cargo:rerun-if-env-changed=RPTADV_CODEC_INCLUDE");
     println!("cargo:rerun-if-env-changed=URP_PRODUCT_INCLUDE");
-    println!("cargo:rustc-cdylib-link-arg=-Wl,-soname,librptadv_asterisk_adapter.so.1");
+    println!("cargo:rustc-cdylib-link-arg=-Wl,-soname,librptadv_asterisk_adapter.so.2");
     let bindings = bindgen::Builder::default()
         .header("wrapper.h")
         .clang_arg(format!("-I{}", env::var("URP_PRODUCT_INCLUDE").unwrap_or_else(|_| "/usr/include".to_owned())))
@@ -34,10 +34,15 @@ fn main() {
         .allowlist_function("ast_(replace_sigchld|unreplace_sigchld)")
         .allowlist_type("rptadv_.*")
         .allowlist_var("RPTADV_SITE_.*")
+        .allowlist_var("RPTADV_RADIO_CONTROL_.*")
         .allowlist_type("UrpAstSite.*")
+        .allowlist_type("UrpAstStationBindingDescriptor")
         .allowlist_type("Urp(AstRemoteControl|RemoteOperation|RemoteTicket)")
         .allowlist_var("URP_AST_(REMOTE_.*|OPTION_REMOTE_CONTROL)")
         .allowlist_var("URP_AST_(SITE_.*|OPTION_SITE_IO)")
+        .allowlist_type("Urp(AstFeedbackBinding|RadioFeedbackPort)")
+        .allowlist_var("URP_AST_(OPTION_RADIO_FEEDBACK|FEEDBACK_OPTION_ABI_VERSION)")
+        .allowlist_var("URP_RADIO_FEEDBACK_ABI_VERSION")
         .allowlist_type("UrpAstDirectCallbacks")
         .allowlist_type("UrpAstChannelCommand")
         .allowlist_var("URP_AST_(OPTION_RECEIVE_POLICY|COMMAND_GET_RECEIVE_POLICY)")

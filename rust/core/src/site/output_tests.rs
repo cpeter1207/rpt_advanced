@@ -1,17 +1,22 @@
 use super::*;
-use crate::config::{ConfigDocument, NodeId, ResolvedSiteSettings};
+use crate::{config::resources::candidate::ResourceKind, station_fixture::equipment};
+use serde_json::{Value, json};
 
-fn settings(extra: &str) -> crate::config::OutputSettings {
-    ResolvedSiteSettings::resolve(&ConfigDocument::parse(&format!("[1000]\n[output 1000 relay]\nenabled=yes\nbackend=gpiod\ndevice=chip\nline=relay\n{extra}")).unwrap(), &NodeId::new("1000").unwrap()).unwrap().value.outputs.remove(0)
+fn settings(extra: Value) -> crate::config::OutputSettings {
+    let mut fields = json!({"enabled":true,"source":{"type":"gpiod","device":"chip","line":"1"}});
+    json_patch::merge(&mut fields, &extra);
+    equipment(&[(ResourceKind::Output, "relay", fields)])
+        .outputs
+        .remove(0)
 }
 
 #[test]
 fn site_output_pulse_prior_state() {
     for initially_on in [false, true] {
         let policy = settings(if initially_on {
-            "startup_state=on\n"
+            json!({"startup_state":"on"})
         } else {
-            ""
+            json!({})
         });
         let mut output = OutputState::new(policy.clone());
         output.advance(0, true);
@@ -27,7 +32,7 @@ fn site_output_pulse_prior_state() {
 
 #[test]
 fn site_output_retrigger_explicit_command_and_fault() {
-    let mut output = OutputState::new(settings(""));
+    let mut output = OutputState::new(settings(json!({})));
     output.advance(0, true);
     output.command(OutputRequest::Pulse, 1000).unwrap();
     output.command(OutputRequest::Pulse, 1200).unwrap();
@@ -54,14 +59,16 @@ fn site_output_retrigger_explicit_command_and_fault() {
 
 #[test]
 fn site_output_changed_polarity_resets_pulse_and_disabled_rejects_commands() {
-    let mut output = OutputState::new(settings(""));
+    let mut output = OutputState::new(settings(json!({})));
     output.advance(0, true);
     output.command(OutputRequest::Pulse, 100).unwrap();
-    output.reconfigure(settings("active_level=low\n"));
+    output.reconfigure(settings(json!({"active_level":"low"})));
     assert!(!output.snapshot().requested_on);
     assert_eq!(output.snapshot().pulse_deadline_ms, None);
     assert!(output.snapshot().fault);
-    output.reconfigure(settings("active_level=low\nenabled=no\nsafe_state=on\n"));
+    output.reconfigure(settings(
+        json!({"active_level":"low","enabled":false,"safe_state":"on"}),
+    ));
     output.advance(200, true);
     assert!(output.snapshot().requested_on);
     assert_eq!(

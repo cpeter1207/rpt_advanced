@@ -48,10 +48,10 @@ fn dtmf_macro_runner_rechecks_source_grants_without_renewal() {
     let mut commands = macro_commands("*70#,*804#", true);
     feed_symbols(&mut commands, "*95");
     assert!(commands.advance_macro(1).is_none());
-    commands.admin_until_ms = 1000;
+    commands.admin_until_ms.store(1000, Ordering::Release);
     feed_symbols(&mut commands, "*95");
     let first = commands.advance_macro(1).unwrap();
-    assert_eq!(commands.admin_until_ms, 1000);
+    assert_eq!(commands.admin_until_ms.load(Ordering::Acquire), 1000);
     assert!(commands.macro_operation_current(&first, 999));
     assert!(!commands.macro_operation_current(&first, 1000));
     let mut other = commands.for_source();
@@ -67,10 +67,10 @@ fn dtmf_macro_runner_rechecks_source_grants_without_renewal() {
 #[test]
 fn dtmf_macro_runner_self_revoke_never_uses_a_stored_lock_credential() {
     let mut commands = macro_commands("*801#*804#", false);
-    commands.admin_until_ms = 1000;
+    commands.admin_until_ms.store(1000, Ordering::Release);
     feed_symbols(&mut commands, "*95");
     assert!(commands.advance_macro(1).is_none());
-    assert_eq!(commands.admin_until_ms, 0);
+    assert_eq!(commands.admin_until_ms.load(Ordering::Acquire), 0);
     assert!(commands.advance_macro(2).is_none());
 }
 
@@ -174,7 +174,7 @@ fn remote_dtmf_enforces_source_authorization_and_keeps_typed_payloads() {
     assert_eq!(query.command.action, LinkAction::RemoteBase);
     assert!(query.command.node.is_empty());
     assert!(feed_symbols(&mut commands, "*661#").is_empty());
-    commands.admin_until_ms = 1000;
+    commands.admin_until_ms.store(1000, Ordering::Release);
     let changed = feed_symbols(&mut commands, "*661#");
     let [DigitOutcome::Operation(changed)] = changed.as_slice() else {
         panic!("unlocked mode")
@@ -685,14 +685,14 @@ fn parrot_authorization_handles_disabled_timeout_and_deadline_boundaries() {
     assert!(enter(&mut commands, "*8001234#", 20).is_none());
     assert!(commands.consume_administrative_authorization(true, 119));
     assert!(!commands.consume_administrative_authorization(true, 120));
-    assert_eq!(commands.admin_until_ms, 0);
+    assert_eq!(commands.admin_until_ms.load(Ordering::Acquire), 0);
 
     commands.configure_admin(&unlock_hash, &lock_hash, 100);
     assert!(enter(&mut commands, "*8001234#", 30).is_none());
     commands.confirm_administrative_action(40);
-    assert_eq!(commands.admin_until_ms, 140);
+    assert_eq!(commands.admin_until_ms.load(Ordering::Acquire), 140);
     commands.confirm_administrative_action(140);
-    assert_eq!(commands.admin_until_ms, 140);
+    assert_eq!(commands.admin_until_ms.load(Ordering::Acquire), 140);
 }
 
 fn enter(commands: &mut DtmfCommands, input: &str, now_ms: u64) -> Option<DigitOperation> {

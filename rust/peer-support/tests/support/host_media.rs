@@ -177,11 +177,18 @@ pub unsafe fn check(context: *mut c_void) {
         let mut received = Received::default();
         let receive_context = ptr::from_mut(&mut received).cast();
         let sink = abi::rptadv_peer_source_sink_v1 {
-            struct_size: size_of::<abi::rptadv_peer_source_sink_v1>() as u32,
+            struct_size: std::mem::offset_of!(abi::rptadv_peer_source_sink_v1, host_clock_epoch)
+                as u32,
             abi_version: 1,
             context: receive_context,
             audio: Some(audio),
             gap: Some(gap),
+            host_clock_epoch: 0,
+            reference_now_ns: 0,
+            audio_timed: None,
+            source_discontinuity: None,
+            digit: None,
+            source_adaptation: None,
         };
         let mut output: abi::rptadv_peer_source_result_v1 = std::mem::zeroed();
         output.struct_size = size_of::<abi::rptadv_peer_source_result_v1>() as u32;
@@ -324,11 +331,18 @@ unsafe fn rejected_records(context: *mut c_void, handle: *mut c_void) {
         output.struct_size = size_of::<abi::rptadv_peer_source_result_v1>() as u32;
         output.abi_version = 1;
         let mut sink = abi::rptadv_peer_source_sink_v1 {
-            struct_size: size_of::<abi::rptadv_peer_source_sink_v1>() as u32,
+            struct_size: std::mem::offset_of!(abi::rptadv_peer_source_sink_v1, host_clock_epoch)
+                as u32,
             abi_version: 1,
             context: ptr::null_mut(),
             audio: None,
             gap: None,
+            host_clock_epoch: 0,
+            reference_now_ns: 0,
+            audio_timed: None,
+            source_discontinuity: None,
+            digit: None,
+            source_adaptation: None,
         };
         let (mut peer, mut out) = (handle, ptr::from_mut(&mut output));
         match field {

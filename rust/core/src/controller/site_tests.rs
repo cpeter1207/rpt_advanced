@@ -64,6 +64,7 @@ fn site_inhibit_does_not_block_an_addressed_peer_reply() {
             &[],
             &mut audio,
             ParrotOutput {
+                branches: None,
                 samples: &mut parrot,
                 active: &mut active,
                 replies: Some(&mut replies),

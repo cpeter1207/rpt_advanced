@@ -1,9 +1,9 @@
 use super::*;
 
 #[test]
-fn rejects_pre_streaming_abi_tables() {
+fn rejects_blocking_stream_abi_tables() {
     let mut legacy = crate::provider::DESCRIPTOR;
-    legacy.abi_version = 1;
+    legacy.abi_version = 2;
     assert_eq!(
         legacy.validate(),
         Err(crate::MediaError::IncompatibleAdapter)
@@ -54,7 +54,7 @@ fn rejects_incompatible_or_incomplete_tables_before_invocation() {
     {
         candidates[5].open_speech = None;
     }
-    candidates[6].read_stream = None;
+    candidates[6].step_stream = None;
     candidates[7].close_stream = None;
     for table in candidates {
         assert_eq!(

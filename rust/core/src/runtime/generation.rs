@@ -57,10 +57,40 @@ pub struct GenerationWork {
     state: Arc<WorkState>,
 }
 
+/// A revocable configuration work owner, independent of any physical audio generation.
+pub(super) struct ScopedGeneration(pub(super) Arc<GenerationWork>);
+impl ScopedGeneration {
+    pub(super) fn new(id: u64) -> Self {
+        Self(Arc::new(GenerationWork {
+            id,
+            state: Arc::new(WorkState {
+                admitted: true.into(),
+                outstanding: 1.into(),
+            }),
+        }))
+    }
+}
+impl Drop for ScopedGeneration {
+    fn drop(&mut self) {
+        self.0.state.admitted.store(false, Ordering::Release);
+    }
+}
 impl GenerationWork {
+    pub(super) fn reserve(&self) -> Self {
+        self.state.outstanding.fetch_add(1, Ordering::Relaxed);
+        Self {
+            id: self.id,
+            state: Arc::clone(&self.state),
+        }
+    }
+
     /// Generation against which this operation was prepared.
     pub fn id(&self) -> u64 {
         self.id
+    }
+    /// Compare exact owner incarnation as well as the reported revision.
+    pub(super) fn same_owner(&self, other: &Self) -> bool {
+        self.id == other.id && Arc::ptr_eq(&self.state, &other.state)
     }
     /// Revalidate immediately before external work and again before applying its result.
     pub fn is_current(&self) -> bool {

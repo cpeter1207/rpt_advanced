@@ -7,22 +7,39 @@ pub(crate) mod abi {
     include!(concat!(env!("OUT_DIR"), "/abi.rs"));
 }
 
-mod configuration;
+#[cfg(target_os = "linux")]
+pub mod configuration_capture;
+#[cfg(target_os = "linux")]
+pub mod configuration_manifest;
+#[cfg(target_os = "linux")]
+/// Account-bound encrypted credentials selected by the configuration transaction.
+pub mod configuration_private;
+#[cfg(target_os = "linux")]
+#[path = "configuration_radio/typed.rs"]
+pub mod configuration_radio;
+#[cfg(target_os = "linux")]
+pub mod configuration_transaction;
 pub mod control;
 pub mod directory;
+#[path = "configuration_echolink.rs"]
+mod echo_configuration;
 pub mod host;
 pub mod lifecycle;
 pub mod link;
+#[cfg(target_os = "linux")]
+pub mod management;
 pub mod media;
 pub mod phone;
-mod radio_control;
+pub(crate) mod radio_feedback;
 mod remote_reply;
+pub mod schedule_zone;
 mod scheduler_health;
 pub mod services;
 pub mod site;
 #[cfg(test)]
 #[path = "site/iio_tests.rs"]
 mod site_iio_tests;
+pub(crate) mod status_meter;
 pub(crate) mod status_post;
 pub mod worker;
 

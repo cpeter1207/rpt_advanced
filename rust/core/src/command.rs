@@ -87,11 +87,11 @@ impl CommandMapping {
 
 /// A parsed command with an owned decimal destination, if required.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Command {
+pub struct Command<S = String> {
     /// Selected operation.
     pub action: LinkAction,
     /// Decimal destination/Message selector, or empty for argument-free operations.
-    pub node: String,
+    pub node: S,
 }
 
 /// A configurable, validated DTMF command map.

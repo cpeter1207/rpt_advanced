@@ -1,6 +1,6 @@
 //! Off-audio EchoLink account resolution. Identity never inherits across accounts.
-use super::{ConfigDocument, ConfigError, ConfigWarning, NodeId, Resolution, Schema, parse};
-use std::{collections::BTreeSet, net::Ipv4Addr, path::PathBuf};
+use super::parse;
+use std::{net::Ipv4Addr, path::PathBuf};
 
 /// Account transport; a Proxy is the EchoLink TCP protocol, not HTTP.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -174,8 +174,8 @@ pub(super) fn default_value(key: &str) -> Option<&'static str> {
         "directory_refresh_ms" => "240000",
         "directory_retry_ms" => "20000",
         "directory_freshness_ms" => "900000",
-        "receive_gain_db" => "-3",
-        "transmit_gain_db" => "3",
+        "receive_gain_db" => "0",
+        "transmit_gain_db" => "0",
         "announcement" => "node",
         "telemetry" => "demand",
         "telemetry_dynamic" => "yes",
@@ -189,11 +189,13 @@ pub(super) fn default_value(key: &str) -> Option<&'static str> {
 fn finite(raw: &str) -> Option<f64> {
     raw.parse::<f64>().ok().filter(|number| number.is_finite())
 }
-fn host(raw: &str) -> Option<String> {
+pub(super) fn host(raw: &str) -> Option<String> {
     if raw.len() > 253 || raw.contains(char::is_whitespace) {
         return None;
     }
-    url::Host::parse(raw).ok().map(|host| host.to_string())
+    let canonical = url::Host::parse(raw).ok()?.to_string();
+    // URL host normalization can expand IDNA labels and reveal encoded delimiters.
+    (canonical.len() <= 253 && !canonical.contains(',')).then_some(canonical)
 }
 fn hosts(raw: &str) -> Option<Vec<String>> {
     raw.split(',').map(|entry| host(entry.trim())).collect()
@@ -289,23 +291,7 @@ pub(super) fn value_valid(key: &str, value: &str) -> bool {
         _ => value.len() <= 4096 && !value.chars().any(char::is_control),
     }
 }
-fn raw<'a>(document: &'a ConfigDocument, node: &NodeId, key: &str) -> &'a str {
-    let section = format!("echolink {}", node.as_str());
-    let identity = matches!(key, "callsign" | "node_number");
-    [section.as_str(), "echolink"]
-        .into_iter()
-        .take(if identity { 1 } else { 2 })
-        .find_map(|scope| {
-            document.lookup(key, &[scope]).filter(|value| {
-                value_valid(key, value)
-                    && (key != "aprs_server"
-                        || aprs_supported(value, raw(document, node, "transport")))
-            })
-        })
-        .unwrap_or_else(|| default_value(key).expect("known account option"))
-}
-
-fn aprs_supported(value: &str, transport: &str) -> bool {
+pub(super) fn aprs_supported(value: &str, transport: &str) -> bool {
     transport != "proxy"
         || value.is_empty()
         || value
@@ -316,37 +302,14 @@ fn aprs_supported(value: &str, transport: &str) -> bool {
             == Ok(5199)
 }
 impl EchoLinkSettings {
-    /// Resolve shared defaults and node overrides, retaining all schema warnings.
-    pub fn resolve(
-        document: &ConfigDocument,
-        node: &NodeId,
-    ) -> Result<Resolution<Self>, ConfigError> {
-        let mut warnings = Schema::validate(document)?.warnings;
-        let value = Self::from_document(document, node)?;
-        let local = format!("echolink {}", node.as_str());
-        for entry in document.entries().iter().filter(|entry| {
-            entry.key == "aprs_server" && (entry.section == "echolink" || entry.section == local)
-        }) {
-            if value_valid("aprs_server", &entry.value)
-                && !aprs_supported(&entry.value, raw(document, node, "transport"))
-            {
-                warnings.push(ConfigWarning::new(
-                    entry.line,
-                    &entry.section,
-                    &entry.key,
-                    &entry.value,
-                    "EchoLink Proxy control requires UDP port 5199",
-                    &value.aprs_server,
-                ));
-            }
-        }
-        Ok(Resolution { value, warnings })
-    }
-    fn from_document(document: &ConfigDocument, node: &NodeId) -> Result<Self, ConfigError> {
-        let text = |key| raw(document, node, key);
+    /// Construct the shared settings. JSON passes its normalized directory array directly.
+    pub(super) fn from_public_fields<'a>(
+        text: impl Fn(&'static str) -> &'a str,
+        directory_servers: Option<Vec<String>>,
+    ) -> Self {
         let number = |key| text(key).parse::<u32>().expect("validated account number");
         let scalar = |key| finite(text(key)).expect("validated account scalar");
-        let settings = Self {
+        Self {
             aprs_server: text("aprs_server").into(),
             enabled: parse::boolean(text("enabled")).unwrap(),
             callsign: text("callsign").to_ascii_uppercase(),
@@ -363,7 +326,9 @@ impl EchoLinkSettings {
             antenna_height_m: scalar("antenna_height_m"),
             antenna_gain_db: scalar("antenna_gain_db"),
             antenna_direction_deg: scalar("antenna_direction_deg"),
-            directory_servers: hosts(text("directory_servers")).unwrap(),
+            directory_servers: directory_servers.unwrap_or_else(|| {
+                hosts(text("directory_servers")).expect("validated directory hosts")
+            }),
             max_stations: number("max_stations"),
             max_pending_handshakes: number("max_pending_handshakes"),
             heartbeat_interval_ms: number("heartbeat_interval_ms"),
@@ -390,73 +355,29 @@ impl EchoLinkSettings {
             proxy_port: number("proxy_port") as u16,
             allow: patterns(text("allow")).unwrap(),
             deny: patterns(text("deny")).unwrap(),
-            secrets_file: (!text("secrets_file").is_empty())
-                .then(|| PathBuf::from(text("secrets_file"))),
-        };
-        if settings.enabled
-            && (settings.callsign.is_empty()
-                || settings.node_number == 0
-                || (settings.transport == EchoLinkTransport::Proxy
-                    && settings.proxy_host.is_empty())
-                || settings
-                    .max_stations
-                    .checked_add(settings.max_pending_handshakes)
-                    .is_none())
-        {
-            return Err(ConfigError::structure(
-                &format!("echolink {}", node.as_str()),
-                "enabled account needs its own valid identity, transport and bounded setup budget",
-            ));
+            secrets_file: None,
         }
-        Ok(settings)
     }
-}
-pub(super) fn validate_all(document: &ConfigDocument) -> Result<(), ConfigError> {
-    if !document
-        .sections()
-        .iter()
-        .any(|section| section == "echolink" || section.starts_with("echolink "))
-    {
-        return Ok(());
+
+    pub(super) fn complete_binding(&self) -> bool {
+        !self.callsign.is_empty()
+            && self.node_number != 0
+            && (self.transport != EchoLinkTransport::Proxy || !self.proxy_host.is_empty())
     }
-    let mut accounts: Vec<EchoLinkSettings> = Vec::new();
-    let mut callsigns = BTreeSet::new();
-    let mut numbers = BTreeSet::new();
-    for name in document.nodes() {
-        let node = NodeId::new(name)?;
-        if parse::boolean(raw(document, &node, "enabled")) != Some(true) {
-            continue;
-        }
-        let account = EchoLinkSettings::from_document(document, &node)?;
-        if !callsigns.insert(account.callsign.clone()) || !numbers.insert(account.node_number) {
-            return Err(ConfigError::structure(
-                "echolink",
-                "duplicate enabled account identity",
-            ));
-        }
-        for previous in &accounts {
-            let conflict = match (account.transport, previous.transport) {
-                (EchoLinkTransport::Direct, EchoLinkTransport::Direct) => {
-                    (account.bind_address.is_unspecified()
-                        || previous.bind_address.is_unspecified()
-                        || account.bind_address == previous.bind_address)
-                        && account.audio_port <= previous.audio_port + 1
-                        && previous.audio_port <= account.audio_port + 1
-                }
-                (EchoLinkTransport::Proxy, EchoLinkTransport::Proxy) => {
-                    account.proxy_host == previous.proxy_host
-                        && account.proxy_port == previous.proxy_port
-                }
-                _ => false,
-            };
-            if conflict {
-                return Err(ConfigError::structure(
-                    "echolink",
-                    "enabled accounts share an ambiguous transport endpoint",
-                ));
+
+    pub(super) fn shares_endpoint(&self, other: &Self) -> bool {
+        match (self.transport, other.transport) {
+            (EchoLinkTransport::Direct, EchoLinkTransport::Direct) => {
+                (self.bind_address.is_unspecified()
+                    || other.bind_address.is_unspecified()
+                    || self.bind_address == other.bind_address)
+                    && self.audio_port <= other.audio_port + 1
+                    && other.audio_port <= self.audio_port + 1
             }
+            (EchoLinkTransport::Proxy, EchoLinkTransport::Proxy) => {
+                self.proxy_host == other.proxy_host && self.proxy_port == other.proxy_port
+            }
+            _ => false,
         }
-        accounts.push(account);
     }
-    Ok(())
 }

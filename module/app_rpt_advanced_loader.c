@@ -13,22 +13,23 @@
 #include <string.h>
 
 /** Selected immutable descriptor; its library remains a loader dependency. */
-static const struct rptadv_asterisk_descriptor_v1 *adapter;
+static const struct rptadv_asterisk_descriptor_v2 *adapter;
 
 /** Validate mixed artifacts before invoking Rust product lifecycle.
  * @return Asterisk load success or decline on incompatible artifacts or preparation failure.
  */
 static int load_module(void) {
-    const struct rptadv_asterisk_descriptor_v1 *candidate = rptadv_asterisk_descriptor_v1();
+    const struct rptadv_asterisk_descriptor_v2 *candidate = rptadv_asterisk_descriptor_v2();
     if (!candidate || candidate->struct_size != sizeof(*candidate) ||
         candidate->abi_version != RPTADV_ASTERISK_ABI_VERSION ||
         memcmp(candidate->capability, RPTADV_ASTERISK_CAPABILITY, sizeof(candidate->capability)) ||
         !candidate->load || !candidate->reload || !candidate->unload) {
         return AST_MODULE_LOAD_DECLINE;
     }
-    int result = candidate->load(AST_MODULE_SELF, rptadv_product_descriptor_v1(),
-                                 rptadv_control_descriptor_v1(), rptadv_file_adapter_descriptor(),
-                                 rptadv_speech_adapter_descriptor());
+    int result =
+        candidate->load(AST_MODULE_SELF, rptadv_product_descriptor_v1(),
+                        rptadv_product_management_descriptor_v1(), rptadv_control_descriptor_v1(),
+                        rptadv_file_adapter_descriptor(), rptadv_speech_adapter_descriptor());
     if (!result) {
         adapter = candidate;
     }

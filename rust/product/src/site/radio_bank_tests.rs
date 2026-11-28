@@ -1,25 +1,29 @@
 //! Cached radio owner snapshots distinguish acceptance, service and electrical readback.
 use super::*;
-use rpt_advanced_core::config::{ConfigDocument, NodeId, ResolvedSiteSettings};
+use crate::site::equipment_fixture::{endpoint, input, output};
+use rpt_advanced_core::config::{ResolvedSiteSettings, SiteBackend};
 use std::collections::BTreeMap;
 
 #[path = "radio_reload_tests.rs"]
 mod reload;
 
 fn settings() -> BTreeMap<String, ResolvedSiteSettings> {
-    let document = ConfigDocument::parse("[1000]\n[2000]\n[input 2000 door]\nenabled=yes\nbackend=cm119\ndevice=1000\nline=2\nactive_level=low\n[output 2000 relay]\nenabled=yes\nbackend=cm119\ndevice=1000\nline=7\nactive_level=low\nstartup_state=on\n").unwrap();
-    document
-        .nodes()
-        .into_iter()
-        .map(|name| {
-            (
-                name.into(),
-                ResolvedSiteSettings::resolve(&document, &NodeId::new(name).unwrap())
-                    .unwrap()
-                    .value,
-            )
-        })
-        .collect()
+    let mut door = input("door", endpoint(SiteBackend::Cm119, "1000", "2"));
+    door.active_high = false;
+    let mut relay = output("relay", endpoint(SiteBackend::Cm119, "1000", "7"));
+    relay.active_high = false;
+    relay.startup_on = true;
+    BTreeMap::from([
+        ("1000".into(), ResolvedSiteSettings::default()),
+        (
+            "2000".into(),
+            ResolvedSiteSettings {
+                inputs: vec![door],
+                outputs: vec![relay],
+                ..Default::default()
+            },
+        ),
+    ])
 }
 
 #[test]

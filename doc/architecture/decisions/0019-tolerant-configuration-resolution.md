@@ -34,3 +34,13 @@ receive actionable diagnostics. Parsers and schema resolvers must distinguish
 warnings from errors, test both paths, and expose resolved effective values to
 the existing configuration/status interfaces. New settings require a default
 before they are accepted.
+
+## JSON implementation clarification (2026-11-19)
+
+[ADR 0045](0045-modular-json-and-hal-management.md) applies this same warning and
+inherited/default fallback policy to modular JSON reloads and API configuration
+writes. Ignore only the unusable field, not its valid siblings or parent.
+Canonical schemas describe normalized output. Core diagnostics and host logs
+must not contain supplied values or credentials. Syntax, duplicate-member
+ambiguity and unsafe structural/lifecycle relationships remain errors when no
+safe deterministic candidate exists.

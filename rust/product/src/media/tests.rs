@@ -30,7 +30,7 @@ fn finite_speech_stream_retains_context_and_returns_source_pcm_incrementally() {
         _: *const c_void,
         request: *const ffi::rptadv_media_speech_request,
         _: *const ffi::rptadv_media_cancellation,
-        stream: *mut ffi::rptadv_media_stream,
+        stream: *mut *mut c_void,
     ) -> i32 {
         let request = unsafe { &*request };
         assert_eq!(
@@ -38,15 +38,13 @@ fn finite_speech_stream_retains_context_and_returns_source_pcm_incrementally() {
             c"literal ${time}; $(not a command)"
         );
         assert_eq!((request.speed_percent, request.level_db), (100, -6));
+        let rate = if unsafe { CStr::from_ptr(request.model) } == c"invalid.onnx" {
+            0u32
+        } else {
+            22050u32
+        };
         unsafe {
-            *stream = ffi::rptadv_media_stream {
-                handle: Box::into_raw(Box::new(0usize)).cast(),
-                sample_rate_hz: if CStr::from_ptr(request.model) == c"invalid.onnx" {
-                    0
-                } else {
-                    22050
-                },
-            };
+            *stream = Box::into_raw(Box::new((rate, 0usize))).cast();
         }
         0
     }
@@ -55,24 +53,35 @@ fn finite_speech_stream_retains_context_and_returns_source_pcm_incrementally() {
         cancel: *const ffi::rptadv_media_cancellation,
         out: *mut f32,
         _: usize,
-        count: *mut usize,
+        event: *mut ffi::rptadv_media_step,
     ) -> i32 {
         let cancel = unsafe { &*cancel };
         if unsafe { cancel.is_cancelled.unwrap()(cancel.context) } != 0 {
             return -6;
         }
-        let position = unsafe { &mut *handle.cast::<usize>() };
-        unsafe {
-            *count = usize::from(*position == 0);
-            if *position == 0 {
-                *out = 0.25;
+        let (rate, position) = unsafe { &mut *handle.cast::<(u32, usize)>() };
+        let (kind, sample_rate_hz, samples) = match *position {
+            0 => (1, *rate, 0),
+            1 => {
+                unsafe {
+                    *out = 0.25;
+                }
+                (2, 0, 1)
             }
+            _ => (3, 0, 0),
+        };
+        unsafe {
+            *event = ffi::rptadv_media_step {
+                kind,
+                sample_rate_hz,
+                samples,
+            };
         }
         *position += 1;
         0
     }
     unsafe extern "C" fn close(handle: *mut c_void) {
-        drop(unsafe { Box::from_raw(handle.cast::<usize>()) });
+        drop(unsafe { Box::from_raw(handle.cast::<(u32, usize)>()) });
         CLOSED.fetch_add(1, Ordering::Relaxed);
     }
     unsafe extern "C" fn destroy(_: *mut c_void) {
@@ -83,21 +92,12 @@ fn finite_speech_stream_retains_context_and_returns_source_pcm_incrementally() {
     preparer.speech = Arc::new(Context {
         handle: NonNull::new(std::ptr::dangling_mut::<c_void>()).unwrap(),
         destroy,
-        read_stream: read,
+        step_stream: read,
         close_stream: close,
         open_file: None,
         open_speech: Some(open),
     });
     let token = Cancellation::default();
-    assert_eq!(
-        finite::read_stream(
-            &preparer.speech,
-            ptr::null_mut(),
-            &mut [],
-            &raw_cancellation(&token)
-        ),
-        Err(MediaError::InvalidRequest)
-    );
     assert!(matches!(
         preparer.open_speech_stream(&SpeechRequest {
             text: "literal ${time}; $(not a command)",
@@ -121,6 +121,10 @@ fn finite_speech_stream_retains_context_and_returns_source_pcm_incrementally() {
     assert_eq!(DESTROYED.load(Ordering::Relaxed), 0);
     assert_eq!(stream.sample_rate_hz(), 22050);
     let mut block = [0.0; 8];
+    assert_eq!(
+        stream.read(&mut [], &|| false),
+        Err(MediaError::InvalidRequest)
+    );
     assert_eq!(stream.read(&mut block, &|| false), Ok(1));
     assert_eq!(block[0], 0.25);
     assert_eq!(stream.read(&mut block, &|| false), Ok(0));
@@ -158,6 +162,37 @@ extern "C" fn ast_replace_sigchld() {
 #[unsafe(no_mangle)]
 extern "C" fn ast_unreplace_sigchld() {
     RELEASED.fetch_add(1, Ordering::Relaxed);
+}
+
+#[test]
+fn offline_media_resampling_preserves_peaks_without_clipping() {
+    let token = Cancellation::default();
+    let samples: Vec<_> = (0..4096)
+        .map(|i| if i % 16 < 8 { 0.9375 } else { -0.9375 })
+        .collect();
+    let quiet: Vec<_> = samples.iter().map(|sample| sample / 4.0).collect();
+    for rate in [22_050, 44_100] {
+        let actual = native(rate, &samples, &token).unwrap();
+        let reference = native(rate, &quiet, &token).unwrap();
+        let mut expected: Vec<_> = reference
+            .samples()
+            .iter()
+            .map(|sample| sample * 4.0)
+            .collect();
+        assert!(expected.iter().any(|sample| sample.abs() > 1.0));
+        let mut peak = rpt_advanced_core::audio::PeakGuard::new(48_000);
+        for block in expected.chunks_mut(960) {
+            peak.apply(block);
+        }
+        assert_eq!(actual.samples().len(), expected.len());
+        for (sample, expected) in actual.samples().iter().zip(expected) {
+            assert!(sample.abs() <= 1.0);
+            assert!(
+                (sample - expected).abs() < 1e-5,
+                "waveform changed at {rate} Hz"
+            );
+        }
+    }
 }
 
 #[test]
@@ -216,7 +251,7 @@ fn incompatible_media_tables_are_rejected_before_context_creation() {
     invalid[2].create = None;
     invalid[3].destroy = None;
     invalid[4].open_file = None;
-    invalid[5].read_stream = None;
+    invalid[5].step_stream = None;
     invalid[6].close_stream = None;
     invalid[7].struct_size = 8;
     for table in invalid {
@@ -231,7 +266,7 @@ fn incompatible_media_tables_are_rejected_before_context_creation() {
     invalid[2].create = None;
     invalid[3].destroy = None;
     invalid[4].open_speech = None;
-    invalid[5].read_stream = None;
+    invalid[5].step_stream = None;
     invalid[6].close_stream = None;
     invalid[7].struct_size = 8;
     for table in invalid {
@@ -497,9 +532,15 @@ fn malformed_and_failed_outputs_release_handles_once_and_keep_error_meaning() {
         _: *const ffi::rptadv_media_cancellation,
         _: *mut f32,
         _: usize,
-        count: *mut usize,
+        event: *mut ffi::rptadv_media_step,
     ) -> i32 {
-        unsafe { *count = 0 };
+        unsafe {
+            *event = ffi::rptadv_media_step {
+                kind: 3,
+                sample_rate_hz: 0,
+                samples: 0,
+            }
+        };
         0
     }
     unsafe extern "C" fn bad_count(
@@ -507,9 +548,15 @@ fn malformed_and_failed_outputs_release_handles_once_and_keep_error_meaning() {
         _: *const ffi::rptadv_media_cancellation,
         _: *mut f32,
         capacity: usize,
-        count: *mut usize,
+        event: *mut ffi::rptadv_media_step,
     ) -> i32 {
-        unsafe { *count = capacity + 1 };
+        unsafe {
+            *event = ffi::rptadv_media_step {
+                kind: 2,
+                sample_rate_hz: 0,
+                samples: capacity + 1,
+            }
+        };
         0
     }
     unsafe extern "C" fn failed_read(
@@ -517,19 +564,19 @@ fn malformed_and_failed_outputs_release_handles_once_and_keep_error_meaning() {
         _: *const ffi::rptadv_media_cancellation,
         _: *mut f32,
         _: usize,
-        _: *mut usize,
+        _: *mut ffi::rptadv_media_step,
     ) -> i32 {
         -4
     }
     unsafe extern "C" fn destroy(_: *mut c_void) {}
-    let context = Context {
+    let mut context = Arc::new(Context {
         handle: NonNull::new(std::ptr::dangling_mut::<c_void>()).unwrap(),
         destroy,
-        read_stream: eof,
+        step_stream: eof,
         close_stream: close,
         open_file: None,
         open_speech: None,
-    };
+    });
     let token = Cancellation::default();
     for (code, expected) in [
         (-1, MediaError::InvalidRequest),
@@ -545,8 +592,7 @@ fn malformed_and_failed_outputs_release_handles_once_and_keep_error_meaning() {
         assert_eq!(
             context.collect_stream(&token, |output| {
                 unsafe {
-                    (*output).handle = std::ptr::dangling_mut::<c_void>();
-                    (*output).sample_rate_hz = 48000;
+                    *output = std::ptr::dangling_mut::<c_void>();
                 }
                 code
             }),
@@ -561,7 +607,7 @@ fn malformed_and_failed_outputs_release_handles_once_and_keep_error_meaning() {
     assert_eq!(
         context.collect_stream(&token, |output| {
             unsafe {
-                (*output).handle = std::ptr::dangling_mut::<c_void>();
+                *output = std::ptr::dangling_mut::<c_void>();
             }
             0
         }),
@@ -571,22 +617,17 @@ fn malformed_and_failed_outputs_release_handles_once_and_keep_error_meaning() {
     assert_eq!(
         context.collect_stream(&token, |output| {
             unsafe {
-                (*output).handle = std::ptr::dangling_mut::<c_void>();
-                (*output).sample_rate_hz = 48000;
+                *output = std::ptr::dangling_mut::<c_void>();
             }
             0
         }),
         Err(MediaError::InvalidOutput)
     );
-    let bad_context = Context {
-        read_stream: bad_count,
-        ..context
-    };
+    Arc::get_mut(&mut context).unwrap().step_stream = bad_count;
     assert_eq!(
-        bad_context.collect_stream(&token, |output| {
+        context.collect_stream(&token, |output| {
             unsafe {
-                (*output).handle = std::ptr::dangling_mut::<c_void>();
-                (*output).sample_rate_hz = 48000;
+                *output = std::ptr::dangling_mut::<c_void>();
             }
             0
         }),
@@ -604,15 +645,11 @@ fn malformed_and_failed_outputs_release_handles_once_and_keep_error_meaning() {
         );
     }
     assert_eq!(RELEASES.load(Ordering::Relaxed), 12);
-    let failed_context = Context {
-        read_stream: failed_read,
-        ..bad_context
-    };
+    Arc::get_mut(&mut context).unwrap().step_stream = failed_read;
     assert_eq!(
-        failed_context.collect_stream(&token, |output| {
+        context.collect_stream(&token, |output| {
             unsafe {
-                (*output).handle = std::ptr::dangling_mut::<c_void>();
-                (*output).sample_rate_hz = 48000;
+                *output = std::ptr::dangling_mut::<c_void>();
             }
             0
         }),
@@ -669,4 +706,230 @@ fn descriptor_file_decode_uses_host_reaper_and_retains_no_temporary_files() {
     fs::remove_file(path).unwrap();
     assert_eq!(fs::read_dir(&directory).unwrap().count(), 0);
     fs::remove_dir(directory).unwrap();
+}
+
+// Exercises actual provider pipes using the repository's deterministic Piper executable.
+mod pending_provider {
+    use super::*;
+    use rpt_advanced_core::{
+        audio::{PcmRead, PcmStreamReader},
+        media::{MediaSource, SpeechSource, ToneSource},
+        runtime::NativeMediaPreparer as _,
+    };
+    use std::{
+        path::PathBuf,
+        process::Command,
+        sync::atomic::AtomicBool,
+        thread,
+        time::{Duration, Instant},
+    };
+
+    struct Scratch(PathBuf);
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn setup(
+        name: &str,
+        reaper: (unsafe extern "C" fn(), unsafe extern "C" fn()),
+    ) -> (Scratch, Box<dyn StationMediaSession>, PathBuf) {
+        let directory = std::env::temp_dir().join(format!("rptadv-{name}-{}", std::process::id()));
+        fs::create_dir(&directory).unwrap();
+        let scratch = Scratch(directory);
+        let program = scratch.0.join("piper-fixture");
+        let source =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../media-support/tests/fixtures/piper.rs");
+        assert!(
+            Command::new("rustc")
+                .arg("--edition=2024")
+                .arg(source)
+                .arg("-o")
+                .arg(&program)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let model = scratch.0.join("001.000000.onnx");
+        fs::write(&model, b"fixture model").unwrap();
+        fs::write(
+            model.with_extension("onnx.json"),
+            br#"{"audio":{"sample_rate":22050}}"#,
+        )
+        .unwrap();
+        // SAFETY: linked descriptors and both test callback functions live for the process.
+        let preparer = unsafe {
+            NativeMediaPreparer::from_descriptors(
+                rptadv_file_adapter_descriptor().cast(),
+                rptadv_speech_adapter_descriptor().cast(),
+                Path::new("unused-ffmpeg"),
+                &program,
+                15_000,
+                reaper,
+            )
+        }
+        .unwrap();
+        let mut station = preparer.station("1000", 1).unwrap();
+        station.start().unwrap();
+        (scratch, station, model)
+    }
+
+    fn speech(model: &Path, text: String) -> MediaSource {
+        MediaSource {
+            speech: Some(SpeechSource {
+                text,
+                model: model.to_owned(),
+                speed_percent: 100,
+                level_db: 0,
+            }),
+            ..MediaSource::default()
+        }
+    }
+
+    fn await_condition(timeout: Duration, mut condition: impl FnMut() -> bool) -> bool {
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            if condition() {
+                return true;
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+        false
+    }
+
+    fn begin_waiting(
+        station: &mut dyn StationMediaSession,
+        model: &Path,
+        path: &Path,
+    ) -> (Box<dyn PcmStreamReader>, u32) {
+        let mut first = station
+            .register_once(speech(model, format!("wait={}", path.display())))
+            .unwrap();
+        first.start();
+        let read_pid = || fs::read_to_string(path).ok()?.parse::<u32>().ok();
+        assert!(
+            await_condition(Duration::from_secs(3), || read_pid().is_some()),
+            "Piper fixture never confirmed consuming the request"
+        );
+        let pid = read_pid().unwrap();
+        assert!(Path::new("/proc").join(pid.to_string()).is_dir());
+        assert_eq!(first.render(&mut [0.0; 16]), PcmRead::Pending);
+        (first, pid)
+    }
+
+    fn hear(reader: &mut dyn PcmStreamReader, speech_pcm: bool) -> bool {
+        let mut out = [0.0; 16];
+        await_condition(Duration::from_secs(1), || match reader.render(&mut out) {
+            PcmRead::Samples(n) | PcmRead::FinalSamples(n) => out[..n].iter().any(|s| {
+                if speech_pcm {
+                    (*s - 0.03051758).abs() < 0.001
+                } else {
+                    s.abs() > 0.02
+                }
+            }),
+            PcmRead::Pending => false,
+            s => panic!("unexpected stream state before audibility: {s:?}"),
+        })
+    }
+
+    fn finish(reader: &mut dyn PcmStreamReader) -> bool {
+        let mut out = [0.0; 128];
+        await_condition(Duration::from_secs(3), || match reader.render(&mut out) {
+            PcmRead::Finished => true,
+            PcmRead::Failed => panic!("independent stream failed"),
+            _ => false,
+        })
+    }
+
+    #[test]
+    fn waiting_piper_stream_allows_an_independent_speech_stream_to_play() {
+        static ACQUIRES: AtomicUsize = AtomicUsize::new(0);
+        static RELEASES: AtomicUsize = AtomicUsize::new(0);
+        extern "C" fn acquire() {
+            ACQUIRES.fetch_add(1, Ordering::Relaxed);
+        }
+        extern "C" fn release() {
+            RELEASES.fetch_add(1, Ordering::Relaxed);
+        }
+
+        let (dir, mut station, model) = setup("pending-speech", (acquire, release));
+        let (mut first, pid) = begin_waiting(station.as_mut(), &model, &dir.0.join("waiting.pid"));
+        let mut second = station
+            .register_once(speech(&model, "Identifier; $(not a command)\n".into()))
+            .unwrap();
+        second.start();
+        let concurrent = hear(second.as_mut(), true);
+        first.cancel();
+        drop(first);
+        let valid = concurrent || hear(second.as_mut(), true);
+        let finished = finish(second.as_mut());
+        drop(second);
+        drop(station);
+        let reaped = !Path::new("/proc").join(pid.to_string()).exists();
+        let balanced =
+            ACQUIRES.load(Ordering::Relaxed) == 2 && RELEASES.load(Ordering::Relaxed) == 2;
+        assert!(
+            valid && finished && reaped && balanced,
+            "independent PCM and both owners must finish"
+        );
+        eprintln!(
+            "PENDING_SPEECH waiting_input=true concurrent_pcm={concurrent} second_valid=true first_reaped=true balanced=true"
+        );
+        assert!(
+            concurrent,
+            "waiting Piper output must not delay an independent speech stream"
+        );
+    }
+
+    #[test]
+    fn cancelled_piper_cleanup_allows_an_independent_station_prompt_to_play() {
+        static ENTERED: AtomicBool = AtomicBool::new(false);
+        static RESUME: AtomicBool = AtomicBool::new(false);
+        static BALANCED: AtomicBool = AtomicBool::new(false);
+        extern "C" fn acquire() {}
+        extern "C" fn release() {
+            ENTERED.store(true, Ordering::Release);
+            let _ = await_condition(Duration::from_secs(5), || RESUME.load(Ordering::Acquire));
+            BALANCED.store(true, Ordering::Release);
+        }
+
+        let (dir, mut station, model) = setup("pending-cleanup", (acquire, release));
+        let (mut first, pid) = begin_waiting(station.as_mut(), &model, &dir.0.join("waiting.pid"));
+        first.cancel();
+        drop(first);
+        assert!(
+            await_condition(Duration::from_secs(2), || ENTERED.load(Ordering::Acquire)),
+            "owned child release callback must enter"
+        );
+        let reaped = !Path::new("/proc").join(pid.to_string()).exists();
+        let mut second = station
+            .register_once(MediaSource {
+                tone: Some(ToneSource {
+                    sequence: "500/100".into(),
+                    level_db: -6,
+                }),
+                ..MediaSource::default()
+            })
+            .unwrap();
+        second.start();
+        let concurrent = hear(second.as_mut(), false) && !BALANCED.load(Ordering::Acquire);
+        RESUME.store(true, Ordering::Release);
+        let valid = concurrent || hear(second.as_mut(), false);
+        let finished = finish(second.as_mut());
+        drop(second);
+        drop(station);
+        assert!(
+            reaped && valid && finished && BALANCED.load(Ordering::Acquire),
+            "cancelled child and independent prompt must retire"
+        );
+        eprintln!(
+            "PENDING_CLEANUP first_reaped=true concurrent_pcm={concurrent} second_valid=true release_finished=true"
+        );
+        assert!(
+            concurrent,
+            "releasing a cancelled child must not delay an independent ready prompt"
+        );
+    }
 }

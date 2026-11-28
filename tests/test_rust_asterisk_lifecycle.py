@@ -2,15 +2,18 @@
 # SPDX-License-Identifier: GPL-2.0-only
 """Exercise the Rust metadata loader in one isolated, test-owned Asterisk PID."""
 
+import json
 import os
 import re
+import socket
 import subprocess
 import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from echolink_fixture import EchoProxy
+from asterisk_working_store import WorkingStore
+from echolink_fixture import EchoDirect
 
 
 def main() -> None:
@@ -38,8 +41,7 @@ def main() -> None:
         (root / "modules.conf").write_text(
             "[modules]\nautoload=no\nload=app_rpt_advanced.so\n", encoding="utf-8"
         )
-        node = root / "rpt_advanced.conf"
-        node.write_text("[1000]\nnode_enabled=no\n", encoding="utf-8")
+        store = WorkingStore(root)
         logfile = root / "console.log"
 
         def cli(command: str) -> str:
@@ -51,10 +53,25 @@ def main() -> None:
                 timeout=30,
             ).stdout
 
+        def wait_network_full(offset: int) -> None:
+            deadline = time.monotonic() + 5
+            marker = b"rpt_fixture ready RadioPlusAdvanced/network-full\n"
+            with logfile.open("rb") as log:
+                while True:
+                    log.seek(offset)
+                    if marker in log.read():
+                        return
+                    if time.monotonic() >= deadline:
+                        raise RuntimeError(
+                            "Rust radio did not deliver 30 hardware-paced frames"
+                        )
+                    time.sleep(0.02)
+
         with logfile.open("w", encoding="utf-8") as output:
             process = subprocess.Popen(
                 ["asterisk", "-f", "-C", str(config)],
                 stdin=subprocess.DEVNULL,
+                env=store.environment,
                 stdout=output,
                 stderr=subprocess.STDOUT,
             )
@@ -69,13 +86,17 @@ def main() -> None:
                         if "Running" in listing and "Not Running" not in listing:
                             break
                     time.sleep(0.1)
+                store.start()
+                store.station("1000", "network-echo")
                 assert "unknown node 1000" in cli("rpt_advanced link status 1000")
                 assert "unknown node 1000" in cli("rpt link status 1000")
-                node.write_text("[1000]\nradio_channel=missing\n", encoding="utf-8")
+                previously_disabled = store.disabled_revision("1000")
+                store.enabled("1000", reject=True)
                 cli("module reload app_rpt_advanced.so")
                 assert "Running" in cli("module show like app_rpt_advanced")
                 assert "unknown node 1000" in cli("rpt_advanced link status 1000")
-                node.write_text("[1000]\nnode_enabled=no\n", encoding="utf-8")
+                store.restore_disabled("1000", previously_disabled)
+                store.enabled("1000", False)
                 cli("module reload app_rpt_advanced.so")
                 for _ in range(2):
                     cli("module unload app_rpt_advanced.so")
@@ -86,50 +107,59 @@ def main() -> None:
                     assert "Running" in cli("module show like app_rpt_advanced")
                     assert process.pid == original_pid and process.poll() is None
                 cli("module load chan_rpt_fixture.so")
-                active = "[full]\nradio_channel=network-full\nfull_duplex=yes\n"
-                node.write_text(active, encoding="utf-8")
+                store.start()
+                store.station("full", "network-full")
+                full = store.identity("full")
+                store.enabled("full")
                 cli("module reload app_rpt_advanced.so")
-                deadline = time.monotonic() + 5
-                while (
-                    "rpt_fixture ready RadioPlusAdvanced/network-full"
-                    not in logfile.read_text(encoding="utf-8", errors="replace")
-                ):
-                    if time.monotonic() >= deadline:
-                        raise RuntimeError(
-                            "Rust radio did not deliver 30 hardware-paced frames"
-                        )
-                    time.sleep(0.02)
-                assert "full has no active links" in cli(
-                    "rpt_advanced link status full"
+                wait_network_full(0)
+                assert f"{full} has no active links" in cli(
+                    f"rpt_advanced link status {full}"
                 )
                 channels = cli("core show channels concise")
                 assert "RadioPlusAdvanced/network-full" in channels, channels
-                node.write_text(
-                    "[full]\nradio_channel=network-replacement\n"
-                    "[courtesy full receiver]\ninput=receiver\ntone_sequence=invalid\n",
-                    encoding="utf-8",
+                store.edit(
+                    "PUT",
+                    store.ports["full"] + "interface/",
+                    {"configuration": {"audio": {"device_identifier": "3-0"}}},
+                    reject=True,
                 )
                 cli("module reload app_rpt_advanced.so")
                 retained = cli("core show channels concise")
                 assert "RadioPlusAdvanced/network-full" in retained, retained
                 assert "RadioPlusAdvanced/network-replacement" not in retained, retained
-                assert "full has no active links" in cli("rpt link status full")
-                assert "invalid DTMF digit X" in cli("rpt_advanced command full *720X")
-                node.write_text(active, encoding="utf-8")
-                cli("module reload app_rpt_advanced.so")
-                with ThreadPoolExecutor(max_workers=4) as pool:
-                    requests = [
-                        pool.submit(cli, "rpt_advanced link status full")
-                        for _ in range(60)
-                    ]
-                    for _ in range(12):
-                        cli("module reload app_rpt_advanced.so")
-                    for request in requests:
-                        assert "rpt_advanced:" in request.result()
-                assert "RadioPlusAdvanced/network-full" in cli(
-                    "core show channels concise"
+                assert f"{full} has no active links" in cli(f"rpt link status {full}")
+                assert "invalid DTMF digit X" in cli(
+                    f"rpt_advanced command {full} *720X"
                 )
-                cli("module unload app_rpt_advanced.so")
+                store.profile(
+                    "full", "interface/", {"audio": {"device_identifier": "3-8"}}
+                )
+                cli("module reload app_rpt_advanced.so")
+                with store.status_stream(full) as subscriber:
+                    opcode, payload = subscriber.frame()
+                    initial = json.loads(payload)
+                    assert opcode == 1 and initial["type"] == "snapshot"
+                    assert initial["seq"] == "1"
+                    assert full in initial["data"]["status"]["ports"]
+                    with ThreadPoolExecutor(max_workers=4) as pool:
+                        requests = [
+                            pool.submit(cli, f"rpt_advanced link status {full}")
+                            for _ in range(60)
+                        ]
+                        for _ in range(12):
+                            cli("module reload app_rpt_advanced.so")
+                            subscriber.ping()
+                        for request in requests:
+                            assert "rpt_advanced:" in request.result()
+                    assert "RadioPlusAdvanced/network-full" in cli(
+                        "core show channels concise"
+                    )
+                    assert process.pid == original_pid and process.poll() is None
+                    cli("module unload app_rpt_advanced.so")
+                    subscriber.assert_drained()
+                assert "0 modules loaded" in cli("module show like app_rpt_advanced")
+                assert process.pid == original_pid and process.poll() is None
                 assert "RadioPlusAdvanced/" not in cli("core show channels concise")
                 records = re.findall(
                     r"rpt_fixture RadioPlusAdvanced/network-full ticks=(\d+) writes=(\d+) "
@@ -141,91 +171,130 @@ def main() -> None:
                 assert ticks >= writes >= 30 and nonzero > 0 and keys == unkeys, records
                 for _ in range(8):
                     cli("module load app_rpt_advanced.so")
-                    assert "full has no active links" in cli(
-                        "rpt_advanced link status full"
+                    store.start()
+                    assert f"{full} has no active links" in cli(
+                        f"rpt_advanced link status {full}"
                     )
                     cli("module unload app_rpt_advanced.so")
                     assert "RadioPlusAdvanced/" not in cli("core show channels concise")
-                with EchoProxy() as echo:
-                    (root / "echolink-secrets.conf").write_text(
-                        "[1000]\ndirectory_password=fixture-value\nproxy_password=fixture-proxy\n",
-                        encoding="utf-8",
+                store.ready_offset = logfile.stat().st_size
+                cli("module load app_rpt_advanced.so")
+                store.start()
+                wait_network_full(store.ready_offset)
+                store.enabled("full", False)
+                with EchoDirect() as echo:
+                    for _ in range(32):
+                        with (
+                            socket.socket(type=socket.SOCK_DGRAM) as a,
+                            socket.socket(type=socket.SOCK_DGRAM) as c,
+                        ):
+                            a.bind(("127.0.0.1", 0))
+                            port = a.getsockname()[1]
+                            if port == 65535:
+                                continue
+                            try:
+                                c.bind(("127.0.0.1", port + 1))
+                            except OSError:
+                                continue
+                            break
+                    else:
+                        raise RuntimeError("no adjacent local UDP pair")
+                    fields = {
+                        "enabled": True,
+                        "callsign": "K1ABC-R",
+                        "node_number": 654321,
+                        "name": "Before",
+                        "directory_servers": [echo.host],
+                        "transport": "direct",
+                        "audio_port": port,
+                        "bind_address": "127.0.0.1",
+                        "timing": {"directory_refresh_ms": 500},
+                        "credentials": {"password": "fixture-value"},
+                    }
+                    account = store.edit(
+                        "POST",
+                        store.ports["1000"] + "protocols/echolink/",
+                        {"configuration": fields},
                     )
-                    (root / "echolink-secrets.conf").chmod(0o600)
-                    echo_config = (
-                        "[1000]\nradio_channel=network-echo\nfull_duplex=yes\n"
-                        "[echolink 1000]\nenabled=yes\ncallsign=K1ABC-R\n"
-                        "node_number=654321\nname=Before\ntransport=proxy\n"
-                        "announcement=off\ntelemetry=off\n"
-                        "aprs_server=\n"
-                        f"proxy_host=127.0.0.1\nproxy_port={echo.port}\n"
-                        "directory_servers=127.0.0.1\n"
-                    )
-                    node.write_text(echo_config, encoding="utf-8")
-                    cli("module load app_rpt_advanced.so")
-                    login = echo.requests.get(timeout=5)
-                    assert login.startswith(b"lK1ABC-R\xac\xacfixture-value\rONLINE")
-                    assert echo.requests.get(timeout=5) == b"F0\r"
-                    deadline = time.monotonic() + 5
-                    while "fresh=1" not in cli("rpt_advanced link status 1000"):
-                        assert time.monotonic() < deadline, (
-                            "Echo directory was not published"
+                    store.enabled("1000")
+                    station = store.identity("1000")
+
+                    def status():
+                        return cli(f"rpt_advanced link status {station}")
+
+                    assert b"Before" in echo.requests.get(timeout=10)
+
+                    def wait(predicate):
+                        deadline = time.monotonic() + 10
+                        while not predicate():
+                            assert time.monotonic() < deadline
+                            time.sleep(0.03)
+
+                    wait(lambda: "fresh=1" in status())
+
+                    def attached():
+                        return re.search(
+                            r"(?m)^\s*3123456: \S+ .*rx-missing=", status()
                         )
-                        time.sleep(0.02)
-                    echo.send(6, echo.SDES)
-                    deadline = time.monotonic() + 5
-                    while "3123456" not in cli("rpt_advanced link status 1000"):
-                        assert time.monotonic() < deadline, cli(
-                            "rpt_advanced link status 1000"
-                        )
-                        time.sleep(0.02)
-                    for sequence in range(20):
-                        echo.voice(sequence)
-                        time.sleep(0.08)
-                    node.write_text(
-                        echo_config.replace("name=Before", "name=After"),
-                        encoding="utf-8",
-                    )
+
+                    def attach():
+                        echo.connect(port)
+                        return attached()
+
+                    sequence = 0
+
+                    def keyed_tone(hz):
+                        nonlocal sequence
+                        offset = logfile.stat().st_size
+                        marker = f"rpt_fixture echo keyed marker={hz} blocks=4".encode()
+                        deadline = time.monotonic() + 10
+                        with logfile.open("rb") as log:
+                            log.seek(offset)
+                            while time.monotonic() < deadline:
+                                echo.voice(port, sequence, hz)
+                                sequence += 1
+                                time.sleep(0.08)
+                                for line in log:
+                                    if marker in line:
+                                        return log.tell()
+                        raise AssertionError(f"missing keyed Echo {hz} Hz: {status()}")
+
+                    wait(attach)
+                    keyed_tone(950)
+                    keyed_tone(1450)
+                    fields.pop("credentials")
+                    fields["name"] = "After"
+                    store.edit("PUT", account, {"configuration": fields})
                     cli("module reload app_rpt_advanced.so")
-                    assert b"\rAfter\r" in echo.requests.get(timeout=5)
-                    echo.voice(20)
-                    deadline = time.monotonic() + 5
-                    while True:
-                        edges = re.findall(
-                            r"rpt_fixture echo ptt=(\d+) remote=(\d+)",
-                            logfile.read_text(encoding="utf-8", errors="replace"),
-                        )
-                        if edges and edges[-1][0] == "1":
-                            break
-                        assert time.monotonic() < deadline, edges
-                        time.sleep(0.02)
-                    echo.drop_transport()
-                    deadline = time.monotonic() + 5
-                    while True:
-                        edges = re.findall(
-                            r"rpt_fixture echo ptt=(\d+) remote=(\d+)",
-                            logfile.read_text(encoding="utf-8", errors="replace"),
-                        )
-                        status = cli("rpt_advanced link status 1000")
-                        if edges[-1][0] == "0" and "3123456" not in status:
-                            break
-                        assert time.monotonic() < deadline, (edges, status)
-                        time.sleep(0.02)
-                    assert int(edges[-1][1]) > 0, edges
-                    assert "available=0" in status and "cause=2" in status, status
+                    assert b"After" in echo.requests.get(timeout=10)
+                    wait(attach)
+                    after_key = keyed_tone(950)
+                    # Direct UDP has no proxy TCP EOF. Withdraw the exact account,
+                    # preserving the station owner, and observe the real link and PTT retire.
+                    store.edit("DELETE", account)
+
+                    def released():
+                        with logfile.open("rb") as log:
+                            log.seek(after_key)
+                            edges = re.findall(
+                                rb"rpt_fixture echo ptt=(\d+) remote=", log.read()
+                            )
+                        return edges and edges[-1] == b"0" and not attached()
+
+                    wait(released)
                     assert "Running" in cli("module show like app_rpt_advanced")
                     cli("module unload app_rpt_advanced.so")
                     assert process.pid == original_pid and process.poll() is None
                     assert "RadioPlusAdvanced/" not in cli("core show channels concise")
-                    echo_records = re.findall(
-                        r"rpt_fixture RadioPlusAdvanced/network-echo ticks=(\d+) writes=(\d+) "
-                        r"nonzero=(\d+) early=(\d+) keys=(\d+) unkeys=(\d+)",
+                    records = re.findall(
+                        r"rpt_fixture RadioPlusAdvanced/network-echo ticks=(\d+) writes=(\d+) nonzero=(\d+) early=(\d+) keys=(\d+) unkeys=(\d+)",
                         logfile.read_text(encoding="utf-8", errors="replace"),
                     )
-                    assert len(echo_records) == 1, echo_records
                     assert (
-                        int(echo_records[0][2]) > 0 and int(echo_records[0][4]) > 0
-                    ), echo_records
+                        len(records) == 1
+                        and int(records[0][2]) > 0
+                        and int(records[0][4]) > 0
+                    ), records
                 cli("module unload chan_rpt_fixture.so")
                 print(f"Rust module same-PID lifecycle passed: pid={original_pid}")
             except BaseException:

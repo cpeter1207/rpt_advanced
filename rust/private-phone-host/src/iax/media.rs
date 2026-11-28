@@ -1,0 +1,286 @@
+impl Phone {
+    /// No new owner or media operation may revive a terminal private call.
+    pub(super) fn live(&self) -> bool {
+        !self.closed
+    }
+
+    /// PCM preparation requires a completed serial retirement, never a guessed token.
+    pub(super) fn encoding_ready(&self) -> bool {
+        self.live() && self.egress_epoch.is_some()
+    }
+
+    fn close(&mut self) {
+        self.closed = true;
+        self.pending = None;
+        self.egress_epoch = None;
+    }
+
+    /// Reuse the host encoder reset as the exact private local-retirement boundary.
+    pub(super) fn retire_egress(&mut self, peer: &mut IaxPeer) -> Result<(), IaxError> {
+        self.egress_epoch = None;
+        if self.closed {
+            return Err(IaxError::Operation);
+        }
+        match peer.retire_private_egress() {
+            Ok(epoch) => {
+                self.egress_epoch = Some(epoch);
+                Ok(())
+            }
+            Err(error) => {
+                self.close();
+                Err(error)
+            }
+        }
+    }
+
+    /// The product keeps packet age; this host alone retains the provider TX token.
+    pub(super) fn send_prepared(
+        &mut self,
+        peer: &mut IaxPeer,
+        bytes: &[u8],
+        frames: u32,
+        timestamp: u32,
+        deadline: u32,
+    ) -> Result<i32, IaxError> {
+        let Some(epoch) = self.egress_epoch.filter(|_| self.live()) else {
+            return Err(IaxError::Operation);
+        };
+        let result = peer.send_private_prepared(bytes, frames, timestamp, epoch, deadline);
+        if result.is_err() {
+            self.close();
+        }
+        result
+    }
+
+    /// One source turn on the existing exclusive peer owner. A retained/refused
+    /// item is offered before polling another source item. Released ABI2 service
+    /// keeps ACK/retry progress bounded while leaving held PCM/digits untouched.
+    /// Protocol retirement fences old PCM without discarding private control.
+    pub(super) unsafe fn read(
+        &mut self,
+        peer: &mut IaxPeer,
+        samples: &mut [f32],
+        completion: u32,
+        sink: *const abi::rptadv_peer_source_sink_v1,
+        output: &mut abi::rptadv_peer_source_result_v1,
+    ) -> Result<(), IaxError> {
+        output.progress = 0;
+        output.activity = 0;
+        output.finish_pending = 0;
+        output.state = if self.closed { 3 } else { 1 };
+        output.represented_node_number = 0;
+        if self.closed {
+            return Ok(());
+        }
+        let result = unsafe { self.read_open(peer, samples, completion, sink, output) };
+        if result.is_err() {
+            // Every terminal source failure retires this owner before a later
+            // state query or provider access. Never revive a failed call.
+            self.close();
+            output.state = 3;
+        }
+        result
+    }
+
+    /// Advance only a live source; the outer boundary latches every terminal error.
+    unsafe fn read_open(
+        &mut self,
+        peer: &mut IaxPeer,
+        samples: &mut [f32],
+        completion: u32,
+        sink: *const abi::rptadv_peer_source_sink_v1,
+        output: &mut abi::rptadv_peer_source_result_v1,
+    ) -> Result<(), IaxError> {
+        if completion != 0 {
+            #[cfg(test)]
+            eprintln!("IAX source diagnostic completion");
+            return Err(IaxError::Operation);
+        }
+        if sink.is_null() {
+            return Ok(());
+        }
+        let size = unsafe { ptr::addr_of!((*sink).struct_size).read() } as usize;
+        if size < DIGIT_TAIL_SIZE {
+            #[cfg(test)]
+            eprintln!("IAX source diagnostic sink-size");
+            return Err(IaxError::Operation);
+        }
+        // Never form an enlarged Rust reference over the old allocation.
+        let mut copied: abi::rptadv_peer_source_sink_v1 = unsafe { std::mem::zeroed() };
+        let readable = if size >= ADAPTATION_TAIL_SIZE {
+            ADAPTATION_TAIL_SIZE
+        } else {
+            DIGIT_TAIL_SIZE
+        };
+        unsafe {
+            ptr::copy_nonoverlapping(
+                sink.cast::<u8>(),
+                ptr::from_mut(&mut copied).cast::<u8>(),
+                readable,
+            )
+        };
+        let sink = &copied;
+        if sink.abi_version != 1 {
+            #[cfg(test)]
+            eprintln!("IAX source diagnostic sink-abi");
+            return Err(IaxError::Operation);
+        }
+        if sink.host_clock_epoch == 0
+            || sink.audio_timed.is_none()
+            || sink.gap.is_none()
+            || sink.digit.is_none()
+            || sink.source_discontinuity.is_none()
+            || self
+                .host_epoch
+                .is_some_and(|epoch| epoch != sink.host_clock_epoch)
+        {
+            #[cfg(test)]
+            eprintln!("IAX source diagnostic sink-epoch-or-capability");
+            return Err(IaxError::Operation);
+        }
+        self.host_epoch = Some(sink.host_clock_epoch);
+        let event = if self.pending.is_some() {
+            peer.service_source(
+                sink.host_clock_epoch,
+                sink.reference_now_ns,
+                self.acknowledged,
+            )?
+        } else {
+            peer.poll_source(
+                samples,
+                sink.host_clock_epoch,
+                sink.reference_now_ns,
+                self.acknowledged,
+            )?
+        };
+        if (event.discontinuity && event.media_epoch <= self.acknowledged)
+            || (!event.discontinuity && event.media_epoch != self.acknowledged)
+        {
+            #[cfg(test)]
+            eprintln!("IAX source diagnostic epoch-handoff");
+            return Err(IaxError::Operation);
+        }
+        if self.pending.is_none() {
+            if matches!(event.kind, Kind::None) && !event.discontinuity {
+                return Ok(());
+            }
+            self.pending = Some(event);
+            self.offset = 0;
+        } else if event.discontinuity {
+            // Media retirement may supersede refused PCM/gaps, never a private
+            // control symbol that the downstream owner has not accepted.
+            let pending = self.pending.as_mut().unwrap();
+            if matches!(pending.kind, Kind::Digit(_)) {
+                pending.media_epoch = event.media_epoch;
+                pending.discontinuity = true;
+            } else {
+                *pending = event;
+                self.offset = 0;
+            }
+        }
+        let event = self.pending.as_mut().unwrap();
+        if event.discontinuity {
+            match unsafe { sink.source_discontinuity.unwrap()(sink.context) } {
+                0 => {
+                    self.acknowledged = event.media_epoch;
+                    event.discontinuity = false;
+                }
+                1 => {
+                    output.progress = 2;
+                    return Ok(());
+                }
+                _ => {
+                    #[cfg(test)]
+                    eprintln!("IAX source diagnostic sink-discontinuity");
+                    return Err(IaxError::Operation);
+                }
+            }
+        }
+        let accepted = match event.kind {
+            Kind::Audio(count) if event.born_ns.is_some() => {
+                let birth = abi::rptadv_source_birth_v1 {
+                    struct_size: size_of::<abi::rptadv_source_birth_v1>() as u32,
+                    abi_version: 1,
+                    host_clock_epoch: sink.host_clock_epoch,
+                    born_ns: event.born_ns.unwrap(),
+                };
+                if birth.born_ns > sink.reference_now_ns {
+                    #[cfg(test)]
+                    eprintln!("IAX source diagnostic sink-future-birth");
+                    return Err(IaxError::Operation);
+                }
+                let remaining = count - self.offset;
+                let accepted = unsafe {
+                    sink.audio_timed.unwrap()(
+                        sink.context,
+                        event.source_start + self.offset as u64,
+                        samples[self.offset..count].as_ptr(),
+                        remaining,
+                        0,
+                        &birth,
+                    )
+                };
+                if accepted > remaining {
+                    #[cfg(test)]
+                    eprintln!("IAX source diagnostic sink-credit");
+                    return Err(IaxError::Operation);
+                }
+                self.offset += accepted;
+                self.offset == count
+            }
+            Kind::Audio(count) => {
+                // Absent birth does not identify real media versus native PLC.
+                // Discard unavailable usable audio as exact counted source loss,
+                // never send ambiguous PCM to analysis or invent a concealment flag.
+                unsafe { self.offer_gap(sink, count as u32)? }
+            }
+            Kind::Gap(count) => unsafe { self.offer_gap(sink, count)? },
+            Kind::Digit(symbol) => {
+                match unsafe { sink.digit.unwrap()(sink.context, symbol as u32) } {
+                    0 => true,
+                    1 => false,
+                    _ => {
+                    #[cfg(test)]
+                    eprintln!("IAX source diagnostic sink-digit");
+                    return Err(IaxError::Operation);
+                }
+                }
+            }
+            Kind::Hangup => {
+                self.closed = true;
+                output.state = 3;
+                true
+            }
+            Kind::None | Kind::Ignored => true,
+        };
+        output.progress = if accepted { 1 } else { 2 };
+        if accepted {
+            self.pending = None;
+        }
+        Ok(())
+    }
+
+    /// Credit only an exact accepted prefix; a refused gap retains its coordinates.
+    unsafe fn offer_gap(
+        &mut self,
+        sink: &abi::rptadv_peer_source_sink_v1,
+        count: u32,
+    ) -> Result<bool, IaxError> {
+        let event = self.pending.as_ref().unwrap();
+        let remaining = count - self.offset as u32;
+        let accepted = unsafe {
+            sink.gap.unwrap()(
+                sink.context,
+                event.source_start + self.offset as u64,
+                remaining,
+            )
+        };
+        if accepted > remaining {
+            #[cfg(test)]
+            eprintln!("IAX source diagnostic sink-credit");
+            return Err(IaxError::Operation);
+        }
+        self.offset += accepted as usize;
+        Ok(self.offset == count as usize)
+    }
+}

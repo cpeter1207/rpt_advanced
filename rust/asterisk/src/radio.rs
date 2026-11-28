@@ -26,6 +26,10 @@ impl Drop for Frame {
 }
 
 impl Radio {
+    pub(crate) fn owner(&self) -> *mut std::ffi::c_void {
+        self.connection.channel.pointer.as_ptr().cast()
+    }
+
     /// Query resolved receive policy before call(), rejecting unknown-option success.
     pub(crate) fn receive_policy(&mut self, command: &mut ffi::UrpAstChannelCommand) -> i32 {
         command.value = -1;
@@ -118,6 +122,35 @@ impl Radio {
             Ok(())
         } else {
             Err(Error::Call)
+        }
+    }
+
+    /// Bind optional physical feedback on the reserved channel before call().
+    ///
+    /// # Safety
+    /// A provider accepting the operation retains callback/context through synchronous hangup.
+    pub(crate) unsafe fn attach_feedback(&mut self, port: ffi::UrpRadioFeedbackPort) -> i32 {
+        let mut binding = ffi::UrpAstFeedbackBinding {
+            struct_size: std::mem::size_of::<ffi::UrpAstFeedbackBinding>() as u32,
+            abi_version: ffi::URP_AST_FEEDBACK_OPTION_ABI_VERSION,
+            port,
+            accepted_abi_version: 0,
+            reserved: 0,
+        };
+        // SAFETY: owned channel and writable option are retained over this synchronous call.
+        let status = unsafe {
+            ffi::ast_channel_setoption(
+                self.connection.channel.pointer.as_ptr(),
+                ffi::URP_AST_OPTION_RADIO_FEEDBACK as i32,
+                std::ptr::from_mut(&mut binding).cast(),
+                std::mem::size_of_val(&binding) as i32,
+                0,
+            )
+        };
+        if status == 0 && binding.accepted_abi_version != ffi::URP_AST_FEEDBACK_OPTION_ABI_VERSION {
+            -7
+        } else {
+            status
         }
     }
 
@@ -220,8 +253,9 @@ impl Radio {
                 }
                 let keyed = render(self.receiving, pcm);
                 channel.indicate(keyed)?;
+                let gain = pcm::peak_gain(pcm);
                 for (index, sample) in pcm.iter().enumerate() {
-                    data.add(index).write_unaligned(pcm::encode(*sample));
+                    data.add(index).write_unaligned(pcm::encode(*sample * gain));
                 }
                 if ffi::ast_write(channel.pointer.as_ptr(), frame.0.as_ptr()) != 0 {
                     return Err(Error::Write);

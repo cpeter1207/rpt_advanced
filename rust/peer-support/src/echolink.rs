@@ -9,7 +9,10 @@ pub struct ApiError;
 
 /// Copied immutable operations; the host retains the provider DSO through final detach.
 #[derive(Clone, Copy)]
-pub struct Api(abi::Descriptor);
+pub struct Api(abi::Descriptor, Option<timing::Operations>);
+
+mod timing;
+pub use timing::{Exchange, JitterTiming};
 
 impl Api {
     /// Validate every advertised operation before invoking any provider function.
@@ -105,7 +108,7 @@ impl Api {
         {
             return Err(ApiError);
         }
-        Ok(Self(table))
+        Ok(Self(table, unsafe { timing::Operations::open(pointer) }?))
     }
 
     /// True only when the provider advertises a complete network operation group.

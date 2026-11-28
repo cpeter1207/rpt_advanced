@@ -4,6 +4,111 @@ This directory is the maintained architecture source for rpt_advanced. Read it
 before designing a feature or structural change. Update it, the applicable ADR,
 and the affected configuration and test documentation in the same change.
 
+## Modular JSON/REST implementation
+
+[ADR 0045](decisions/0045-modular-json-and-hal-management.md) records the approved
+JSON-only controller store and mTLS loopback HAL API. Implementation follows the
+[updated checklist](../../docs/superpowers/plans/2026-11-19-json-rest-implementation-checklist.md).
+The initial resource-model slice is control-plane only. The pure internal
+`rptadv-json` decoder is shared by configuration and existing wire consumers to
+preserve JSON types; the deployed INI path
+described below is removed at the coordinated store/provider cutover.
+USBRadioPlus retains its own public INI loader. Unknown JSON keys and unusable
+setting values warn and fall back through inheritance/defaults.
+
+The core model now adds UUID-backed resource identities and explicit
+scope/kind ownership to in-memory candidates. Typed metadata is resolved
+separately from opaque unvalidated section bodies. Site defaults apply to all
+ordinary sections; protocol presence is established only by port documents.
+Protocol profile resolution now produces owned sparse public and typed effective
+AllStarLink, EchoLink and phone-patch settings independently. Shared jitter
+retains per-field source candidates for later provider-capability fallback.
+Checked account projections carry stable configured identity only; encrypted
+payload adoption and actual runtime preparation are subsequent boundaries.
+The separate peer-audio binding does not require an AllStarLink instance.
+
+The pure management patch stage uses RFC 6901 pointers and RFC 6902 operations
+on one disposable sparse authoring view. Exact decimal comparisons preserve
+numeric test semantics. A shared borrowed JSON traversal rejects duplicates
+without owning credential scalar values; neutral write-only slots and opaque
+zeroizing explicit edits avoid exposing hidden-record presence. Route policy,
+final resource validation and persistence remain coordinator responsibilities.
+
+The host layer, `rptadv_peer_support::working_files`, captures an explicit
+registered path selection under the preprovisioned `edit.lock`. Protected,
+no-follow descriptor access and caller-supplied limits produce owned bytes plus
+a content fingerprint for guarded rechecks. The product adapter maps UUID/kind
+bindings to fixed paths and assembles the candidate from those exact bytes.
+This is not discovery of new resources or a complete working-tree reload.
+The host storage unit installs immutable public object/manifest bytes
+under the same edit guard. Typed targets, exclusive private staging, file sync,
+no-replace rename and parent sync protect existing artifacts. Equal retries
+verify bytes and confirm durability; a post-rename sync failure remains an
+explicit uncertain outcome. Protected parent directories are preprovisioned.
+Installing an artifact does not accept a configuration. The full working catalog now has
+a separate bounded discovery/import path. Product's accepted-state transaction
+checks the complete inventory, installs verified objects and journal, and
+compares and replaces the desired-state pointer. Reconciliation verifies each
+working change and the final inventory. Late owner-bookkeeping failures retain
+the observed outcome and inhibit further saves until a successful explicit
+bookkeeping retry. Domain preparation and runtime adoption remain separate.
+
+The public-manifest layer stores only IDs, exact key bindings and immutable
+object references/hashes. The product loader takes an explicit trusted manifest
+selection, reads through the guarded host boundary and owns its verified bytes.
+It assembles the existing borrowed candidate on demand. Format/ownership/hash
+validation is separate from complete domain profiles and state selection.
+
+The host private-record layer uses XChaCha20-Poly1305 with explicit format,
+purpose, store/record/version and key-ID authentication. Each seal creates an
+independent object-version UUID and nonce. Opaque zeroizing owners protect key
+and plaintext buffers. An env-only systemd loader reads exactly 32 raw bytes
+through pinned no-follow descriptors and accepts the real credential ACL mask.
+The typed private-artifact bridge prepares ciphertext once, then reuses
+the shared no-replace/durability machinery under private UUID paths. Readback
+verifies exact ciphertext bytes, decodes, loads the delivered key and authenticates
+before returning zeroizing plaintext. Raw-byte callers cannot construct private
+targets. This does not yet implement the account payload schema or private state
+graph.
+
+Local protected-store maintenance is owned by
+`rust/product/src/configuration_transaction/maintenance.rs`, with the existing
+private graph and sealed-record owners. The same edit guard protects consistent
+read-only backups; destructive work also proves an exclusive same-directory
+writer lifetime. A separate optional product descriptor serves the dynamically
+linked executable client. State retains explicit bounded recovery manifests at
+its existing commit point, and normal transactions preserve those roots.
+Maintenance never copies delivered key material or marks a runtime active.
+
+## Controller status publication
+
+The [status-stream design](../../docs/superpowers/specs/2026-11-25-controller-status-stream-design.md)
+extends the management surface in [ADR 0045](decisions/0045-modular-json-and-hal-management.md).
+Product projects public observations into a shared capture for HAL GET and
+WebSocket subscription. One publication boundary orders snapshot cuts, state
+edges and graph retirement. Bounded callback handoffs deliver source events and
+completed measurements. Capture preparation, serialization, authentication,
+resource sampling and network I/O run outside radio callbacks.
+
+REST retains bounded reader-bound pages from a single cut. WebSocket frames
+prioritize state changes over replaceable meter updates and require a fresh
+snapshot if state delivery is lost. Each subscriber owns bounded delivery
+storage. Established subscriptions have no fixed subscriber count. The
+separate CLI follows HAL links to fetch a snapshot. Provider-owned stages without an observation interface remain
+explicitly unavailable. See the
+[implementation checklist](../../docs/superpowers/plans/2026-11-26-controller-status-stream-implementation.md)
+for provider and qualification work.
+
+## Shared connection admission
+
+[ADR 0046](decisions/0046-connection-admission-and-webrtc.md) extends the
+existing station link boundary. Providers own their transport, codec and
+source timing. Product acknowledges a usable station endpoint, applies mix-minus
+and the ordinary policy, and fences it with the current owner. WebRTC uses the
+existing HTTPS ingress for signaling and its own protected media and data
+channels. Status clients can correlate an egress measurement with a track
+using the exact shared RTP and sample anchor.
+
 ## System boundary
 
 [ADR 0044](decisions/0044-phone-peers-and-rf-presentation-pacing.md) records the
@@ -181,10 +286,10 @@ Rust's private ABI.
 | `librptadv_portaudio_alsa_adapter.so.2` | Native 48 kHz PortAudio audio callbacks over ALSA |
 | `librptadv_gpio_adapter.so.1` | CM119 HID signaling and GPIO I/O |
 | `librptadviax2.so.1` | Asterisk-independent IAX2 packet protocol used by the standalone network client |
-| `librptadv_asterisk_adapter.so.1` | Public Asterisk application/CLI, channel, codec, directory I/O, and frame services |
+| `librptadv_asterisk_adapter.so.2` | Public Asterisk application/CLI, channel, codec, directory I/O, and frame services |
 | `librptadv_control_asterisk_adapter.so.1` | Replaceable serialized control executor backed by Asterisk's taskprocessor |
-| `librptadv_file_adapter.so.1` | Offline local-file decoding through FFmpeg |
-| `librptadv_speech_adapter.so.1` | Offline Piper synthesis, direct WAV reading, and speech-only level adjustment |
+| `librptadv_file_adapter.so.2` | Offline local-file decoding through FFmpeg |
+| `librptadv_speech_adapter.so.2` | Offline Piper synthesis and speech-only level adjustment |
 | `librptadv_resolver_adapter.so.1` | Standalone system DNS/SRV resolution; no directory policy or Asterisk dependency |
 | `librptadv_gpiod_adapter.so.1` | Optional site digital lines through libgpiod; serialized non-audio ownership, no software PWM |
 
@@ -497,7 +602,10 @@ defines the full reload, hardware-handoff, and failure policy.
   them; disconnected retries remain `C`. This is reporting-only and does not
   change media routing. A winner change is atomically committed only while
   local and linked inputs are idle; transmitter PTT alone does not block it. Only initial
-  selection and total group unavailability are announced; retries, standby
+  selection and total group unavailability are announced automatically. A resumed
+  member's pending dial does not establish an outage. Queued outage speech is
+  cancelled when a member connects or the group is withdrawn. An operator
+  pause announces each connected member it disconnects. Retries, standby
   changes, and subsequent winner handoffs are silent. Scheduled warnings use
   the expected start/end or inactivity deadline, skip active input, and remain
   serialized with other telemetry. The same peer may appear in multiple

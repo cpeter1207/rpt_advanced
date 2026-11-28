@@ -21,7 +21,7 @@ unsafe extern "C" fn malformed_timed_sample(
 ) -> i32 {
     // SAFETY: the consumer supplies complete writable stack records.
     let (sample, timing) = unsafe { (&mut *sample, &mut *timing) };
-    *sample = 0.75;
+    *sample = 0.75 / RING_HEADROOM;
     match TIMED_RESULT_MODE.get() {
         0 => return -3,
         1 => timing.struct_size = 8,
@@ -268,7 +268,7 @@ fn timed_consumer_does_not_consume_an_untimed_prefix_or_relabel_untagged_pcm() {
         assert!(!consumer.timing_available());
         assert_eq!(consumer.render_timed_sample(), Err(RingError));
         assert_eq!(consumer.observe().unwrap().available_samples, before);
-        let mut processed = crate::services::ProcessedPeer::new(consumer, None);
+        let mut processed = crate::services::ProcessedPeer::new(consumer);
         assert!(!processed.source_timing_available());
         assert_eq!(PeerInput::render_timed_sample(&mut processed), None);
         assert_eq!(processed.available(), before);
@@ -536,7 +536,7 @@ fn phone_policy_survives_processing_into_the_common_link_audio_gate() {
     let peer = AudioPeer::new(
         "200",
         Mode::TRANSCEIVE,
-        ProcessedPeer::new(consumer, None),
+        ProcessedPeer::new(consumer),
         outbound,
         960,
         0,
@@ -568,6 +568,85 @@ fn phone_policy_survives_processing_into_the_common_link_audio_gate() {
         "phone reserve must not wait for ordinary 260ms priming"
     );
     assert!(output.iter().any(|sample| sample.abs() > 0.1));
+}
+
+#[test]
+fn private_phone_audio_needs_its_live_call_and_keeps_public_link_identity_private() {
+    use crate::services::ProcessedPeer;
+    use rpt_advanced_core::{
+        audio::LinkAudioQueue,
+        controller::{ControllerSettings, CourtesySettings, NodeController},
+        link::{
+            AudioPeer, LinkAudio, Mode, PeerSignals, PhoneAccountId, PhoneCallId, PhoneSource,
+            SourcePosition,
+        },
+    };
+
+    let source = PhoneSource::new(
+        PhoneAccountId::new("private-account").unwrap(),
+        1,
+        PhoneCallId::new([4; 16]).unwrap(),
+        2,
+        3,
+    )
+    .unwrap();
+    let call = PeerSignals::for_phone(source.clone());
+    let reply = call.reply_target();
+    let prepare = || {
+        let (inbound, input) = InboundRing::redirected(8000, InboundPolicy::Phone, &reply).unwrap();
+        let (output, _) = LinkAudioQueue::new(960, 64).unwrap().into_endpoints();
+        let slot = AudioPeer::for_phone(
+            &source,
+            &reply,
+            Mode::TRANSCEIVE,
+            ProcessedPeer::new(input),
+            output,
+            960,
+        );
+        (inbound, slot)
+    };
+    assert!(
+        prepare().1.is_err(),
+        "an authenticated provider call still needs mailbox admission"
+    );
+    assert!(call.authenticate_phone());
+    let (mut input, slot) = prepare();
+    input.signals().set_radio_keyed(true);
+    let (mut graph, _dispatcher) = LinkAudio::new(vec![slot.unwrap()], 960).unwrap();
+    let (mut node, _control) = NodeController::new(
+        ControllerSettings {
+            hang_ms: 0,
+            ..ControllerSettings::default()
+        },
+        vec![],
+        vec![],
+        CourtesySettings::default(),
+    )
+    .unwrap();
+    for _ in 0..8 {
+        assert_eq!(input.write(&[0.25; 160]), Ok(160));
+    }
+    let mut rf = [0.0; 960];
+    assert!(
+        graph
+            .process(&mut node, false, &mut rf, SourcePosition::default())
+            .unwrap()
+    );
+    assert!(rf.iter().any(|sample| sample.abs() > 0.1));
+    assert_eq!(graph.status().last_keyed(), None);
+    reply.retire();
+    rf.fill(0.0);
+    assert!(
+        !graph
+            .process(&mut node, false, &mut rf, SourcePosition::default())
+            .unwrap()
+    );
+    assert_eq!(
+        rf, [0.0; 960],
+        "revocation fences speech still primed in the native ring"
+    );
+    assert_eq!(graph.active_count(), 0);
+    assert_eq!(graph.status().last_keyed(), None);
 }
 
 #[test]
@@ -893,7 +972,7 @@ unsafe extern "C" fn sample_then_fail_render(
 ) -> i32 {
     if SAMPLE_THEN_FAIL.fetch_add(1, std::sync::atomic::Ordering::Relaxed) == 0 {
         unsafe {
-            *sample = 0.25;
+            *sample = 0.25 / RING_HEADROOM;
             *real = true;
         }
         0
@@ -1192,12 +1271,15 @@ pub(crate) fn failed_output_delay_endpoints() -> (InboundProducer, InboundConsum
     }
 }
 
-pub(crate) fn failed_media_push_endpoints() -> (InboundProducer, InboundConsumer) {
+pub(crate) fn failed_regeneration_push_endpoints() -> (RegenerationWriter, InboundConsumer) {
     // SAFETY: the copied descriptor retains its released create/destroy pair for this test.
     unsafe {
         let mut api = *ffi::rpcr3_descriptor();
-        api.ring_producer_push = Some(failed_push);
-        InboundRing::from_descriptor(48000, InboundPolicy::Media, Box::leak(Box::new(api))).unwrap()
+        api.ring_producer_push_tagged = Some(rejected_tagged);
+        let endpoints =
+            InboundRing::from_descriptor(48000, InboundPolicy::Media, Box::leak(Box::new(api)))
+                .unwrap();
+        InboundRing::prepare_regeneration(endpoints).unwrap()
     }
 }
 
@@ -1293,7 +1375,7 @@ fn peer_input_single_sample_maps_real_pcm_and_provider_error() {
         real: *mut bool,
     ) -> i32 {
         unsafe {
-            *sample = 0.25;
+            *sample = 0.25 / RING_HEADROOM;
             *real = true;
         }
         0
@@ -1327,4 +1409,291 @@ pub(crate) unsafe fn local_with_descriptor(
         )
     }
     .unwrap()
+}
+
+#[test]
+fn round2_untimed_sdk_preserves_ordinary_playback_but_refuses_mute_capable_ingress() {
+    unsafe {
+        let mut api = *ffi::rpcr3_descriptor();
+        api.struct_size =
+            std::mem::offset_of!(ffi::rpcr3_descriptor, ring_consumer_render_sample_timed) as u32;
+        let table = Box::leak(Box::new(api));
+        let (mut producer, mut reader) =
+            InboundRing::from_descriptor(8000, InboundPolicy::Echo, table).unwrap();
+        assert_eq!(producer.write(&[0.4; 640]), Ok(640));
+        producer.finish().unwrap();
+        assert!(reader.render(&mut [0.; 960]).unwrap() > 0);
+        for policy in [
+            InboundPolicy::Peer,
+            InboundPolicy::Echo,
+            InboundPolicy::Phone,
+            InboundPolicy::Local {
+                squelch_delay_ms: 0,
+            },
+        ] {
+            assert!(
+                InboundRing::receiver_from_descriptor(8000, policy, table, PeerSignals::new())
+                    .is_err()
+            );
+        }
+    }
+}
+
+#[test]
+fn direct_peer_ring_meter_follows_the_native_mixer_sample_clock() {
+    use crate::services::ProcessedPeer;
+    use rpt_advanced_core::{
+        audio::LinkAudioQueue,
+        controller::{ControllerSettings, CourtesySettings, NodeController},
+        link::{AudioPeer, LinkAudio, Mode, SourcePosition},
+    };
+
+    let (mut producer, consumer) = InboundRing::open(8_000, InboundPolicy::Echo).unwrap();
+    let observer = producer.observer();
+    let input = ProcessedPeer::new(consumer).with_native_ingress();
+    let (outbound, _) = LinkAudioQueue::new(960, 64).unwrap().into_endpoints();
+    let peer = AudioPeer::new("200", Mode::TRANSCEIVE, input, outbound, 960, 0).unwrap();
+    let (mut links, _) = LinkAudio::new(vec![peer], 960).unwrap();
+    let (mut controller, _) = NodeController::new(
+        ControllerSettings::default(),
+        vec![],
+        vec![],
+        CourtesySettings::default(),
+    )
+    .unwrap();
+
+    assert_eq!(producer.write(&[0.25; 1_280]), Ok(1_280));
+    producer.finish().unwrap();
+    for block in 0..5 {
+        links
+            .process(
+                &mut controller,
+                false,
+                &mut [0.0; 960],
+                SourcePosition {
+                    generation: 19,
+                    sample: 96_000 + block * 960,
+                    stream: 4,
+                    born_ns: Some(3_000_000_000 + block * 20_000_000),
+                },
+            )
+            .unwrap();
+    }
+    let ingress = observer.native_ingress().unwrap();
+    assert_eq!(ingress.graph_generation, Some(19));
+    let meter = ingress.ring_output.measurement.unwrap();
+    assert!(!ingress.dsp_output.available);
+    assert_eq!((meter.source_generation, meter.end_sample), (4, 100_800));
+    assert_eq!(meter.monotonic_ms, 3_100);
+    assert_eq!(meter.valid_samples, 4_800);
+    assert!(meter.peak_dbfs.unwrap() > -20.0);
+}
+
+#[test]
+fn resampled_peaks_are_bounded_without_flattening_the_waveform() {
+    for (rate, policy) in [
+        (8_000, InboundPolicy::Peer),
+        (16_000, InboundPolicy::Peer),
+        (48_000, InboundPolicy::Peer),
+        (8_000, InboundPolicy::Echo),
+        (8_000, InboundPolicy::Phone),
+        (
+            48_000,
+            InboundPolicy::Local {
+                squelch_delay_ms: 0,
+            },
+        ),
+        (22_050, InboundPolicy::Media),
+        (44_100, InboundPolicy::Media),
+    ] {
+        let (mut full, mut high) = InboundRing::open(rate, policy).unwrap();
+        let (mut quiet, mut reference) = InboundRing::open(rate, policy).unwrap();
+        // Float Opus can exceed unity before conversion. Integer-decoded speech
+        // can have sub-rail source samples and over-unity interpolated peaks.
+        let amplitude = if rate == 48_000 { 1.25 } else { 0.9375 };
+        let frames = if matches!(policy, InboundPolicy::Phone) {
+            1920
+        } else {
+            5120
+        };
+        let wave: Vec<_> = (0..frames)
+            .map(|i| if i % 16 < 8 { amplitude } else { -amplitude })
+            .collect();
+        let low: Vec<_> = wave.iter().map(|x| x * 0.25).collect();
+        for (producer, pcm) in [(&mut full, &wave), (&mut quiet, &low)] {
+            for (i, block) in pcm.chunks(160).enumerate() {
+                assert_eq!(
+                    producer.write_tagged(block, 1, (i * 160) as u64, &[]),
+                    Ok(block.len())
+                );
+            }
+        }
+
+        let mut actual = [0.0; 960];
+        let mut expected = [0.0; 960];
+        assert_eq!(high.render(&mut actual), reference.render(&mut expected));
+        for sample in &mut expected {
+            *sample *= 4.0;
+        }
+        let peak = expected.iter().map(|v| v.abs()).fold(0.0_f32, f32::max);
+        assert!(peak > 1.01, "{rate} Hz reference peak {peak}");
+        let mut guard = rpt_advanced_core::audio::PeakGuard::new(48_000);
+        guard.apply(&mut expected);
+        for (a, b) in actual.iter().zip(expected) {
+            assert!(
+                a.abs() <= 1.0 && (a - b).abs() < 0.00002,
+                "{rate} Hz: {a} vs {b}"
+            );
+        }
+
+        // A scalar reader has no next sample to inspect. Its soft knee
+        // preserves rising peaks and still releases gain from the bulk read.
+        let scalar_expected = |raw: f32| {
+            let magnitude = raw.abs();
+            if magnitude <= 0.95 {
+                raw
+            } else {
+                (1.0 - 0.0025 / (0.05 + magnitude - 0.95)).copysign(raw)
+            }
+        };
+        for _ in 0..256 {
+            let sample = high.render_sample().unwrap().unwrap();
+            let mut expected = [scalar_expected(
+                reference.render_sample().unwrap().unwrap() * 4.0,
+            )];
+            guard.apply(&mut expected);
+            assert!(sample.abs() <= 1.0 && (sample - expected[0]).abs() < 0.00002);
+            let sample = high.render_timed_sample().unwrap();
+            let quiet = reference.render_timed_sample().unwrap();
+            assert_eq!(sample.provenance, quiet.provenance);
+            let mut expected = [scalar_expected(quiet.sample * 4.0)];
+            guard.apply(&mut expected);
+            assert!(sample.sample.abs() <= 1.0 && (sample.sample - expected[0]).abs() < 0.00002);
+        }
+    }
+}
+
+#[test]
+fn resampler_input_retains_linear_pcm_and_smoothly_bounds_extreme_float_input() {
+    let mut scratch = [0.0; 8];
+    let encoded = InboundProducer::ring_input(
+        &mut scratch,
+        &[1.0, 2.0, 3.0, -4.0, 8.0, 16.0, f32::MAX, f32::NAN],
+    )
+    .unwrap();
+    assert_eq!(encoded[0..2], [0.125, 0.25]);
+    assert!(0.25 < encoded[2] && encoded[2] < -encoded[3]);
+    assert_eq!(encoded[3..6], [-0.375, 0.4375, 0.46875]);
+    assert!(encoded[5] < encoded[6] && encoded[6] <= 0.5);
+    assert_eq!(encoded[7], 0.0);
+}
+
+#[test]
+fn one_frame_bulk_render_does_not_apply_the_scalar_knee() {
+    let (mut producer, mut reader) = InboundRing::open(48_000, InboundPolicy::Peer).unwrap();
+    let (mut reference_producer, mut reference) =
+        InboundRing::open(48_000, InboundPolicy::Peer).unwrap();
+    for source in [&mut producer, &mut reference_producer] {
+        for block in 0..6 {
+            assert_eq!(
+                source.write_tagged(&[0.99; 960], 1, block * 960, &[]),
+                Ok(960)
+            );
+        }
+    }
+    let mut priming = [0.0; 960];
+    assert_eq!(
+        reader.render(&mut priming).unwrap(),
+        reference.render(&mut priming).unwrap(),
+    );
+    let mut single = [0.0; 1];
+    let mut pair = [0.0; 2];
+    assert_eq!(reader.render(&mut single), Ok(1));
+    assert_eq!(reference.render(&mut pair), Ok(2));
+    assert!(pair[0] > 0.98, "the reference must exercise the knee");
+    assert_eq!(single[0].to_bits(), pair[0].to_bits());
+}
+
+#[test]
+fn scalar_delivery_retains_distinct_rising_peaks_on_both_polarities() {
+    let (_, mut reader) = InboundRing::open(48_000, InboundPolicy::Peer).unwrap();
+    let mut previous = 0.0;
+    for magnitude in [
+        0.25, 0.60, 0.90, 0.95, 0.99, 1.0, 1.10, 1.35, 1.75, 2.0, 4.0,
+    ] {
+        let positive = reader.finish_scalar(magnitude / RING_HEADROOM);
+        let negative = reader.finish_scalar(-magnitude / RING_HEADROOM);
+        if magnitude <= 0.95 {
+            assert_eq!(positive, magnitude);
+        }
+        assert_eq!(negative, -positive);
+        assert!(previous < positive && positive <= 1.0);
+        previous = positive;
+    }
+}
+
+#[test]
+fn producer_headroom_preserves_float_input_and_retries_original_pcm() {
+    thread_local! { static FIRST: std::cell::Cell<f32> = const { std::cell::Cell::new(0.0) }; }
+    unsafe extern "C" fn accept_one(
+        _: *mut ffi::rpcr3_ring,
+        pcm: *const f32,
+        count: u64,
+        accepted: *mut u64,
+    ) -> i32 {
+        // The fixture always offers at least one readable sample.
+        FIRST.set(unsafe { *pcm });
+        unsafe {
+            *accepted = count.min(1);
+        }
+        0
+    }
+
+    unsafe extern "C" fn accept_tagged(
+        ring: *mut ffi::rpcr3_ring,
+        pcm: *const f32,
+        count: u64,
+        _: u64,
+        _: u64,
+        _: *const MuteSpan,
+        _: u32,
+        accepted: *mut u64,
+    ) -> i32 {
+        unsafe { accept_one(ring, pcm, count, accepted) }
+    }
+
+    for (policy, rate) in [
+        (InboundPolicy::Peer, 8_000),
+        (InboundPolicy::Peer, 16_000),
+        (InboundPolicy::Peer, 48_000),
+        (InboundPolicy::Echo, 8_000),
+        (InboundPolicy::Phone, 8_000),
+        (
+            InboundPolicy::Local {
+                squelch_delay_ms: 0,
+            },
+            48_000,
+        ),
+        (InboundPolicy::Media, 44_100),
+    ] {
+        // The ring copies this table and retains the original create/destroy pair.
+        let mut api = unsafe { *ffi::rpcr3_descriptor() };
+        api.ring_producer_push = Some(accept_one);
+        api.ring_producer_push_tagged = Some(accept_tagged);
+        let (mut producer, _consumer) =
+            unsafe { InboundRing::from_descriptor(rate, policy, &api) }.unwrap();
+        let pcm = [2.0, 0.5, 8.0, -1.25, -8.0, -0.625, f32::NAN, f32::INFINITY];
+        let encoded_pcm: [f32; 8] = [0.25, 0.0625, 0.4375, -0.15625, -0.4375, -0.078125, 0.0, 0.0];
+        for tagged in [false, true] {
+            for i in 0..pcm.len() {
+                let accepted = if tagged {
+                    producer.write_tagged(&pcm[i..], 3, i as u64, &[])
+                } else {
+                    producer.write(&pcm[i..])
+                };
+                assert_eq!(accepted, Ok(1));
+                assert_eq!(FIRST.get().to_bits(), encoded_pcm[i].to_bits());
+            }
+        }
+    }
 }

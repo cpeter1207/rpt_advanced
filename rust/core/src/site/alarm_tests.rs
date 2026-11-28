@@ -1,9 +1,18 @@
 use super::*;
-use crate::config::{ConfigDocument, NodeId, ResolvedSiteSettings};
 use crate::site::{Observation, ReadingQuality};
+use crate::{config::resources::candidate::ResourceKind, station_fixture::equipment};
+use serde_json::{Value, json};
 
-fn settings(extra: &str) -> crate::config::AlarmSettings {
-    ResolvedSiteSettings::resolve(&ConfigDocument::parse(&format!("[1000]\n[sensor 1000 supply]\n[input 1000 door]\n[alarm 1000 warning]\nenabled=yes\nsource=supply\ncondition=above\ntrip_value=14\nclear_value=13\n{extra}")).unwrap(), &NodeId::new("1000").unwrap()).unwrap().value.alarms.remove(0)
+fn settings(extra: Value) -> crate::config::AlarmSettings {
+    let mut fields = json!({"enabled":true,"source":"supply","condition":"above","trip_value":14,"clear_value":13});
+    json_patch::merge(&mut fields, &extra);
+    equipment(&[
+        (ResourceKind::Sensor, "supply", json!({})),
+        (ResourceKind::Input, "door", json!({})),
+        (ResourceKind::Alarm, "warning", fields),
+    ])
+    .alarms
+    .remove(0)
 }
 fn sample(value: Option<AlarmValue>) -> Observation<AlarmValue> {
     Observation {
@@ -24,33 +33,35 @@ fn analog(value: f64) -> Observation<AlarmValue> {
 fn site_alarm_transition_and_unknown() {
     for (extra, safe, trip, clear) in [
         (
-            "",
+            json!({}),
             AlarmValue::Number(13.96),
             AlarmValue::Number(14.0),
             AlarmValue::Number(13.0),
         ),
         (
-            "condition=below\ntrip_value=11\nclear_value=12\n",
+            json!({"condition":"below","trip_value":11,"clear_value":12}),
             AlarmValue::Number(11.1),
             AlarmValue::Number(11.0),
             AlarmValue::Number(12.0),
         ),
         (
-            "source=door\ncondition=active\n",
+            json!({"source":"door","condition":"active"}),
             AlarmValue::Digital(false),
             AlarmValue::Digital(true),
             AlarmValue::Digital(false),
         ),
         (
-            "source=door\ncondition=inactive\n",
+            json!({"source":"door","condition":"inactive"}),
             AlarmValue::Digital(true),
             AlarmValue::Digital(false),
             AlarmValue::Digital(true),
         ),
     ] {
-        let mut state = AlarmState::new(settings(&format!(
-            "trip_delay_ms=100\nclear_delay_ms=100\n{extra}"
-        )));
+        let mut state = AlarmState::new(settings({
+            let mut fields = extra;
+            fields["timing"] = json!({"trip_delay_ms":100,"clear_delay_ms":100});
+            fields
+        }));
         assert!(state.advance(0, &sample(Some(safe))).is_empty());
         assert!(state.advance(10, &sample(Some(trip))).is_empty());
         assert!(state.advance(50, &sample(None)).is_empty());
@@ -70,7 +81,7 @@ fn site_alarm_transition_and_unknown() {
             vec![AlarmEvent::Clear]
         );
     }
-    let mut unavailable = AlarmState::new(settings("condition=unavailable\n"));
+    let mut unavailable = AlarmState::new(settings(json!({"condition":"unavailable"})));
     assert_eq!(
         unavailable.advance(0, &sample(None)),
         vec![AlarmEvent::Trip]
@@ -84,7 +95,7 @@ fn site_alarm_transition_and_unknown() {
 #[test]
 fn site_alarm_ack_reset_repeat() {
     let mut state = AlarmState::new(settings(
-        "latched=yes\nrepeat_interval_ms=100\nclear_delay_ms=20\n",
+        json!({"latched":true,"timing":{"repeat_interval_ms":100,"clear_delay_ms":20}}),
     ));
     assert_eq!(state.advance(0, &analog(15.0)), vec![AlarmEvent::Trip]);
     assert!(state.advance(99, &analog(15.0)).is_empty());
@@ -103,13 +114,16 @@ fn site_alarm_ack_reset_repeat() {
 
 #[test]
 fn site_alarm_disabled_or_invalid_observations_cannot_trip_or_clear() {
-    let mut disabled = AlarmState::new(settings("enabled=no\n"));
+    let mut disabled = AlarmState::new(settings(json!({"enabled":false})));
     assert!(disabled.advance(0, &analog(100.0)).is_empty());
     assert!(!disabled.snapshot().active);
     assert_eq!(disabled.reset(), Ok(None));
     for (extra, trip) in [
-        ("", 15.0),
-        ("condition=below\ntrip_value=11\nclear_value=12\n", 10.0),
+        (json!({}), 15.0),
+        (
+            json!({"condition":"below","trip_value":11,"clear_value":12}),
+            10.0,
+        ),
     ] {
         let mut state = AlarmState::new(settings(extra));
         assert_eq!(state.advance(0, &analog(trip)), vec![AlarmEvent::Trip]);

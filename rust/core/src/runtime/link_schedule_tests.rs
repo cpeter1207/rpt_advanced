@@ -1133,3 +1133,30 @@ fn changed_permanence_is_a_different_route_identity() {
 
     assert!(!next.routes[0].paused);
 }
+
+#[test]
+fn event_replacement_invalidates_inflight_attach_and_preserves_operator_hold() {
+    let routes = vec![RouteSpec {
+        local: "524950".into(),
+        remote: "2000".into(),
+        permanent: true,
+        group_label: Some("net".into()),
+        group_name: None,
+        group_priority: Some(0),
+    }];
+    let mut links = LinkScheduler::new(1, routes, vec![], None).unwrap();
+    let pending = links.next_operation().unwrap();
+    let held = std::collections::BTreeSet::from(["net"]);
+    assert!(links.event_groups(1, "524950", &held));
+    assert!(!links.current(&pending));
+    links.tick(civil(10, 1), 0, 0, |_| None, |_| false);
+    assert!(links.next_operation().is_none());
+    links.pause("524950");
+    assert!(!links.event_groups(2, "524950", &Default::default()));
+    assert!(links.event_groups(1, "524950", &Default::default()));
+    assert!(links.next_operation().is_none());
+    links.resume("524950");
+    let new = links.next_operation().unwrap();
+    assert!(!links.complete(&pending, true));
+    assert!(links.current(&new));
+}

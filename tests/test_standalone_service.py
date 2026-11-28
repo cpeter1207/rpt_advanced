@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: GPL-2.0-only
 """Check standalone service isolation and package boundaries."""
 
+import json
 import subprocess
 from pathlib import Path
 
@@ -21,20 +22,50 @@ def test_standalone_service_runs_as_dedicated_unprivileged_user() -> None:
     assert "User=rpt-advanced" in service
     assert "Group=rpt-advanced" in service
     assert (
-        "ExecStart=/usr/bin/rpt-advanced --foreground /etc/rpt_advanced/rpt_advanced.conf"
+        "ExecStart=/usr/bin/rpt-advanced --foreground /etc/rpt_advanced/rpt_advanced.service.json"
         in service
     )
+    assert "ConditionPathExists=/etc/rpt_advanced/rpt_advanced.service.json" in service
+    assert "ExecReload=/usr/bin/rpt-advanced-cli " in service
+    assert "Environment=RPT_ADVANCED_API_URL=https://localhost:8443/api/v1/" in service
+    assert "--url ${RPT_ADVANCED_API_URL}" in service
+    for flag, name in (
+        ("ca", "server-ca"),
+        ("cert", "client-cert"),
+        ("key", "client-key"),
+    ):
+        assert f"--{flag} %d/rpt-advanced.cli.{name}" in service
+    assert " reload\n" in service
+    assert "ImportCredential=rpt-advanced.cli.*" in service
+    assert "ExecReload=/bin/kill" not in service
+    assert "rpt-advanced-cli (= ${binary:Version})" in package_stanza("rpt-advanced")
+    assert "ImportCredential=rpt-advanced.tls.*" in service
+    assert "ImportCredential=rpt-advanced.aead.*" in service
     assert "Restart=on-failure" in service
     assert "NoNewPrivileges=yes" in service
     assert "ProtectSystem=strict" in service
     assert "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK" in service
 
 
-def test_standalone_package_installs_the_service_configuration_as_a_conffile() -> None:
+def test_standalone_package_ships_service_example_for_explicit_provisioning() -> None:
     manifest = (ROOT / "debian/rpt-advanced.install").read_text(encoding="utf-8")
-    assert (
-        "usr/share/doc/rpt-advanced/examples/rpt_advanced.conf etc/rpt_advanced"
-        in manifest.splitlines()
+    assert "usr/share/doc/rpt-advanced/**" in manifest.splitlines()
+    assert all("etc/rpt_advanced" not in line for line in manifest.splitlines())
+    example = json.loads((ROOT / "examples/rpt_advanced.service.json").read_bytes())
+    assert example["listen"].startswith("127.0.0.1:")
+    assert set(example) == {
+        "store_path",
+        "store_uuid",
+        "write_key_id",
+        "listen",
+        "authorities",
+        "server_chain",
+        "server_key",
+        "client_issuers",
+        "clients",
+    }
+    assert all(
+        set(client) == {"identity", "leaf_certificate"} for client in example["clients"]
     )
 
 
@@ -56,13 +87,13 @@ def test_standalone_requires_current_radio_adapters() -> None:
     control = (ROOT / "debian/control").read_text(encoding="utf-8")
     standalone = package_stanza("rpt-advanced")
     for development, runtime, minimum in (
-        ("librptadvradio-dev", "librptadvradio5", "0.1.0~alpha11"),
+        ("librptadvradio-dev", "librptadvradio5", "0.1.0~alpha13"),
         (
             "librptadv-portaudio-alsa-adapter-dev",
             "librptadv-portaudio-alsa-adapter2",
             "0.2.0~alpha4",
         ),
-        ("librptadv-gpio-adapter-dev", "librptadv-gpio-adapter1", "0.1.0~alpha4"),
+        ("librptadv-gpio-adapter-dev", "librptadv-gpio-adapter1", "0.1.0~alpha5"),
     ):
         assert f"{development} (>= {minimum})" in control
         assert f"{runtime} (>= {minimum})" in standalone
@@ -107,11 +138,12 @@ def test_standalone_check_builds_the_product_before_loading_it() -> None:
         text=True,
     )
     build = plan.find("build --locked --release -p rpt-advanced-standalone")
-    stage = plan.find('"build/librptadv_product.so.2"')
+    stage = plan.find('"build/librptadv_product.so.3"')
     test = plan.find("test --locked -p rpt-advanced-standalone")
     assert 0 <= build < stage < test, "standalone tests need the current shared product"
     assert "-p rptadv-resolver-adapter" in plan[:test]
     assert "-p rptadv-jitter-adapter" in plan[:test]
+    assert "-p rptadv-sip-adapter" in plan[:test]
     assert "resolver" in plan[stage:test], (
         "resolver must be staged before provider loading"
     )
@@ -126,9 +158,9 @@ def test_shlibdeps_searches_every_private_adapter_library_directory() -> None:
     assert not any(character.isspace() for character in search_path)
     assert all(path.startswith("$(CURDIR)/debian/") for path in search_path.split(":"))
     for package in (
-        "librptadv-product2",
-        "librptadv-file-adapter1",
-        "librptadv-speech-adapter1",
+        "librptadv-product3",
+        "librptadv-file-adapter2",
+        "librptadv-speech-adapter2",
         "librptadv-resolver-adapter1",
         "librptadv-jitter-adapter1",
         "librptadv-control-asterisk-adapter1",
@@ -142,7 +174,7 @@ def test_shlibdeps_searches_every_private_adapter_library_directory() -> None:
 if __name__ == "__main__":
     for test in (
         test_standalone_service_runs_as_dedicated_unprivileged_user,
-        test_standalone_package_installs_the_service_configuration_as_a_conffile,
+        test_standalone_package_ships_service_example_for_explicit_provisioning,
         test_debian_install_manifests_are_not_executable_scripts,
         test_standalone_package_does_not_depend_on_asterisk,
         test_standalone_requires_current_radio_adapters,

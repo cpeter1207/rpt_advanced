@@ -1,5 +1,12 @@
 //! Serialized civil-event reservations and configuration-owned link intent.
 
+#[path = "calendar.rs"]
+mod calendar;
+pub use calendar::{
+    BeginDecision, CalendarObservation, EventOrigin, EventTerminals, EventTicket, EventWork,
+    MacroAdmission, ReceiveActivity,
+};
+
 use crate::{
     command::Command,
     controller::MessageOccurrence,
@@ -23,6 +30,10 @@ pub struct EventSpec {
 /// Scheduler preparation or bounded rendering failure.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SchedulerError {
+    /// Captured wall time is unavailable.
+    Clock,
+    /// A bounded recurrence query failed.
+    Calendar(crate::schedule::recurrence::Error),
     /// Invalid identity, duplicated event, or generation regression.
     Invalid,
     /// The current occurrence could not render within its prepared bounds.
@@ -42,6 +53,7 @@ pub struct DispatchContent {
 struct Occurrence {
     key: u64,
     civil: CivilTime,
+    #[cfg(test)]
     due_ms: i128,
     media: Option<Arc<MessageOccurrence>>,
 }
@@ -66,10 +78,12 @@ pub struct ScheduledDispatch {
 }
 impl ScheduledDispatch {
     /// One control/audio identity, retained without allocating on the callback.
+    #[cfg(test)]
     pub(crate) fn occurrence(&self) -> Option<Arc<MessageOccurrence>> {
         self.occurrence.media.clone()
     }
     /// Original scheduled minute in the host monotonic epoch, retained across retries.
+    #[cfg(test)]
     pub(crate) fn due_ms(&self) -> i128 {
         self.occurrence.due_ms
     }
@@ -89,11 +103,15 @@ impl ScheduledDispatch {
 
 /// Control-owned zero-time event scheduler preserving configuration order and reload state.
 pub struct EventScheduler {
+    calendar: Option<calendar::Calendar>,
     generation: u64,
     events: Vec<EventState>,
     last_tick: Option<i64>,
 }
 impl EventScheduler {
+    pub(super) fn generation(&self) -> u64 {
+        self.generation
+    }
     /// Construct all event state before publication; unchanged names/triggers retain progress.
     pub fn new(
         generation: u64,
@@ -141,6 +159,7 @@ impl EventScheduler {
             })
             .collect();
         Ok(Self {
+            calendar: None,
             generation,
             events,
             last_tick: previous.and_then(|old| old.last_tick),
@@ -152,7 +171,7 @@ impl EventScheduler {
     pub fn next(
         &mut self,
         captured_time: i64,
-        scheduled_ms: i128,
+        _scheduled_ms: i128,
         local: CivilTime,
         mut render: impl FnMut(&EventSpec, &CivilTime) -> Result<DispatchContent, SchedulerError>,
     ) -> Result<Option<ScheduledDispatch>, SchedulerError> {
@@ -189,7 +208,8 @@ impl EventScheduler {
                         event.ready = Some(Occurrence {
                             key,
                             civil: local,
-                            due_ms: scheduled_ms,
+                            #[cfg(test)]
+                            due_ms: _scheduled_ms,
                             media: event
                                 .spec
                                 .media

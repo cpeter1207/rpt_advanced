@@ -23,6 +23,7 @@ mod worker;
 #[derive(Clone)]
 pub struct NativeMediaPreparer {
     timeout_ms: u32,
+    lifecycle: Arc<std::sync::Mutex<Option<Arc<worker::Lifecycle>>>>,
     file_api: FileDescriptor,
     speech_api: SpeechDescriptor,
     file: Arc<Context>,
@@ -36,12 +37,12 @@ pub type SpeechDescriptor = ffi::rptadv_speech_descriptor;
 struct Context {
     handle: NonNull<c_void>,
     destroy: unsafe extern "C" fn(*mut c_void),
-    read_stream: unsafe extern "C" fn(
+    step_stream: unsafe extern "C" fn(
         *mut c_void,
         *const ffi::rptadv_media_cancellation,
         *mut f32,
         usize,
-        *mut usize,
+        *mut ffi::rptadv_media_step,
     ) -> i32,
     close_stream: unsafe extern "C" fn(*mut c_void),
     open_file: Option<
@@ -49,7 +50,7 @@ struct Context {
             *const c_void,
             *const std::ffi::c_char,
             *const ffi::rptadv_media_cancellation,
-            *mut ffi::rptadv_media_stream,
+            *mut *mut c_void,
         ) -> i32,
     >,
     open_speech: Option<
@@ -57,7 +58,7 @@ struct Context {
             *const c_void,
             *const ffi::rptadv_media_speech_request,
             *const ffi::rptadv_media_cancellation,
-            *mut ffi::rptadv_media_stream,
+            *mut *mut c_void,
         ) -> i32,
     >,
 }
@@ -86,28 +87,16 @@ impl NativeMediaPreparer {
             level_db: request.level_db,
         };
         let cancellation = raw_cancellation(request.cancellation);
-        let mut opened = ffi::rptadv_media_stream {
-            handle: ptr::null_mut(),
-            sample_rate_hz: 0,
-        };
-        let code = unsafe {
+        let mut stream = self.speech.open(|handle| unsafe {
             self.speech.open_speech.unwrap()(
                 self.speech.handle.as_ptr(),
                 &raw,
                 &cancellation,
-                &mut opened,
+                handle,
             )
-        };
-        let stream = SpeechStream {
-            context: Arc::clone(&self.speech),
-            handle: opened.handle,
-            rate: opened.sample_rate_hz,
-        };
-        status(code)?;
-        if !finite::valid_stream(stream.handle, stream.rate) {
-            return Err(MediaError::InvalidOutput);
-        }
-        Ok(stream)
+        })?;
+        stream.await_format(&cancellation)?;
+        Ok(SpeechStream(stream))
     }
 
     /// Compose independent file/speech capabilities and the host's paired child-reaper guard.
@@ -146,13 +135,13 @@ impl NativeMediaPreparer {
             || file_api.create.is_none()
             || file_api.destroy.is_none()
             || file_api.open_file.is_none()
-            || file_api.read_stream.is_none()
+            || file_api.step_stream.is_none()
             || file_api.close_stream.is_none()
             || speech_api.capability.map(|v| v.to_ne_bytes()[0]) != *b"rptadv.speech\0\0\0"
             || speech_api.create.is_none()
             || speech_api.destroy.is_none()
             || speech_api.open_speech.is_none()
-            || speech_api.read_stream.is_none()
+            || speech_api.step_stream.is_none()
             || speech_api.close_stream.is_none()
         {
             return Err(MediaError::IncompatibleAdapter);
@@ -173,7 +162,7 @@ impl NativeMediaPreparer {
         let file = Context {
             handle: NonNull::new(handle).ok_or(MediaError::IncompatibleAdapter)?,
             destroy: file_api.destroy.unwrap(),
-            read_stream: file_api.read_stream.unwrap(),
+            step_stream: file_api.step_stream.unwrap(),
             close_stream: file_api.close_stream.unwrap(),
             open_file: file_api.open_file,
             open_speech: None,
@@ -185,13 +174,14 @@ impl NativeMediaPreparer {
         let speech = Context {
             handle: NonNull::new(handle).ok_or(MediaError::IncompatibleAdapter)?,
             destroy: speech_api.destroy.unwrap(),
-            read_stream: speech_api.read_stream.unwrap(),
+            step_stream: speech_api.step_stream.unwrap(),
             close_stream: speech_api.close_stream.unwrap(),
             open_file: None,
             open_speech: speech_api.open_speech,
         };
         Ok(Self {
             timeout_ms,
+            lifecycle: Arc::default(),
             file_api,
             speech_api,
             file: Arc::new(file),
@@ -201,19 +191,115 @@ impl NativeMediaPreparer {
 }
 
 /// Exclusive source-rate speech stream. No collection, conversion or audio-thread work.
-pub struct SpeechStream {
+pub struct SpeechStream(ProviderStream);
+
+struct ProviderStream {
     context: Arc<Context>,
     handle: *mut c_void,
-    rate: u32,
+    rate: Option<u32>,
+    has_pcm: bool,
+    eof: bool,
 }
-// Independent streams allow owner-thread migration, but not concurrent reads.
-unsafe impl Send for SpeechStream {}
+
+// SAFETY: the provider supports transferring an exclusively owned stream between workers.
+unsafe impl Send for ProviderStream {}
+
+enum StreamStep {
+    Pending,
+    Format,
+    Samples(usize),
+    Eof,
+}
+
+impl ProviderStream {
+    fn step(
+        &mut self,
+        output: &mut [f32],
+        cancel: &ffi::rptadv_media_cancellation,
+    ) -> Result<StreamStep, MediaError> {
+        if output.is_empty() {
+            return Err(MediaError::InvalidRequest);
+        }
+        if self.eof {
+            return Ok(StreamStep::Eof);
+        }
+        let mut event = ffi::rptadv_media_step {
+            kind: u32::MAX,
+            sample_rate_hz: 0,
+            samples: 0,
+        };
+        // SAFETY: a single worker owns the stream; all pointers are valid for this call.
+        status(unsafe {
+            (self.context.step_stream)(
+                self.handle,
+                cancel,
+                output.as_mut_ptr(),
+                output.len(),
+                &mut event,
+            )
+        })?;
+        use ffi::{
+            rptadv_media_step_kind_RPTADV_MEDIA_STEP_EOF as EOF,
+            rptadv_media_step_kind_RPTADV_MEDIA_STEP_FORMAT_READY as FORMAT,
+            rptadv_media_step_kind_RPTADV_MEDIA_STEP_PENDING as PENDING,
+            rptadv_media_step_kind_RPTADV_MEDIA_STEP_SAMPLES as SAMPLES,
+        };
+        match (event.kind, event.sample_rate_hz, event.samples) {
+            (PENDING, 0, 0) => Ok(StreamStep::Pending),
+            (FORMAT, rate @ 8000..=192000, 0) if self.rate.is_none() => {
+                self.rate = Some(rate);
+                Ok(StreamStep::Format)
+            }
+            (SAMPLES, 0, n)
+                if self.rate.is_some()
+                    && n > 0
+                    && n <= output.len()
+                    && output[..n].iter().all(|s| s.is_finite() && s.abs() <= 1.0) =>
+            {
+                self.has_pcm = true;
+                Ok(StreamStep::Samples(n))
+            }
+            (EOF, 0, 0) if self.has_pcm => {
+                self.eof = true;
+                Ok(StreamStep::Eof)
+            }
+            _ => Err(MediaError::InvalidOutput),
+        }
+    }
+
+    fn await_format(&mut self, cancel: &ffi::rptadv_media_cancellation) -> Result<(), MediaError> {
+        loop {
+            match self.step(&mut [0.0], cancel)? {
+                StreamStep::Format => return Ok(()),
+                StreamStep::Pending => std::thread::sleep(std::time::Duration::from_millis(1)),
+                _ => return Err(MediaError::InvalidOutput),
+            }
+        }
+    }
+
+    fn blocking_read(
+        &mut self,
+        output: &mut [f32],
+        cancel: &ffi::rptadv_media_cancellation,
+    ) -> Result<usize, MediaError> {
+        loop {
+            match self.step(output, cancel)? {
+                StreamStep::Samples(n) => return Ok(n),
+                StreamStep::Eof => return Ok(0),
+                StreamStep::Pending => std::thread::sleep(std::time::Duration::from_millis(1)),
+                StreamStep::Format => return Err(MediaError::InvalidOutput),
+            }
+        }
+    }
+}
+
 impl SpeechStream {
     /// Provider PCM clock; conversion belongs solely to the consuming shared ring.
     pub fn sample_rate_hz(&self) -> u32 {
-        self.rate
+        self.0.rate.expect("validated before publishing speech")
     }
-    /// Read available PCM with the original process budget and current cancellation.
+
+    /// This text preparation worker may wait for more provider data.
     pub fn read(
         &mut self,
         output: &mut [f32],
@@ -231,69 +317,61 @@ impl SpeechStream {
         if cancelled() {
             return Err(MediaError::Cancelled);
         }
-        finite::read_stream(&self.context, self.handle, output, &token(cancelled))
+        self.0.blocking_read(output, &token(cancelled))
     }
 }
-impl Drop for SpeechStream {
+
+impl Drop for ProviderStream {
     fn drop(&mut self) {
         if !self.handle.is_null() {
-            unsafe {
-                (self.context.close_stream)(self.handle);
-            }
+            // SAFETY: one owner retains the context throughout close, including error paths.
+            unsafe { (self.context.close_stream)(self.handle) };
         }
     }
 }
+
 impl Context {
-    fn collect_stream(
-        &self,
-        cancellation: &Cancellation,
-        open: impl FnOnce(*mut ffi::rptadv_media_stream) -> i32,
-    ) -> Result<PreparedAudio, MediaError> {
-        let mut stream = ffi::rptadv_media_stream {
-            handle: ptr::null_mut(),
-            sample_rate_hz: 0,
+    fn open(
+        self: &Arc<Self>,
+        open: impl FnOnce(*mut *mut c_void) -> i32,
+    ) -> Result<ProviderStream, MediaError> {
+        let mut handle = ptr::null_mut();
+        let code = open(&mut handle);
+        let stream = ProviderStream {
+            context: Arc::clone(self),
+            handle,
+            rate: None,
+            has_pcm: false,
+            eof: false,
         };
-        let code = open(&mut stream);
-        struct Close<'a>(&'a Context, *mut c_void);
-        impl Drop for Close<'_> {
-            fn drop(&mut self) {
-                if !self.1.is_null() {
-                    // SAFETY: this guard owns the opened stream and closes it exactly once.
-                    unsafe { (self.0.close_stream)(self.1) };
-                }
-            }
-        }
-        let close = Close(self, stream.handle);
         status(code)?;
-        if stream.handle.is_null() || stream.sample_rate_hz == 0 {
+        if handle.is_null() {
             return Err(MediaError::InvalidOutput);
         }
+        Ok(stream)
+    }
+
+    fn collect_stream(
+        self: &Arc<Self>,
+        cancellation: &Cancellation,
+        open: impl FnOnce(*mut *mut c_void) -> i32,
+    ) -> Result<PreparedAudio, MediaError> {
+        let mut stream = self.open(open)?;
         let control = raw_cancellation(cancellation);
+        stream.await_format(&control)?;
+        let rate = stream.rate.expect("format was observed");
         let mut samples = Vec::new();
-        let mut chunk = [0.0_f32; 2048];
+        let mut chunk = [0.0; 2048];
         loop {
-            let mut count = 0;
-            // SAFETY: stream remains open; chunk and cancellation token remain live for the call.
-            status(unsafe {
-                (self.read_stream)(
-                    stream.handle,
-                    &control,
-                    chunk.as_mut_ptr(),
-                    chunk.len(),
-                    &mut count,
-                )
-            })?;
-            if count > chunk.len() {
-                return Err(MediaError::InvalidOutput);
-            }
-            if count == 0 {
+            let n = stream.blocking_read(&mut chunk, &control)?;
+            if n == 0 {
                 break;
             }
-            samples.try_reserve(count).map_err(|_| MediaError::Io)?;
-            samples.extend_from_slice(&chunk[..count]);
+            samples.try_reserve(n).map_err(|_| MediaError::Io)?;
+            samples.extend_from_slice(&chunk[..n]);
         }
-        drop(close);
-        native(stream.sample_rate_hz, &samples, cancellation)
+        drop(stream);
+        native(rate, &samples, cancellation)
     }
 }
 impl Drop for Context {
@@ -327,11 +405,23 @@ impl rpt_advanced_core::runtime::NativeMediaPreparer for NativeMediaPreparer {
         node: &str,
         generation: u64,
     ) -> Result<Box<dyn StationMediaSession>, MediaError> {
-        worker::StationSession::new(
+        let lifecycle = {
+            let mut slot = self.lifecycle.lock().unwrap();
+            match slot.as_ref() {
+                Some(life) => Arc::clone(life),
+                None => {
+                    let life = Arc::new(worker::Lifecycle::new()?);
+                    *slot = Some(Arc::clone(&life));
+                    life
+                }
+            }
+        };
+        worker::StationSession::with_lifecycle(
             node.to_owned(),
             generation,
             Arc::clone(&self.file),
             Arc::clone(&self.speech),
+            lifecycle,
         )
         .map(|session| Box::new(session) as Box<dyn StationMediaSession>)
     }
@@ -473,13 +563,27 @@ unsafe fn native_with_descriptor(
         .checked_add(delay)
         .and_then(|frames| frames.checked_add(512))
         .ok_or(MediaError::InvalidOutput)?;
-    let mut accepted = 0;
-    if unsafe {
-        api.ring_producer_push.unwrap()(ring.1.as_ptr(), source.as_ptr(), count, &mut accepted)
-    } != 0
-        || accepted != count
-    {
-        return Err(MediaError::InvalidOutput);
+    // Leave room inside the provider's normalized ring for interpolation peaks.
+    // Its startup context is still trimmed in the original sample coordinates.
+    const HEADROOM: f32 = 4.0;
+    let mut scaled = [0.0; 512];
+    for block in source.chunks(scaled.len()) {
+        if cancellation.is_cancelled() {
+            return Err(MediaError::Cancelled);
+        }
+        for (output, input) in scaled.iter_mut().zip(block) {
+            *output = *input / HEADROOM;
+        }
+        let count = block.len() as u64;
+        let mut accepted = 0;
+        // SAFETY: the private ring and the complete encoded prefix are live.
+        if unsafe {
+            api.ring_producer_push.unwrap()(ring.1.as_ptr(), scaled.as_ptr(), count, &mut accepted)
+        } != 0
+            || accepted != count
+        {
+            return Err(MediaError::InvalidOutput);
+        }
     }
     let mut output = Vec::new();
     output
@@ -526,6 +630,13 @@ unsafe fn native_with_descriptor(
             }
         }
         if output.len() as u64 == output_count {
+            let mut peak = rpt_advanced_core::audio::PeakGuard::new(48_000);
+            for block in output.chunks_mut(960) {
+                for sample in block.iter_mut() {
+                    *sample *= HEADROOM;
+                }
+                peak.apply(block);
+            }
             return PreparedAudio::new(48000, output);
         }
     }

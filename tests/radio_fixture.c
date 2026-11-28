@@ -31,6 +31,8 @@ struct fixture {
     unsigned int phase; /**< Receive window in a100-frame cycle;100 keeps local COR inactive. */
     unsigned int media_receive_start; /**< Begin media interruption after first file PCM. */
     unsigned int remote_blocks; /**< Nonzero transmit blocks while local reception is inactive. */
+    unsigned int echo_hz;       /**< Dominant wire marker in the current keyed output run. */
+    unsigned int echo_blocks;   /**< Consecutive matching 20 ms output blocks. */
     unsigned int file_blocks;   /**< Recognizable prepared-file blocks before reception. */
     unsigned int morse_blocks;  /**< Negative Morse samples mixed with positive receive PCM. */
     unsigned int ticks;         /**< Hardware-paced direct receive calls. */
@@ -50,10 +52,10 @@ static atomic_uint active;
 /** @brief Registered technology, declared before the allocator. */
 static struct ast_channel_tech technology;
 
-/** @brief Produce finite hardware-like ticks without using the controller's clock.
+/** @brief Produce hardware-like ticks without using the controller's clock.
  * @param context Owned device.
  * @return Null after stop or the test interval.
- * Duplex cases finish at an observed unkey; streaming media/network cases stay live.
+ * Duplex cases report the observed unkey and keep clocking until quiesced.
  * A stuck key never produces finite readiness; only callback-observed PTT edges count.
  */
 static void *clock_run(void *context);
@@ -178,6 +180,32 @@ static void receive_audio(struct fixture *device) {
     }
 }
 
+/** @brief Identify one of the two loopback peer's GSM tones at the actual radio output. */
+static unsigned int echo_marker(const float *samples) {
+    const unsigned int hz[] = {950, 1450};
+    double energy = 0;
+    for (size_t i = 0; i < 960; ++i) {
+        energy += samples[i] * samples[i];
+    }
+    if (energy < 0.00096) {
+        return 0;
+    }
+    for (size_t k = 0; k < 2; ++k) {
+        double coefficient = 2 * cos(2 * 3.14159265358979323846 * hz[k] / 48000);
+        double previous = 0, older = 0;
+        for (size_t i = 0; i < 960; ++i) {
+            double current = samples[i] + coefficient * previous - older;
+            older = previous;
+            previous = current;
+        }
+        double power = previous * previous + older * older - coefficient * previous * older;
+        if (2 * power > 0.65 * 960 * energy) {
+            return hz[k];
+        }
+    }
+    return 0;
+}
+
 /** @brief Inspect canonical PCM returned directly into the hardware buffer.
  * @param device Clock-owned fixture.
  */
@@ -279,8 +307,11 @@ static int setoption(struct ast_channel *channel, int option, void *data, int si
 static void *clock_run(void *context) {
     struct fixture *device = context;
     const struct timespec interval = {.tv_nsec = 20000000};
-    for (unsigned int tick = 0;
-         tick < (device->network ? 2000U : 100U) && !atomic_load(&device->stop); ++tick) {
+    const bool duplex = !device->network && !device->media;
+    for (unsigned int tick = 0; !atomic_load(&device->stop); ++tick) {
+        if (!duplex && tick >= (device->network ? 2000U : 100U)) {
+            break;
+        }
         receive_audio(device);
         uint32_t keyed = 0;
         uint32_t ctcss_enabled = 0;
@@ -302,6 +333,17 @@ static void *clock_run(void *context) {
         }
         bool changed = observe_ptt(device, keyed != 0);
         inspect_audio(device);
+        if (device->phase == 100) {
+            unsigned int hz = keyed && !device->carrier ? echo_marker(device->audio) : 0;
+            if (hz != device->echo_hz) {
+                device->echo_hz = hz;
+                device->echo_blocks = 0;
+            }
+            if (hz && ++device->echo_blocks == 4) {
+                ast_log(LOG_NOTICE, "rpt_fixture echo keyed marker=%u blocks=%u\n", hz,
+                        device->echo_blocks);
+            }
+        }
         if (changed && device->phase == 100) {
             ast_log(LOG_NOTICE, "rpt_fixture echo ptt=%u remote=%u\n", keyed,
                     device->remote_blocks);
@@ -315,9 +357,6 @@ static void *clock_run(void *context) {
         if (ready && !device->ready_logged) {
             ast_log(LOG_NOTICE, "rpt_fixture ready %s\n", ast_channel_name(device->channel));
             device->ready_logged = true;
-            if (!device->network && !device->media) {
-                break;
-            }
         }
         nanosleep(&interval, NULL);
     }

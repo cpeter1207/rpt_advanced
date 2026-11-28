@@ -2,9 +2,55 @@
 use super::*;
 use crate::site::{acquisition::Acquisition, radio::RadioSite};
 use rpt_advanced_core::{
-    config::{NodeId, ResolvedSiteSettings},
+    config::resources::candidate::{ResourceKind as Kind, ResourceScope},
     site::ReadingQuality,
 };
+
+use crate::fixture::station::{self, LOCAL, SECOND_LOCAL};
+use crate::management::PreparedConfiguration;
+use serde_json::{Value, json};
+
+type Row = (&'static str, Kind, &'static str, Value);
+
+fn bridge_interface(device: &str) -> Value {
+    json!({"audio":{"device_identifier":device},"gpio":{"wiring_profile":"dudeusb","pins":{"7":"out0","8":"in"}}})
+}
+
+fn pin(kind: Kind, key: &'static str, number: u8) -> Row {
+    (
+        LOCAL,
+        kind,
+        key,
+        json!({"enabled":true,"source":{"type":"interface","node":"1000","property":format!("/gpio/pins/{number}")}}),
+    )
+}
+
+fn bank_config(extra: &[Row], second: bool, pulse_ms: u64) -> PreparedConfiguration {
+    let mut relay = pin(Kind::Output, "relay", 7);
+    relay.3["startup_state"] = json!("on");
+    relay.3["timing"] = json!({"pulse_ms":pulse_ms});
+    let mut rows = vec![(LOCAL, Kind::Interface, "", bridge_interface("3-1")), relay];
+    rows.extend_from_slice(extra);
+    let mut stations = vec![(LOCAL, "1000", json!({}))];
+    if second {
+        rows.push((SECOND_LOCAL, Kind::Interface, "", bridge_interface("3-2")));
+        stations.push((SECOND_LOCAL, "2000", json!({})));
+    }
+    station::prepare(&stations, &rows)
+}
+
+fn door() -> Row {
+    pin(Kind::Input, "door", 8)
+}
+
+fn notice() -> Row {
+    (
+        LOCAL,
+        Kind::Message,
+        "notice",
+        json!({"locales":{"en-US":{"text":"Notice","tts":"Notice","morse":"E"}}}),
+    )
+}
 
 struct BankFixture {
     generation: u64,
@@ -72,13 +118,13 @@ unsafe extern "C" fn bank_publish(
     0
 }
 fn bank_host() -> Host {
-    bank_host_with("")
+    bank_host_with(&[], false, 500)
 }
-fn bank_host_with(extra: &str) -> Host {
-    bank_host_with_publish(extra, bank_publish)
+fn bank_host_with(extra: &[Row], second: bool, pulse_ms: u64) -> Host {
+    bank_host_with_publish(bank_config(extra, second, pulse_ms), bank_publish)
 }
 fn bank_host_with_publish(
-    extra: &str,
+    configuration: PreparedConfiguration,
     publish: unsafe extern "C" fn(
         *mut c_void,
         *mut c_void,
@@ -94,29 +140,20 @@ fn bank_host_with_publish(
     };
     let mut table = unsafe { crate::fixture::host_descriptor().read() };
     table.context = ptr::without_provenance_mut(1);
+    table.asl_provider = &crate::fixture::asl::PROVIDER;
     table.radio_site_snapshot = Some(bank_snapshot);
     table.radio_site_bind = Some(bank_bind);
     table.radio_site_publish = Some(publish);
     let services = unsafe { HostServices::open(Box::leak(Box::new(table))) }.unwrap();
-    let document = document(
-        "usb",
-        &format!(
-            "[output 1000 relay]\nenabled=yes\nbackend=cm119\ndevice=1000\nline=7\nstartup_state=on\nsafe_state=off\n{extra}"
-        ),
-    );
-    let radio = RadioSite::prepare(
-        &[(
-            "1000".into(),
-            ResolvedSiteSettings::resolve(&document, &NodeId::new("1000").unwrap())
-                .unwrap()
-                .value,
-        )]
-        .into_iter()
-        .collect(),
+    let mut host = Host::fixture_start_with_site(
+        configuration,
+        media(),
+        services,
+        Instant::now(),
+        clock(),
+        Some(crate::site::backends::endpoint::tests::backends()),
     )
     .unwrap();
-    let mut host = Host::start(document, media(), services, Instant::now(), clock()).unwrap();
-    host.install_sites(Acquisition::default(), radio);
     host.poll_sites(0);
     host.poll_sites(1);
     assert_eq!(BANK.lock().unwrap().high, 0x40);
@@ -129,25 +166,49 @@ fn site_host_alarm_actions_do_not_wait_for_full_telemetry_queue() {
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     let mut host = bank_host_with(
-        "[input 1000 door]\nenabled=yes\nbackend=cm119\ndevice=1000\nline=8\n\
-         [alarm 1000 open]\nenabled=yes\nsource=door\ncondition=inactive\n\
-         on_trip=output:relay:off,inhibit:on,macro:stop\ntrip_message=notice\n\
-         repeat_message=notice\nrepeat_interval_ms=1\n\
-         [macro stop]\naction=connect\ntarget_node=2000\n\
-         [message notice]\ncontent={media}\nmorse_text=E\ndtmf_id=1\n",
+        &[
+            door(),
+            (
+                LOCAL,
+                Kind::Allstarlink,
+                "",
+                json!({"enabled":true,"node_number":1000}),
+            ),
+            (
+                LOCAL,
+                Kind::Alarm,
+                "open",
+                json!({"enabled":true,"source":"door","condition":"inactive","on_trip":["output:relay:off","inhibit:on","macro:stop"],"trip_message":"notice","repeat_message":"notice","timing":{"repeat_interval_ms":1}}),
+            ),
+            (
+                LOCAL,
+                Kind::Macro,
+                "stop",
+                json!({"actions":[{"action":"connect","parameter":"2000"}]}),
+            ),
+            notice(),
+        ],
+        false,
+        500,
     );
     for _ in 0..4 {
-        host.runtime.queue_message("1000", "1", None).unwrap();
+        assert!(host.runtime.queue_named_message(LOCAL, "notice").unwrap());
     }
-    assert!(host.runtime.queue_message("1000", "1", None).is_err());
+    assert!(!host.runtime.queue_named_message(LOCAL, "notice").unwrap());
+    let mut operations = Vec::new();
     for now_ms in 10..14 {
-        host.pump(RuntimeClock { now_ms, ..clock() }).unwrap();
+        let clock = RuntimeClock { now_ms, ..clock() };
+        host.pump(clock).unwrap();
+        operations.extend(host.take_site_links());
+        if let Some((effect, receipt)) = host.runtime.advance_commands(LOCAL, clock).unwrap() {
+            operations.push((LOCAL.to_owned(), effect));
+            receipt.settle(true);
+        }
     }
-    let snapshot = host.runtime.node("1000").unwrap().site().snapshot(14);
+    let snapshot = host.runtime.node(LOCAL).unwrap().site().snapshot(14);
     assert!(snapshot.alarms["open"].active);
     assert!(snapshot.transmit_inhibited);
     assert_eq!(BANK.lock().unwrap().high, 0);
-    let operations = host.take_site_links();
     assert_eq!(
         operations.len(),
         1,
@@ -181,39 +242,45 @@ fn site_host_alarm_actions_do_not_wait_for_full_telemetry_queue() {
             break;
         }
     }
-    assert!(host.stop(28));
+    assert!(host.fixture_stop(28));
 }
 
 #[test]
 fn site_commands_preserve_protection_and_reject_during_owner_handoff() {
     use rpt_advanced_core::site::{OutputRequest, SiteCommand};
-    let _serial = crate::fixture::LIFECYCLE.lock().unwrap();
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
     let mut host = bank_host_with(
-        "[input 1000 door]\nenabled=yes\nbackend=cm119\ndevice=1000\nline=8\n\
-         [alarm 1000 open]\nenabled=yes\nsource=door\ncondition=inactive\n\
-         latched=yes\non_trip=inhibit:on\non_clear=inhibit:off\n",
+        &[
+            door(),
+            (
+                LOCAL,
+                Kind::Alarm,
+                "open",
+                json!({"enabled":true,"source":"door","condition":"inactive","latched":true,"on_trip":["inhibit:on"],"on_clear":["inhibit:off"]}),
+            ),
+        ],
+        false,
+        500,
     );
     for now_ms in 10..14 {
         host.pump(RuntimeClock { now_ms, ..clock() }).unwrap();
     }
     assert!(
-        host.site_command("1000", SiteCommand::Inhibit(false), clock())
+        host.site_command(LOCAL, SiteCommand::Inhibit(false), clock())
             .is_ok()
     );
     assert!(
-        host.site_command("1000", SiteCommand::AlarmReset("open".into()), clock())
+        host.site_command(LOCAL, SiteCommand::AlarmReset("open".into()), clock())
             .is_err()
     );
     assert!(
-        host.site_command(
-            "1000",
-            SiteCommand::AlarmAcknowledge("open".into()),
-            clock()
-        )
-        .is_ok()
+        host.site_command(LOCAL, SiteCommand::AlarmAcknowledge("open".into()), clock())
+            .is_ok()
     );
     host.site_command(
-        "1000",
+        LOCAL,
         SiteCommand::Output {
             name: "relay".into(),
             request: OutputRequest::Off,
@@ -223,7 +290,7 @@ fn site_commands_preserve_protection_and_reject_during_owner_handoff() {
     .unwrap();
     host.poll_sites(14);
     assert_eq!(BANK.lock().unwrap().high, 0);
-    let snapshot = host.runtime.node("1000").unwrap().site().snapshot(14);
+    let snapshot = host.runtime.node(LOCAL).unwrap().site().snapshot(14);
     assert!(snapshot.transmit_inhibited);
     assert!(snapshot.alarms["open"].active && snapshot.alarms["open"].acknowledged);
     assert!(
@@ -232,7 +299,7 @@ fn site_commands_preserve_protection_and_reject_during_owner_handoff() {
     );
     assert!(
         host.site_command(
-            "1000",
+            LOCAL,
             SiteCommand::Output {
                 name: "ptt".into(),
                 request: OutputRequest::On,
@@ -243,7 +310,7 @@ fn site_commands_preserve_protection_and_reject_during_owner_handoff() {
     );
     let _ = host.site_shutdown(15);
     assert!(
-        host.site_command("1000", SiteCommand::Inhibit(false), clock())
+        host.site_command(LOCAL, SiteCommand::Inhibit(false), clock())
             .is_err()
     );
     for now in 16..24 {
@@ -251,7 +318,7 @@ fn site_commands_preserve_protection_and_reject_during_owner_handoff() {
             break;
         }
     }
-    assert!(host.stop(24));
+    assert!(host.fixture_stop(24));
 }
 
 #[test]
@@ -259,16 +326,29 @@ fn site_host_status_separates_requested_submitted_and_unavailable_readback() {
     let _serial = crate::fixture::LIFECYCLE
         .lock()
         .unwrap_or_else(|e| e.into_inner());
+    let _hardware = crate::site::backends::endpoint::tests::physical_fixture();
     let mut host = bank_host_with(
-        "[input 1000 door]\nenabled=yes\nbackend=cm119\ndevice=1000\nline=8\n[sensor 1000 battery]\nenabled=yes\nbackend=hwmon\ndevice=/sys/selected\nchannel=in1_input\n",
+        &[
+            door(),
+            (
+                LOCAL,
+                Kind::Sensor,
+                "battery",
+                json!({"enabled":true,"source":{"type":"hwmon","device":"fixture","channel":"in1_input"}}),
+            ),
+        ],
+        false,
+        500,
     );
+    // Reproduce loss of the external acquisition while retaining the radio bank.
+    drop(std::mem::take(&mut host.site_acquisition));
     host.pump(RuntimeClock {
         now_ms: 10,
         ..clock()
     })
     .unwrap();
     host.epoch = Instant::now() - std::time::Duration::from_secs(6);
-    let text = host.status_text("1000").unwrap();
+    let text = host.status_text(LOCAL).unwrap();
     assert!(text.contains("site transmit-inhibited=false"), "{text}");
     assert!(
         text.contains("input door value=Some(false) quality=Valid age-ms=Some("),
@@ -286,7 +366,7 @@ fn site_host_status_separates_requested_submitted_and_unavailable_readback() {
             break;
         }
     }
-    assert!(host.stop(6008));
+    assert!(host.fixture_stop(6008));
 }
 
 #[test]
@@ -305,7 +385,7 @@ fn site_host_shutdown_acknowledges_safe_release_before_destroying_radio() {
             drops
         );
     }
-    assert!(host.stop(8));
+    assert!(host.fixture_stop(8));
     assert_eq!(
         BANK.lock().unwrap().writes,
         [(0x40, 0x40), (0x40, 0), (0, 0)]
@@ -319,8 +399,7 @@ fn site_host_reload_release_then_abort_restores_live_demand_without_reopening() 
         .unwrap_or_else(|e| e.into_inner());
     let mut host = bank_host();
     let revision = host.runtime.revision();
-    let backends =
-        Arc::new(crate::site::backends::SiteBackends::load(host.runtime.document()).unwrap());
+    let backends = Arc::new(crate::site::backends::SiteBackends::load_scopes([]).unwrap());
     let mut candidate = Some(
         Acquisition::prepare_reload(
             &Default::default(),
@@ -352,7 +431,7 @@ fn site_host_reload_release_then_abort_restores_live_demand_without_reopening() 
     );
     let busy = Acquisition::prepare_reload(
         &Default::default(),
-        Arc::new(crate::site::backends::SiteBackends::load(host.runtime.document()).unwrap()),
+        Arc::new(crate::site::backends::SiteBackends::load_scopes([]).unwrap()),
         host.epoch,
         host.site_acquisition.keys(),
     )
@@ -400,7 +479,7 @@ fn site_host_reload_release_then_abort_restores_live_demand_without_reopening() 
             break;
         }
     }
-    assert!(host.stop(18));
+    assert!(host.fixture_stop(18));
 }
 
 #[test]
@@ -410,8 +489,14 @@ fn site_host_fan_reports_delivery_failure_and_recovery_only_for_its_node() {
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     let mut host = bank_host_with(
-        "[fan 1000 cooling]\nenabled=yes\noutput=relay\nmode=ptt\nrun_on_ms=0\n\
-         [2000]\nradio_channel=usb2\nduplex=full\n",
+        &[(
+            LOCAL,
+            Kind::Fan,
+            "cooling",
+            json!({"enabled":true,"output":"relay","mode":"ptt","timing":{"run_on_ms":0}}),
+        )],
+        true,
+        500,
     );
     host.advance_sites(clock());
     for (duty, expected, fault) in [
@@ -420,18 +505,25 @@ fn site_host_fan_reports_delivery_failure_and_recovery_only_for_its_node() {
         (Some(0.5), 0, true),
         (Some(1.0), 0x40, false),
     ] {
-        host.site_command(
-            "1000",
+        let applied = host.site_command(
+            LOCAL,
             SiteCommand::Fan {
                 name: "cooling".into(),
                 duty,
             },
             clock(),
-        )
-        .unwrap();
+        );
+        assert_eq!(
+            applied,
+            if fault {
+                Err(rpt_advanced_core::site::SiteError::Unavailable)
+            } else {
+                Ok(())
+            }
+        );
         host.poll_sites(1);
         host.poll_sites(2);
-        let text = host.status_text("1000").unwrap();
+        let text = host.status_text(LOCAL).unwrap();
         assert!(text.contains("fan cooling requested-duty="), "{text}");
         assert_eq!(
             text.contains("site-action cooling fault=Unavailable"),
@@ -440,7 +532,7 @@ fn site_host_fan_reports_delivery_failure_and_recovery_only_for_its_node() {
         );
         assert!(
             !host
-                .status_text("2000")
+                .status_text(SECOND_LOCAL)
                 .unwrap()
                 .contains("site-action cooling")
         );
@@ -451,51 +543,73 @@ fn site_host_fan_reports_delivery_failure_and_recovery_only_for_its_node() {
             break;
         }
     }
-    assert!(host.stop(12));
+    assert!(host.fixture_stop(12));
 }
 
 #[test]
-fn site_host_reports_unavailable_actions_and_retired_notification_names() {
+fn site_host_reports_unavailable_actions_and_preserves_compiled_notices() {
     let _serial = crate::fixture::LIFECYCLE
         .lock()
         .unwrap_or_else(|e| e.into_inner());
+    let _hardware = crate::site::backends::endpoint::tests::physical_fixture();
     let mut host = bank_host_with(
-        "[input 1000 door]\nenabled=yes\nbackend=cm119\ndevice=1000\nline=8\n\
-         [output 1000 external]\nenabled=yes\nbackend=gpiod\ndevice=fixture\nline=7\n\
-         [alarm 1000 open]\nenabled=yes\nsource=door\ncondition=inactive\n\
-         on_trip=output:external:on,macro:stop\ntrip_message=notice\n\
-         [macro stop]\naction=disconnect_all\n\
-         [message notice]\ncontent={media}\nmorse_text=E\n",
+        &[
+            door(),
+            (
+                LOCAL,
+                Kind::Output,
+                "external",
+                json!({"enabled":true,"source":{"type":"gpiod","device":"fixture","line":"7"}}),
+            ),
+            (
+                LOCAL,
+                Kind::Alarm,
+                "open",
+                json!({"enabled":true,"source":"door","condition":"inactive","on_trip":["output:external:on","macro:stop"],"trip_message":"notice"}),
+            ),
+            (
+                LOCAL,
+                Kind::Macro,
+                "stop",
+                json!({"actions":[{"action":"disconnect_all"}]}),
+            ),
+            notice(),
+        ],
+        false,
+        500,
     );
-    let mut settings =
-        ResolvedSiteSettings::resolve(host.runtime.document(), &NodeId::new("1000").unwrap())
-            .unwrap()
-            .value;
-    // Reproduce a queued notification whose catalog identity has been retired.
+    drop(std::mem::take(&mut host.site_acquisition));
+    let mut settings = host.runtime.modular_configuration().unwrap().scopes
+        [&ResourceScope::Port(LOCAL.parse().unwrap())]
+        .equipment
+        .settings
+        .clone();
+    // The compiled notice belongs to the active graph. A late mutable equipment
+    // label cannot re-resolve or replace that graph's existing alarm notice.
     settings.alarms[0].trip_message = "missing".into();
     host.runtime
-        .node("1000")
+        .node(LOCAL)
         .unwrap()
         .site()
         .reconfigure(settings);
     host.advance_sites(clock());
-    let text = host.status_text("1000").unwrap();
+    let text = host.status_text(LOCAL).unwrap();
     for expected in [
         "alarm open active=true",
         "site-action external fault=Unavailable",
         "site-action alarm:open fault=Unavailable",
-        "site-action missing fault=Unavailable",
     ] {
         assert!(text.contains(expected), "{expected}: {text}");
     }
     assert!(!text.contains("site-action stop"), "{text}");
+    assert!(!text.contains("site-action missing"), "{text}");
     assert!(host.take_site_links().is_empty());
     for now in 3..12 {
         if host.stop(now) {
             break;
         }
     }
-    assert!(host.stop(12));
+    assert!(host.fixture_stop(12));
 }
 
 #[test]
@@ -504,19 +618,26 @@ fn site_host_basis_fences_only_removed_disabled_or_replaced_radios() {
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     let mut host = bank_host();
+    let next = |enabled: bool, device: &str, radio: Value| {
+        station::prepare(
+            &[(LOCAL, "1000", json!({"enabled": enabled}))],
+            &[
+                (LOCAL, Kind::Interface, "", bridge_interface(device)),
+                (LOCAL, Kind::Radio, "", radio),
+            ],
+        )
+    };
     for (next, replaced) in [
-        (document("usb", ""), false),
-        (ConfigDocument::parse("").unwrap(), true),
-        (document("usb", "node_enabled=no\n"), true),
-        (document("other", ""), true),
-        (
-            document("usb", "[radio 1000]\nradio_duplex_mode=full\n"),
-            true,
-        ),
+        (next(true, "3-1", json!({})), false),
+        (station::prepare(&[], &[]), true),
+        (next(false, "3-1", json!({})), true),
+        (next(true, "3-3", json!({})), true),
+        (next(true, "3-1", json!({"duplex_mode":"full"})), true),
     ] {
-        let basis = host.site_basis(&next).unwrap();
+        let ticket = host.stage_radio_plans(next.runtime()).unwrap();
+        let basis = host.modular_site_basis(&ticket).unwrap();
         assert_eq!(basis.revision, host.runtime.revision());
-        assert_eq!(basis.replaced.contains("1000"), replaced);
+        assert_eq!(basis.replaced.contains(LOCAL), replaced);
         assert!(basis.known.is_empty());
     }
     assert_eq!(host.commit_sites(), Ok(()));
@@ -528,7 +649,7 @@ fn site_host_basis_fences_only_removed_disabled_or_replaced_radios() {
             break;
         }
     }
-    assert!(host.stop(12));
+    assert!(host.fixture_stop(12));
 }
 
 #[test]
@@ -550,9 +671,8 @@ fn site_host_failed_safe_write_blocks_reload_and_preserves_the_live_owner() {
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     FAIL.store(true, std::sync::atomic::Ordering::Relaxed);
-    let mut host = bank_host_with_publish("", publish);
-    let backends =
-        Arc::new(crate::site::backends::SiteBackends::load(host.runtime.document()).unwrap());
+    let mut host = bank_host_with_publish(bank_config(&[], false, 500), publish);
+    let backends = Arc::new(crate::site::backends::SiteBackends::load_scopes([]).unwrap());
     let mut candidate = Some(
         Acquisition::prepare_reload(
             &Default::default(),
@@ -579,7 +699,7 @@ fn site_host_failed_safe_write_blocks_reload_and_preserves_the_live_owner() {
             break;
         }
     }
-    assert!(host.stop(12));
+    assert!(host.fixture_stop(12));
 }
 
 #[test]
@@ -589,10 +709,17 @@ fn site_host_reload_keeps_unchanged_output_timers_and_alarm_protection_running()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     let mut host = bank_host_with(
-        "pulse_ms=20\n\
-         [input 1000 door]\nenabled=yes\nbackend=cm119\ndevice=1000\nline=8\n\
-         [alarm 1000 open]\nenabled=yes\nsource=door\ncondition=inactive\n\
-         trip_delay_ms=50\non_trip=inhibit:on\n",
+        &[
+            door(),
+            (
+                LOCAL,
+                Kind::Alarm,
+                "open",
+                json!({"enabled":true,"source":"door","condition":"inactive","timing":{"trip_delay_ms":50},"on_trip":["inhibit:on"]}),
+            ),
+        ],
+        false,
+        20,
     );
     host.advance_sites(RuntimeClock {
         now_ms: 0,
@@ -600,7 +727,7 @@ fn site_host_reload_keeps_unchanged_output_timers_and_alarm_protection_running()
     });
     for request in [OutputRequest::Off, OutputRequest::Pulse] {
         host.site_command(
-            "1000",
+            LOCAL,
             SiteCommand::Output {
                 name: "relay".into(),
                 request,
@@ -612,8 +739,7 @@ fn site_host_reload_keeps_unchanged_output_timers_and_alarm_protection_running()
         )
         .unwrap();
     }
-    let backends =
-        Arc::new(crate::site::backends::SiteBackends::load(host.runtime.document()).unwrap());
+    let backends = Arc::new(crate::site::backends::SiteBackends::load_scopes([]).unwrap());
     let mut candidate = Some(
         Acquisition::prepare_reload(
             &Default::default(),
@@ -626,13 +752,10 @@ fn site_host_reload_keeps_unchanged_output_timers_and_alarm_protection_running()
     let mut radio = Some(
         RadioSite::prepare(
             &[(
-                "1000".into(),
-                ResolvedSiteSettings::resolve(
-                    host.runtime.document(),
-                    &NodeId::new("1000").unwrap(),
-                )
-                .unwrap()
-                .value,
+                LOCAL.into(),
+                host.runtime.modular_configuration().unwrap().acquisition
+                    [&ResourceScope::Port(LOCAL.parse().unwrap())]
+                    .clone(),
             )]
             .into_iter()
             .collect(),
@@ -652,7 +775,7 @@ fn site_host_reload_keeps_unchanged_output_timers_and_alarm_protection_running()
         ..clock()
     });
     host.poll_sites(101);
-    let state = host.runtime.node("1000").unwrap().site().snapshot(101);
+    let state = host.runtime.node(LOCAL).unwrap().site().snapshot(101);
     assert!(!state.outputs["relay"].requested_on);
     assert_eq!(state.outputs["relay"].pulse_deadline_ms, None);
     assert!(state.alarms["open"].active);
@@ -664,21 +787,25 @@ fn site_host_reload_keeps_unchanged_output_timers_and_alarm_protection_running()
             break;
         }
     }
-    assert!(host.stop(110));
+    assert!(host.fixture_stop(110));
 }
 
 unsafe extern "C" fn observation(
-    _: *mut c_void,
+    context: *mut c_void,
     handle: *mut c_void,
     bank: u32,
     output: *mut abi::UrpAstSiteSnapshot,
 ) -> i32 {
-    assert_eq!(unsafe { crate::fixture::radio_name(handle) }, "1000\0usb");
+    // SAFETY: both fixtures retain the expected station name and live radio handle.
+    let owner = unsafe { std::ffi::CStr::from_ptr(context.cast()) }
+        .to_str()
+        .unwrap();
+    assert_eq!(unsafe { crate::fixture::radio_name(handle) }, owner);
     assert_eq!(bank, 0);
     unsafe {
         (*output).generation = 7;
-        (*output).input_mask = 2;
-        (*output).input_high_mask = 2;
+        (*output).input_mask = 0x80;
+        (*output).input_high_mask = 0x80;
         (*output).input_quality = 1;
         (*output).observed_at_ms = 950;
         (*output).observed_at_valid = 1;
@@ -694,8 +821,7 @@ fn site_host_publishes_site_replacement_with_runtime_before_post_reload_polling(
         .unwrap_or_else(|e| e.into_inner());
     for notification_error in [false, true] {
         let mut host = bank_host();
-        let backends =
-            Arc::new(crate::site::backends::SiteBackends::load(host.runtime.document()).unwrap());
+        let backends = Arc::new(crate::site::backends::SiteBackends::load_scopes([]).unwrap());
         let mut candidate = Some(
             Acquisition::prepare_reload(
                 &Default::default(),
@@ -720,30 +846,65 @@ fn site_host_publishes_site_replacement_with_runtime_before_post_reload_polling(
         }
         let mut session = None;
         if notification_error {
-            host.runtime.incoming("1000", "2000", true).unwrap();
-            host.runtime.incoming("1000", "3000", true).unwrap();
+            host.runtime.incoming(LOCAL, "2000", true).unwrap();
+            host.runtime.incoming(LOCAL, "3000", true).unwrap();
             let (io, state) = peer(48000);
             let (_producer, outbound) = LinkAudioQueue::new(9600, 64).unwrap().into_endpoints();
-            let (mut pending, control) =
+            let (pending, control) =
                 PeerSession::prepare(io, outbound, "1000", "2000", true).unwrap();
             host.peers.push(PeerOwner {
-                local: "1000".into(),
+                superseded: false,
+                local: LOCAL.into(),
                 remote: "2000".into(),
                 mode: Mode::TRANSCEIVE,
                 group: None,
                 announced: true,
                 control,
             });
+            session = Some((pending, state));
+        }
+        let revision = host.runtime.revision();
+        let next = station::prepare(
+            &[(LOCAL, "1000", json!({}))],
+            &[(LOCAL, Kind::Interface, "", bridge_interface("3-1"))],
+        );
+        let ticket = host.stage_radio_plans(next.runtime()).unwrap();
+        host.prepare_core(&ticket, next.runtime().clone(), clock())
+            .unwrap();
+        let credentials = host
+            .bind_core_credentials(&ticket, next.runtime(), Default::default())
+            .unwrap();
+        let mut result = host.begin_core_adoption(
+            ticket,
+            "post-site".into(),
+            credentials,
+            next.inputs().clone(),
+            clock(),
+        );
+        let timeout = Instant::now() + std::time::Duration::from_secs(5);
+        while matches!(result, Ok(false)) {
+            assert!(Instant::now() < timeout);
+            result = host.poll_reload(clock());
+            std::thread::yield_now();
+        }
+        result.unwrap();
+        if let Some((pending, state)) = &mut session {
+            // A managed station only accepts D frames from its currently attached ingress.
+            let reply = host.peers[0].control.reply_target();
+            host.runtime
+                .node(LOCAL)
+                .unwrap()
+                .links()
+                .attach_ingress(PeerIdentity::from_operator("2000").unwrap(), reply)
+                .unwrap();
             state
                 .lock()
                 .unwrap()
                 .input
                 .push_back(Input::Text(b"D 3000 4000 11 9"));
             pending.step(clock().now_ms).unwrap();
-            session = Some(pending);
         }
-        let revision = host.runtime.revision();
-        let result = host.reload(document("usb", ""), clock());
+        let result = host.pump(clock());
         assert_eq!(
             result,
             if notification_error {
@@ -754,14 +915,14 @@ fn site_host_publishes_site_replacement_with_runtime_before_post_reload_polling(
         );
         assert!(host.runtime.revision() > revision);
         host.poll_sites(12);
-        let removed = host.site_radio.output_status("1000", "relay").is_none();
+        let removed = host.site_radio.output_status(LOCAL, "relay").is_none();
         drop(host.abort_sites());
         for now in 13..20 {
             if host.stop(now) {
                 break;
             }
         }
-        assert!(host.stop(20));
+        assert!(host.fixture_stop(20));
         assert!(
             removed,
             "published configuration must not retain the removed site binding"
@@ -788,20 +949,16 @@ fn site_engine_shutdown_drives_safe_barriers_before_stopping_radio() {
     table.radio_site_snapshot = Some(bank_snapshot);
     table.radio_site_bind = Some(bank_bind);
     table.radio_site_publish = Some(bank_publish);
-    let configuration = "[1000]\nradio_channel=usb\nduplex=full\n[output 1000 relay]\nenabled=yes\nbackend=cm119\ndevice=1000\nline=7\nstartup_state=on\nsafe_state=off\n";
-    assert_eq!(
-        unsafe {
-            api.start.unwrap()(
-                Box::leak(Box::new(table)),
-                crate::fixture::control_descriptor(),
-                rptadv_file_adapter::rptadv_file_adapter_descriptor().cast(),
-                rptadv_speech_adapter::rptadv_speech_adapter_descriptor().cast(),
-                configuration.as_ptr().cast(),
-                configuration.len(),
-            )
-        },
-        0
-    );
+    // SAFETY: the immutable leaked table and static control provider outlive all Engine calls.
+    let engine = unsafe {
+        crate::lifecycle::tests::fixture_engine(
+            bank_config(&[], false, 500),
+            Box::leak(Box::new(table)),
+            crate::fixture::control_descriptor(),
+        )
+    }
+    .unwrap();
+    drop(engine);
     let (engine, call) = crate::lifecycle::selected().unwrap();
     engine
         .run(|host| {
@@ -831,22 +988,28 @@ fn site_host_polls_configured_owner_without_a_second_radio_reservation() {
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     let mut table = unsafe { crate::fixture::host_descriptor().read() };
-    table.context = ptr::without_provenance_mut(1);
+    table.context = c"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+        .as_ptr()
+        .cast_mut()
+        .cast();
     table.radio_site_snapshot = Some(observation);
     let services = unsafe { HostServices::open(Box::leak(Box::new(table))) }.unwrap();
-    let document = document(
-        "usb",
-        "[input 1000 door]\nenabled=yes\nbackend=cm119\ndevice=1000\nline=2\nactive_level=low\n",
+    let config = station::prepare(
+        &[(LOCAL, "1000", json!({}))],
+        &[
+            (LOCAL, Kind::Interface, "", bridge_interface("3-1")),
+            (
+                LOCAL,
+                Kind::Input,
+                "door",
+                json!({"enabled":true,"active_level":"low","source":{"type":"interface","node":"1000","property":"/gpio/pins/8"}}),
+            ),
+        ],
     );
-    let site = ResolvedSiteSettings::resolve(&document, &NodeId::new("1000").unwrap())
-        .unwrap()
-        .value;
-    let radio = RadioSite::prepare(&[("1000".to_owned(), site)].into_iter().collect()).unwrap();
-    let mut host = Host::start(document, media(), services, Instant::now(), clock()).unwrap();
+    let mut host = Host::fixture_start(config, media(), services, Instant::now(), clock()).unwrap();
     let drops = crate::fixture::RADIO_DROPS.load(std::sync::atomic::Ordering::Relaxed);
-    host.install_sites(Acquisition::default(), radio);
     let values = host.poll_sites(2000);
-    let input = &values["1000"].inputs["door"];
+    let input = &values[LOCAL].inputs["door"];
     assert_eq!(input.value, Some(false));
     assert_eq!(input.observed_at_ms, Some(1950));
     assert_eq!(input.quality, ReadingQuality::Valid);
@@ -854,5 +1017,73 @@ fn site_host_polls_configured_owner_without_a_second_radio_reservation() {
         crate::fixture::RADIO_DROPS.load(std::sync::atomic::Ordering::Relaxed),
         drops
     );
-    assert!(host.stop(2100));
+    assert!(host.fixture_stop(2100));
+}
+
+#[test]
+fn round_one_host_merges_cached_sensor_calibration_quality_and_original_time() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let mut table = unsafe { crate::fixture::host_descriptor().read() };
+    let identity = c"929e52be-6854-4c46-85f2-000000000002";
+    let owner = identity.to_str().unwrap();
+    table.context = identity.as_ptr().cast_mut().cast();
+    table.radio_site_snapshot = Some(observation);
+    let services = unsafe { HostServices::open(Box::leak(Box::new(table))) }.unwrap();
+    let config = station::prepare(
+        &[(owner, "1000", json!({}))],
+        &[
+            (owner, Kind::Interface, "", bridge_interface("3-1")),
+            (
+                owner,
+                Kind::Input,
+                "door",
+                json!({"enabled":true,"active_level":"low","source":{"type":"interface","node":"1000","property":"/gpio/pins/8"}}),
+            ),
+            (
+                owner,
+                Kind::Sensor,
+                "sense",
+                json!({"enabled":true,"source":{"type":"interface","node":"1000","property":"/gpio/pins/8"},"unit":"V","precision":1,"timing":{"poll_interval_ms":100,"stale_after_ms":5000},"calibration":{"mode":"two_point","input":{"low":0,"high":1},"value":{"low":5,"high":20}}}),
+            ),
+        ],
+    );
+    let sensor = config.runtime().scopes[&ResourceScope::Port(owner.parse().unwrap())]
+        .equipment
+        .settings
+        .sensors[0]
+        .clone();
+    let mut state = rpt_advanced_core::site::SensorState::new(sensor);
+    let mut host = Host::fixture_start(config, media(), services, Instant::now(), clock()).unwrap();
+    let drops = crate::fixture::RADIO_DROPS.load(std::sync::atomic::Ordering::Relaxed);
+    let values = host.poll_sites(2000);
+    let raw = &values[owner].sensors["sense"];
+    assert_eq!(
+        (raw.value, raw.quality, raw.observed_at_ms),
+        (Some(1.0), ReadingQuality::Valid, Some(1950))
+    );
+    state.observe(raw.clone(), 2000);
+    let first = state.snapshot(2000);
+    assert_eq!(first.current.value, Some(20.0));
+    assert_eq!(first.current.observed_at_ms, Some(1950));
+    // The cached owner returns the same device snapshot on a later control tick.
+    // Its last observation must keep its original time and expire at the original deadline.
+    let again = host.poll_sites(2010);
+    assert_eq!(again[owner].sensors["sense"].observed_at_ms, Some(1950));
+    assert_eq!(again[owner].inputs["door"].observed_at_ms, Some(1950));
+    state.observe(again[owner].sensors["sense"].clone(), 2010);
+    assert_eq!(state.snapshot(2010), first);
+    let expired = host.poll_sites(7000);
+    state.observe(expired[owner].sensors["sense"].clone(), 7000);
+    assert_eq!(state.snapshot(7000).current.quality, ReadingQuality::Stale);
+    let input = &values[owner].inputs["door"];
+    assert_eq!(input.value, Some(false));
+    assert_eq!(input.observed_at_ms, Some(1950));
+    assert_eq!(input.quality, ReadingQuality::Valid);
+    assert_eq!(
+        crate::fixture::RADIO_DROPS.load(std::sync::atomic::Ordering::Relaxed),
+        drops
+    );
+    assert!(host.fixture_stop(7100));
 }

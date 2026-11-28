@@ -275,12 +275,12 @@ fn egress_shutdown_releases_dispatches_still_in_the_publication_queue() {
 
 #[test]
 fn regeneration_preparation_rejects_invalid_work_bounds_before_publication() {
-    use crate::link::ring::{InboundPolicy, InboundRing};
+    use crate::link::ring::InboundRing;
     use rpt_advanced_core::config::ResolvedDtmfRegenerationSettings;
     let mut worker = MediaWorker::start().unwrap();
     for maximum in [0, 4097] {
         let (_, dispatcher, _) = fixture(1);
-        let (writer, _reader) = InboundRing::open(48000, InboundPolicy::Media).unwrap();
+        let (writer, _reader) = InboundRing::regeneration().unwrap();
         assert!(matches!(
             worker.prepare(
                 dispatcher,
@@ -294,11 +294,11 @@ fn regeneration_preparation_rejects_invalid_work_bounds_before_publication() {
 
 #[test]
 fn regeneration_backpressure_does_not_block_fanout_and_retires_with_generation() {
-    use crate::link::ring::{InboundPolicy, InboundRing};
+    use crate::link::ring::InboundRing;
     use rpt_advanced_core::config::ResolvedDtmfRegenerationSettings;
     let mut worker = MediaWorker::start().unwrap();
     let (mut audio, dispatcher, mut outputs) = fixture(1);
-    let (writer, mut reader) = InboundRing::open(48000, InboundPolicy::Media).unwrap();
+    let (writer, mut reader) = InboundRing::regeneration().unwrap();
     let mut registration = worker
         .prepare(
             dispatcher,
@@ -346,7 +346,7 @@ fn failed_regeneration_write_retires_producer_without_stopping_peer_fanout() {
     use rpt_advanced_core::config::ResolvedDtmfRegenerationSettings;
     let mut worker = MediaWorker::start().unwrap();
     let (mut audio, dispatcher, mut outputs) = fixture(1);
-    let (writer, _reader) = crate::link::ring::tests::failed_media_push_endpoints();
+    let (writer, _reader) = crate::link::ring::tests::failed_regeneration_push_endpoints();
     let mut registration = worker
         .prepare(
             dispatcher,

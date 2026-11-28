@@ -141,3 +141,134 @@ fn phone_local_binding_uses_node_id_semantics_without_relaxing_asl_wire_ids() {
         );
     }
 }
+
+#[test]
+fn optional_phone_group_requires_the_complete_host11_table() {
+    let mut table = unsafe { *crate::fixture::host_descriptor() };
+    let phone = offset_of!(abi::rptadv_host_services_v11, phone_provider);
+    let radio = offset_of!(abi::rptadv_host_services_v11, station_binding);
+    let full = size_of_val(&table);
+    assert_eq!((radio, phone, full), (384, 392, 416));
+    for truncated in radio..phone + size_of::<*const ()>() {
+        table.struct_size = truncated as u32;
+        assert!(unsafe { HostServices::open(&table) }.is_err());
+    }
+    table.struct_size = full as u32;
+    table.phone_provider = ptr::null();
+    let services = unsafe { HostServices::open(&table) }.unwrap();
+    assert!(services.phone_provider().is_err());
+
+    let mut group: abi::rptadv_phone_provider_v2 = unsafe { std::mem::zeroed() };
+    group.struct_size = std::mem::size_of_val(&group) as u32;
+    group.abi_version = 2;
+    table.phone_provider = &group;
+    let services = unsafe { HostServices::open(&table) }.unwrap();
+    assert!(
+        services.phone_provider().is_err(),
+        "an empty group cannot stage a phone account"
+    );
+}
+
+#[test]
+fn asl_host_extension_rejects_a_partially_present_provider_pointer() {
+    let mut table = unsafe { *crate::fixture::host_descriptor() };
+    let start = offset_of!(abi::rptadv_host_services_v11, asl_provider);
+    let end = start + size_of::<*const ()>();
+    assert_eq!((start, end), (400, 408));
+    for available in start..=end {
+        table.struct_size = available as u32;
+        assert!(
+            unsafe { HostServices::open(&table) }.is_err(),
+            "truncated host table with {available} readable bytes"
+        );
+    }
+    table.struct_size = size_of_val(&table) as u32;
+    table.asl_provider = ptr::null();
+    assert!(
+        unsafe { HostServices::open(&table) }
+            .unwrap()
+            .asl_provider()
+            .is_err()
+    );
+}
+
+#[test]
+fn managed_echo_pointer_accepts_only_complete_host_extents_and_functions() {
+    unsafe extern "C" fn begin(_: *mut c_void, _: u64, _: u64) -> i32 {
+        0
+    }
+    unsafe extern "C" fn row(
+        _: *mut c_void,
+        _: u64,
+        _: *const abi::rptadv_managed_echo_row_v1,
+    ) -> i32 {
+        0
+    }
+    unsafe extern "C" fn step(_: *mut c_void, _: u64, _: u32) -> i32 {
+        0
+    }
+    unsafe extern "C" fn shutdown(_: *mut c_void) -> i32 {
+        0
+    }
+    let (peer, _owner) = crate::link::session::tests::peer_with_egress(8000, true, true);
+    let mut table = peer.services.0;
+    let start = std::mem::offset_of!(abi::rptadv_host_services_v11, managed_echo_provider);
+    let end = start + size_of::<*const ()>();
+    assert_eq!((start, end), (408, 416));
+    unsafe extern "C" fn observe(
+        _: *mut c_void,
+        _: *const u8,
+        _: *const u8,
+        _: u64,
+        _: *mut abi::rptadv_managed_echo_status_v1,
+    ) -> i32 {
+        -1
+    }
+    let complete = || abi::rptadv_managed_echo_provider_v2 {
+        struct_size: size_of::<abi::rptadv_managed_echo_provider_v2>() as u32,
+        abi_version: 2,
+        begin: Some(begin),
+        row: Some(row),
+        step: Some(step),
+        shutdown: Some(shutdown),
+        observe: Some(observe),
+    };
+    let group = complete();
+    table.managed_echo_provider = &group;
+    for size in start..=end {
+        table.struct_size = size as u32;
+        let opened = unsafe { HostServices::open(&table) };
+        if size == end {
+            assert!(opened.unwrap().echo_provider().is_ok());
+        } else {
+            assert!(opened.is_err(), "partial Echo pointer at extent {size}");
+        }
+    }
+    table.managed_echo_provider = ptr::null();
+    assert!(
+        unsafe { HostServices::open(&table) }
+            .unwrap()
+            .echo_provider()
+            .is_err()
+    );
+    for missing in 0..7 {
+        let mut group = complete();
+        match missing {
+            0 => group.begin = None,
+            1 => group.row = None,
+            2 => group.step = None,
+            3 => group.shutdown = None,
+            4 => group.struct_size -= 1,
+            5 => group.observe = None,
+            _ => group.abi_version = 1,
+        }
+        table.managed_echo_provider = &group;
+        assert!(
+            unsafe { HostServices::open(&table) }
+                .unwrap()
+                .echo_provider()
+                .is_err(),
+            "incomplete Echo group variant {missing}"
+        );
+    }
+}

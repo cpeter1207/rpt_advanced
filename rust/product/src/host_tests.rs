@@ -1,4 +1,11 @@
 use super::*;
+use crate::fixture::station::{self, LOCAL, SECOND_LOCAL};
+use crate::link::ring::InboundPolicy;
+use crate::management::PreparedConfiguration;
+use rpt_advanced_core::config::resources::candidate::ResourceKind as Kind;
+use serde_json::{Value, json};
+#[path = "host_command_review_tests.rs"]
+pub(crate) mod commands;
 #[path = "egress_load_tests.rs"]
 mod egress_load;
 #[path = "native_maintenance_host_tests.rs"]
@@ -33,11 +40,14 @@ fn media() -> NativeMediaPreparer {
     }
     .unwrap()
 }
-fn services() -> HostServices {
-    let mut table: abi::rptadv_host_services_v10 =
-        unsafe { crate::fixture::host_descriptor().read() };
+fn service_table() -> abi::rptadv_host_services_v11 {
+    let mut table = unsafe { crate::fixture::host_descriptor().read() };
     table.context = ptr::without_provenance_mut(1);
-    unsafe { HostServices::open(Box::leak(Box::new(table))) }.unwrap()
+    table.asl_provider = &crate::fixture::asl::PROVIDER;
+    table
+}
+fn services() -> HostServices {
+    unsafe { HostServices::open(Box::leak(Box::new(service_table()))) }.unwrap()
 }
 fn clock() -> RuntimeClock {
     RuntimeClock {
@@ -58,15 +68,147 @@ fn clock() -> RuntimeClock {
         )),
     }
 }
-fn document(device: &str, extra: &str) -> ConfigDocument {
-    ConfigDocument::parse(&format!(
-        "[1000]\nradio_channel={device}\nduplex=full\nlink_static_directory_file=fixture\n{extra}"
-    ))
+fn stations(
+    ports: &[(&str, &str, &str, Value)],
+    extra: &[(&str, Kind, &str, Value)],
+) -> PreparedConfiguration {
+    let mut members = Vec::new();
+    let mut metadata = Vec::new();
+    for (local, wire, device, fields) in ports {
+        metadata.push((*local, *wire, fields.clone()));
+        for (kind, base) in [
+            (
+                Kind::Interface,
+                json!({"audio":{"device_identifier":device}}),
+            ),
+            (Kind::Radio, json!({"duplex_mode":"full"})),
+            (
+                Kind::Allstarlink,
+                json!({"enabled":true,"node_number":wire.parse::<u64>().unwrap(),
+                "static_nodes":{"3":{"host":"127.0.0.1","port":4569,"source":"127.0.0.1"},"2000":{"host":"127.0.0.1","port":4569,"source":"127.0.0.1"}}}),
+            ),
+        ] {
+            let mut fields = base.as_object().unwrap().clone();
+            if let Some((_, _, _, overrides)) = extra
+                .iter()
+                .find(|(owner, k, _, _)| owner == local && *k == kind)
+            {
+                fields.extend(overrides.as_object().unwrap().clone());
+            }
+            members.push((*local, kind, "", Value::Object(fields)));
+        }
+    }
+    members.extend(
+        extra
+            .iter()
+            .filter(|(owner, k, _, _)| {
+                !ports.iter().any(|(id, _, _, _)| id == owner)
+                    || !matches!(k, Kind::Interface | Kind::Radio | Kind::Allstarlink)
+            })
+            .cloned(),
+    );
+    station::prepare(&metadata, &members)
+}
+
+fn configuration(device: &str, extra: &[(Kind, &str, Value)]) -> PreparedConfiguration {
+    let resources: Vec<_> = extra
+        .iter()
+        .map(|(k, name, v)| (LOCAL, *k, *name, v.clone()))
+        .collect();
+    stations(&[(LOCAL, "1000", device, json!({}))], &resources)
+}
+fn echo_station(config: PreparedConfiguration, local: &str, media: NativeMediaPreparer) -> Host {
+    use crate::management::native::AccountCredentials;
+    use rpt_advanced_core::config::resources::profiles::credentials::CredentialSlot;
+    let mut table = crate::link::session::tests::peer_table(true, true, true);
+    table.asl_provider = &crate::fixture::asl::PROVIDER;
+    table.context = ptr::without_provenance_mut(1);
+    table.managed_echo_provider = &crate::fixture::echo::PROVIDER;
+    let services = unsafe { HostServices::open(Box::leak(Box::new(table))) }.unwrap();
+    let scope = rpt_advanced_core::config::resources::candidate::ResourceScope::Port(
+        local.parse().unwrap(),
+    );
+    let owner = config
+        .runtime()
+        .registry
+        .binding(scope, Kind::Echolink)
+        .unwrap()
+        .id;
+    let version = "dddddddd-dddd-4ddd-8ddd-dddddddddddd".parse().unwrap();
+    let credentials =
+        AccountCredentials::fixture(&[(owner, CredentialSlot::Directory, version, b"fixture")]);
+    Host::fixture_start_with_credentials(
+        config,
+        media,
+        services,
+        Instant::now(),
+        clock(),
+        None,
+        credentials,
+    )
     .unwrap()
 }
-fn host() -> Host {
-    Host::start(
-        document("usb", ""),
+
+fn echo_profile() -> Value {
+    json!({"enabled":true,"callsign":"N0CALL-R","node_number":123456,"announcement":"callsign"})
+}
+
+fn echo_host() -> Host {
+    echo_station(
+        configuration(
+            "usb",
+            &[
+                (Kind::Echolink, "", echo_profile()),
+                (
+                    Kind::TelemetrySettings,
+                    "",
+                    json!({"morse":{"timing":{"speed_wpm":100}}}),
+                ),
+            ],
+        ),
+        LOCAL,
+        media(),
+    )
+}
+
+fn asl_route(host: &Host, remote: &str, source: Option<&str>) -> Result<String, RuntimeError> {
+    let selected = host.asl_account(LOCAL.parse().unwrap())?;
+    let source = source.map(|s| s.parse().unwrap());
+    let route = selected
+        .directory
+        .resolve(host.services, remote, source)
+        .map_err(|_| RuntimeError::Rejected)?;
+    route
+        .destination(&selected.directory, remote, source)
+        .map(str::to_owned)
+        .ok_or(RuntimeError::Rejected)
+}
+
+fn play_message(host: &mut Host, name: &str) {
+    let action = rpt_advanced_core::command_language::prepare_runtime_action(
+        &json!({"action":"message","message":name,"destination":"local"}),
+    )
+    .unwrap();
+    let (local, effect) = host
+        .runtime
+        .management_action(LOCAL.parse().unwrap(), "operator", &action, clock())
+        .unwrap();
+    host.immediate(&local, effect, clock()).unwrap();
+}
+
+fn mapped_host(mappings: Value) -> Host {
+    Host::fixture_start(
+        configuration("usb", &[(Kind::Command, "", json!({"mappings":mappings}))]),
+        media(),
+        services(),
+        Instant::now(),
+        clock(),
+    )
+    .unwrap()
+}
+pub(super) fn host() -> Host {
+    Host::fixture_start(
+        configuration("usb", &[]),
         media(),
         services(),
         Instant::now(),
@@ -76,59 +218,98 @@ fn host() -> Host {
 }
 
 #[test]
-fn dtmf_macro_host_pump_advances_without_civil_scheduling_and_new_input_cancels_due_work() {
+fn mapped_dtmf_macro_advances_without_civil_scheduling_and_reload_cancels_due_work() {
+    use rpt_advanced_core::command_language::MacroOutcome;
     let _serial = crate::fixture::LIFECYCLE
         .lock()
-        .unwrap_or_else(|error| error.into_inner());
-    let mut host = Host::start(
-        document(
+        .unwrap_or_else(|e| e.into_inner());
+    let config = || {
+        configuration(
             "usb",
-            "[dtmf_macro status]\ntrigger=*95\nprotected=no\ncommands=*70#,*73#\n",
-        ),
-        media(),
-        services(),
-        Instant::now(),
-        clock(),
-    )
-    .unwrap();
+            &[
+                (
+                    Kind::Command,
+                    "",
+                    json!({"mappings":{"status":{"command":"*95","protected":false,"action":"call_macro","macro":"report"}}}),
+                ),
+                (
+                    Kind::Macro,
+                    "report",
+                    json!({"actions":[{"action":"link_status"},{"action":"pause","timing":{"duration_ms":2000}},{"action":"network_status"}]}),
+                ),
+            ],
+        )
+    };
+    let mut host =
+        Host::fixture_start(config(), media(), services(), Instant::now(), clock()).unwrap();
+    let now = RuntimeClock {
+        civil: None,
+        ..clock()
+    };
     for digit in "*95".chars() {
         assert!(
             host.runtime
-                .digit("1000", DigitEvent::Digit { digit, now_ms: 10 })
+                .digit(LOCAL, DigitEvent::Digit { digit, now_ms: 10 })
                 .is_none()
         );
     }
-    host.pump(RuntimeClock {
-        civil: None,
-        ..clock()
-    })
-    .unwrap();
-    let operations = host.take_operations();
-    assert!(
-        matches!(operations.as_slice(), [(local, DigitOutcome::Operation(operation))] if local == "1000" && operation.command.action == LinkAction::Status)
-    );
-    host.pump(RuntimeClock {
-        now_ms: 2009,
-        civil: None,
-        ..clock()
-    })
-    .unwrap();
-    assert!(host.take_operations().is_empty());
-    host.runtime.digit(
-        "1000",
+    let Some(DigitOutcome::Mapped(input)) = host.runtime.digit(
+        LOCAL,
         DigitEvent::Digit {
-            digit: '*',
-            now_ms: 2010,
+            digit: '#',
+            now_ms: 10,
         },
+    ) else {
+        panic!("completed mapping")
+    };
+    let LinkEffect::CommandQueued(response) =
+        host.runtime.dispatch_mapping(LOCAL, input, now).unwrap()
+    else {
+        panic!("admitted sequence")
+    };
+    let Some((effect @ LinkEffect::Telemetry(LinkAction::Status, None), receipt)) =
+        host.runtime.advance_commands(LOCAL, now).unwrap()
+    else {
+        panic!("first status action")
+    };
+    host.immediate(LOCAL, effect, now).unwrap();
+    receipt.settle(true);
+    assert!(host.runtime.advance_commands(LOCAL, now).unwrap().is_none());
+    assert!(
+        host.runtime
+            .advance_commands(
+                LOCAL,
+                RuntimeClock {
+                    now_ms: 2009,
+                    ..now
+                }
+            )
+            .unwrap()
+            .is_none()
     );
-    host.pump(RuntimeClock {
-        now_ms: 2010,
-        civil: None,
-        ..clock()
-    })
+    assert_eq!(response.outcome(), None);
+    host.fixture_reload(
+        config(),
+        RuntimeClock {
+            now_ms: 2010,
+            ..now
+        },
+    )
     .unwrap();
-    assert!(host.take_operations().is_empty());
-    assert!(host.stop(2020));
+    assert_eq!(response.outcome(), Some(MacroOutcome::Cancelled));
+    assert!(
+        host.runtime
+            .advance_commands(
+                LOCAL,
+                RuntimeClock {
+                    now_ms: 2011,
+                    ..now
+                }
+            )
+            .unwrap()
+            .is_none()
+    );
+    assert!(host.fixture_stop(2020));
 }
 
 #[test]
@@ -136,34 +317,31 @@ fn echo_alias_routing_precedes_allstar_directory_lookup() {
     let _serial = crate::fixture::LIFECYCLE
         .lock()
         .unwrap_or_else(|error| error.into_inner());
-    let mut host = host();
+    let mut host = echo_host();
     for (alias, destination) in [
         ("3123456", "EchoLink/123456"),
         ("31002775", "EchoLink/1002775"),
         ("34294967295", "EchoLink/4294967295"),
     ] {
-        assert_eq!(host.lookup("1000", alias, None).unwrap(), destination);
+        assert_eq!(host.lookup(LOCAL, alias, None).unwrap(), destination);
         assert_eq!(
-            host.lookup("1000", alias, Some("127.0.0.1")),
+            host.lookup(LOCAL, alias, Some("127.0.0.1")),
             Err(RuntimeError::Rejected),
             "a directory address is not Echo QSO admission proof"
         );
     }
     for alias in ["3000000", "34294967296", "300012x"] {
-        assert_eq!(
-            host.lookup("1000", alias, None),
-            Err(RuntimeError::Rejected)
-        );
+        assert_eq!(host.lookup(LOCAL, alias, None), Err(RuntimeError::Rejected));
     }
     assert_eq!(
-        host.lookup("1000", "2000", None).unwrap(),
-        "radio@fixture/2000"
+        asl_route(&host, "2000", None).unwrap(),
+        "radio@127.0.0.1:4569/2000"
     );
     assert_eq!(
         host.lookup("missing", "3123456", None),
         Err(RuntimeError::MissingNode)
     );
-    assert!(host.stop(20));
+    assert!(host.fixture_stop(20));
 }
 
 #[test]
@@ -171,8 +349,8 @@ fn incoming_echo_uses_its_validated_qso_and_protocol_qualified_link_key() {
     let _serial = crate::fixture::LIFECYCLE
         .lock()
         .unwrap_or_else(|error| error.into_inner());
-    let mut host = host();
-    let (echo, state) = crate::link::session::tests::source_peer();
+    let mut host = echo_host();
+    let (echo, state) = crate::link::session::tests::source_peer_on(LOCAL);
     state.lock().unwrap().continuous_async = true;
     assert_eq!(echo.identity().node(), Some("2000"));
     host.incoming_peer(echo, "192.0.2.2", clock()).unwrap();
@@ -186,8 +364,8 @@ fn incoming_echo_uses_its_validated_qso_and_protocol_qualified_link_key() {
     });
     assert!(host.peers.iter().any(|peer| peer.remote == "3002000"));
     let bound = state.lock().unwrap().bound_radio.clone();
-    assert_eq!(bound.as_deref(), Some("1000\0usb"));
-    let (duplicate, rejected) = crate::link::session::tests::source_peer();
+    assert_eq!(bound.as_deref(), Some(LOCAL));
+    let (duplicate, rejected) = crate::link::session::tests::source_peer_on(LOCAL);
     assert!(host.incoming_peer(duplicate, "192.0.2.2", clock()).is_err());
     assert_eq!(rejected.lock().unwrap().drops, 1);
     assert!(rejected.lock().unwrap().bound_radio.is_none());
@@ -197,7 +375,13 @@ fn incoming_echo_uses_its_validated_qso_and_protocol_qualified_link_key() {
     assert!(host.incoming_peer(iax, "192.0.2.2", clock()).is_err());
     assert_eq!(rejected.lock().unwrap().drops, 1);
     let (iax, _) = peer(8000);
-    host.incoming_peer(iax, "127.0.0.1", clock()).unwrap();
+    assert!(asl_route(&host, "2000", Some("192.0.2.2")).is_err());
+    assert!(asl_route(&host, "2000", Some("127.0.0.1")).is_ok());
+    host.runtime
+        .authorize_incoming(LOCAL, "2000", true)
+        .unwrap();
+    host.accept_verified_peer(LOCAL, "2000", iax, clock())
+        .unwrap();
     assert_eq!(host.peers.len(), 2);
     assert!(host.peers.iter().any(|peer| peer.remote == "2000"));
     let origin = host
@@ -208,7 +392,7 @@ fn incoming_echo_uses_its_validated_qso_and_protocol_qualified_link_key() {
         .control
         .text_origin();
     host.human_text(
-        "1000",
+        LOCAL,
         rpt_advanced_core::link::HumanMessage {
             origin,
             source: "2000".into(),
@@ -220,7 +404,7 @@ fn incoming_echo_uses_its_validated_qso_and_protocol_qualified_link_key() {
     pump_until(&mut host, |_| {
         state.lock().unwrap().texts == [b"2000>literal crossover text".to_vec()]
     });
-    assert!(host.stop(20));
+    assert!(host.fixture_stop(20));
     assert_eq!(state.lock().unwrap().drops, 1);
     assert_eq!(
         state.lock().unwrap().texts,
@@ -233,18 +417,8 @@ fn echo_disconnect_announces_and_releases_the_verified_peer() {
     let _serial = crate::fixture::LIFECYCLE
         .lock()
         .unwrap_or_else(|error| error.into_inner());
-    let mut host = Host::start(
-        document(
-            "usb",
-            "[morse]\nspeed_wpm=100\n[echolink 1000]\nannouncement=callsign\n",
-        ),
-        media(),
-        services(),
-        Instant::now(),
-        clock(),
-    )
-    .unwrap();
-    let (echo, state) = crate::link::session::tests::source_peer();
+    let mut host = echo_host();
+    let (echo, state) = crate::link::session::tests::source_peer_on(LOCAL);
     state.lock().unwrap().continuous_async = true;
     host.incoming_peer(echo, "192.0.2.2", clock()).unwrap();
     pump_until(&mut host, |host| {
@@ -262,23 +436,19 @@ fn echo_disconnect_announces_and_releases_the_verified_peer() {
     let effect = host
         .runtime
         .command(
-            "1000",
+            LOCAL,
             operation(LinkAction::Disconnect, "3002000"),
             clock(),
             false,
         )
         .unwrap();
-    host.immediate("1000", effect, clock()).unwrap();
+    host.immediate(LOCAL, effect, clock()).unwrap();
     assert!(render_queued_telemetry(&mut host, &mut owners));
     pump_until(&mut host, |_| state.lock().unwrap().drops == 1);
     assert!(host.peers.is_empty());
-    assert!(
-        host.status_text("1000")
-            .unwrap()
-            .contains("no active links")
-    );
+    assert!(host.status_text(LOCAL).unwrap().contains("no active links"));
     lease.lock().unwrap().owners = Some(owners);
-    assert!(host.stop(20));
+    assert!(host.fixture_stop(20));
 }
 
 #[test]
@@ -296,21 +466,21 @@ fn echo_account_status_is_visible_without_active_links() {
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     let mut host = host();
-    let text = host.status_text("1000").unwrap();
+    let text = host.status_text(LOCAL).unwrap();
     assert!(text.contains("no active links"), "{text}");
     assert!(text.contains("echo-account fixture-state=online"), "{text}");
-    let mut table = unsafe { crate::fixture::host_descriptor().read() };
+    let mut table = service_table();
     table.echo_account_status = Some(failed_status);
     host.services = unsafe { HostServices::open(Box::leak(Box::new(table))) }.unwrap();
-    let text = host.status_text("1000").unwrap();
+    let text = host.status_text(LOCAL).unwrap();
     assert!(text.contains("no active links"), "{text}");
     assert!(text.contains("echo-account status-unavailable"), "{text}");
     table.echo_account_status = None;
     host.services = unsafe { HostServices::open(Box::leak(Box::new(table))) }.unwrap();
-    let text = host.status_text("1000").unwrap();
+    let text = host.status_text(LOCAL).unwrap();
     assert!(text.contains("no active links"), "{text}");
     assert!(!text.contains("echo-account"), "{text}");
-    assert!(host.stop(20));
+    assert!(host.fixture_stop(20));
 }
 
 #[test]
@@ -318,8 +488,8 @@ fn echo_status_reports_provider_metadata_from_the_peer_owner() {
     let _serial = crate::fixture::LIFECYCLE
         .lock()
         .unwrap_or_else(|error| error.into_inner());
-    let mut host = host();
-    let (echo, state) = crate::link::session::tests::source_peer();
+    let mut host = echo_host();
+    let (echo, state) = crate::link::session::tests::source_peer_on(LOCAL);
     let mut observation = abi::rptadv_peer_observation_v1 {
         struct_size: std::mem::size_of::<abi::rptadv_peer_observation_v1>() as u32,
         abi_version: abi::RPTADV_PEER_OBSERVATION_ABI_VERSION,
@@ -345,11 +515,11 @@ fn echo_status_reports_provider_metadata_from_the_peer_owner() {
     }
     host.incoming_peer(echo, "192.0.2.2", clock()).unwrap();
     pump_until(&mut host, |host| {
-        host.status_text("1000")
+        host.status_text(LOCAL)
             .unwrap()
             .contains("echo state=connected")
     });
-    let status = host.status_text("1000").unwrap();
+    let status = host.status_text(LOCAL).unwrap();
     assert!(status.contains("cause=none detail=\"Active\""), "{status}");
     assert!(
         status.contains("codec=speex transport=proxy raw-receiving=1 selected=1"),
@@ -359,7 +529,7 @@ fn echo_status_reports_provider_metadata_from_the_peer_owner() {
     assert!(status.contains("heartbeat-in=inactive"), "{status}");
     assert!(status.contains("ingress-retained-bytes=128"), "{status}");
     assert!(state.lock().unwrap().observe_calls > 0);
-    assert!(host.stop(20));
+    assert!(host.fixture_stop(20));
     assert_eq!(state.lock().unwrap().drops, 1);
 }
 
@@ -368,12 +538,13 @@ fn echo_ring_policy_survives_prepared_generation() {
     let _serial = crate::fixture::LIFECYCLE
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    let mut host = host();
-    let (io, _) = crate::link::session::tests::source_peer();
+    let mut host = echo_host();
+    let (io, _) = crate::link::session::tests::source_peer_on(LOCAL);
     let (_, outbound) = LinkAudioQueue::new(9600, 64).unwrap().into_endpoints();
     let (session, control) = PeerSession::prepare(io, outbound, "1000", "2000", true).unwrap();
     host.peers.push(PeerOwner {
-        local: "1000".into(),
+        superseded: false,
+        local: LOCAL.into(),
         remote: "2000".into(),
         mode: Mode::TRANSCEIVE,
         group: None,
@@ -381,12 +552,17 @@ fn echo_ring_policy_survives_prepared_generation() {
         control,
     });
     let candidate = prepared(
-        "1000",
-        host.runtime.settings("1000").unwrap(),
-        &host.peers,
-        media_worker(&mut host.media_workers, "1000").unwrap(),
+        LOCAL,
+        host.runtime.settings(LOCAL).unwrap(),
+        StationPeers {
+            links: &host.peers,
+            calls: Some(&host.phone_calls),
+            applications: &[],
+        },
+        media_worker(&mut host.media_workers, LOCAL).unwrap(),
         &mut host.text,
         host.services,
+        StationAudio::Modular(host.radio_preparation.active_plan(LOCAL).unwrap()),
     )
     .unwrap();
     assert_eq!(candidate.control.redirects.len(), 1);
@@ -401,7 +577,7 @@ fn echo_ring_policy_survives_prepared_generation() {
     assert!(matches!(inbound.observer().policy(), InboundPolicy::Echo));
     session.stop();
     drop(candidate);
-    assert!(host.stop(20));
+    assert!(host.fixture_stop(20));
 }
 
 #[test]
@@ -413,8 +589,8 @@ fn text_forwarding_host_uses_current_connection_and_never_reflects_to_ingress() 
     let ingress = attach(&mut host, "2000", LinkAction::Transceive, Mode::TRANSCEIVE);
     let egress = attach(&mut host, "3000", LinkAction::Transceive, Mode::TRANSCEIVE);
     let (io, audio_only) = crate::link::session::tests::peer_without_text(48000);
-    host.runtime.incoming("1000", "6000", true).unwrap();
-    host.attach_peer("1000", "6000", Mode::TRANSCEIVE, io, clock())
+    host.runtime.incoming(LOCAL, "6000", true).unwrap();
+    host.attach_peer(LOCAL, "6000", Mode::TRANSCEIVE, io, clock())
         .unwrap();
     ingress
         .lock()
@@ -456,7 +632,7 @@ fn text_forwarding_host_uses_current_connection_and_never_reflects_to_ingress() 
             .any(|text| text.starts_with(b"M ")),
         "audio-only peers must not inherit globally available text callbacks"
     );
-    assert!(host.stop(20));
+    assert!(host.fixture_stop(20));
 }
 
 #[test]
@@ -464,22 +640,31 @@ fn text_lifecycle_directed_message_never_plays_at_another_local_station() {
     let _serial = crate::fixture::LIFECYCLE
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    let mut host = Host::start(
-        document(
-            "usb",
-            "[1001]\nradio_channel=usb2\nduplex=full\n[speech]\nvoice=voice.onnx\nlevel_db=-6\n[echolink 1001]\nenabled=yes\ncallsign=N0CALL-R\nnode_number=123456\n",
-        ),
+    let config = stations(
+        &[
+            (LOCAL, "1000", "usb", json!({})),
+            (SECOND_LOCAL, "1001", "usb2", json!({})),
+        ],
+        &[
+            (SECOND_LOCAL, Kind::Echolink, "", echo_profile()),
+            (
+                station::SITE,
+                Kind::TelemetrySettings,
+                "",
+                json!({"speech":{"voice":"voice.onnx","level_db":-6}}),
+            ),
+        ],
+    );
+    let mut host = echo_station(
+        config,
+        SECOND_LOCAL,
         crate::media::text::tests::preparer(Arc::default()),
-        services(),
-        Instant::now(),
-        clock(),
-    )
-    .unwrap();
+    );
     let ingress = attach(&mut host, "2000", LinkAction::Transceive, Mode::TRANSCEIVE);
     let egress = attach(&mut host, "3000", LinkAction::Transceive, Mode::TRANSCEIVE);
-    host.runtime.incoming("1001", "5000", true).unwrap();
+    host.runtime.incoming(SECOND_LOCAL, "5000", true).unwrap();
     let (io, other_station) = peer(48000);
-    host.attach_peer("1001", "5000", Mode::TRANSCEIVE, io, clock())
+    host.attach_peer(SECOND_LOCAL, "5000", Mode::TRANSCEIVE, io, clock())
         .unwrap();
     // A different station may be earlier in both ingress and forwarding scans.
     host.peers.rotate_right(1);
@@ -491,7 +676,7 @@ fn text_lifecycle_directed_message_never_plays_at_another_local_station() {
         .control
         .text_origin();
     host.human_text(
-        "1000",
+        LOCAL,
         rpt_advanced_core::link::HumanMessage {
             origin: origin.clone(),
             source: "4000".into(),
@@ -515,7 +700,7 @@ fn text_lifecycle_directed_message_never_plays_at_another_local_station() {
         [("3123456", 0), ("N0CALL-R", 0), ("9000", 0), ("1000", 1)]
     {
         host.human_text(
-            "1000",
+            LOCAL,
             rpt_advanced_core::link::HumanMessage {
                 origin: origin.clone(),
                 source: "4000".into(),
@@ -527,7 +712,7 @@ fn text_lifecycle_directed_message_never_plays_at_another_local_station() {
         assert_eq!(host.text.observation().admitted, expected_admitted);
     }
     host.human_text(
-        "1000",
+        LOCAL,
         rpt_advanced_core::link::HumanMessage {
             origin: origin.clone(),
             source: "4000".into(),
@@ -544,7 +729,7 @@ fn text_lifecycle_directed_message_never_plays_at_another_local_station() {
         .control
         .stop();
     host.human_text(
-        "1000",
+        LOCAL,
         rpt_advanced_core::link::HumanMessage {
             origin,
             source: "4000".into(),
@@ -554,41 +739,50 @@ fn text_lifecycle_directed_message_never_plays_at_another_local_station() {
         },
     );
     assert_eq!(host.text.observation().admitted, 2);
-    assert!(host.stop(20));
+    assert!(host.fixture_stop(20));
 }
 
 #[test]
-fn text_forwarding_distinguishes_replacement_from_retiring_connection() {
+fn replacing_a_peer_quiesces_only_the_retired_connection() {
     let _serial = crate::fixture::LIFECYCLE
         .lock()
         .unwrap_or_else(|error| error.into_inner());
-    let mut host = host();
+    let mut host = mapped_host(
+        json!({"check":{"command":"6","protected":false,"action":"rx_mute_toggle","target":"port"}}),
+    );
     attach(&mut host, "4000", LinkAction::Transceive, Mode::TRANSCEIVE);
     let old = attach(&mut host, "2000", LinkAction::Transceive, Mode::TRANSCEIVE);
+    let retired = host
+        .peers
+        .iter()
+        .find(|peer| peer.remote == "2000")
+        .unwrap()
+        .control
+        .connection_generation();
     // Logical removal and physical detach run as separate executor operations.
     // An incoming replacement may be admitted between those operations.
     let effect = host
         .runtime
         .command(
-            "1000",
+            LOCAL,
             operation(LinkAction::Disconnect, "2000"),
             clock(),
             false,
         )
         .unwrap();
     assert!(matches!(effect, LinkEffect::Detach(_)));
-    host.runtime.incoming("1000", "2000", true).unwrap();
+    host.runtime.incoming(LOCAL, "2000", true).unwrap();
     let (io, replacement) = peer(48000);
-    host.attach_peer("1000", "2000", Mode::TRANSCEIVE, io, clock())
+    host.attach_peer(LOCAL, "2000", Mode::TRANSCEIVE, io, clock())
         .unwrap();
-    let origins = host
+    let current = host
         .peers
         .iter()
-        .filter(|peer| peer.remote == "2000")
-        .map(|peer| peer.control.text_origin().connection_generation)
-        .collect::<Vec<_>>();
-    assert_eq!(origins.len(), 2);
-    assert_ne!(origins[0], origins[1]);
+        .find(|peer| peer.remote == "2000" && !peer.superseded)
+        .unwrap()
+        .control
+        .connection_generation();
+    assert_ne!(retired, current);
     let origin = host
         .peers
         .iter()
@@ -597,7 +791,7 @@ fn text_forwarding_distinguishes_replacement_from_retiring_connection() {
         .control
         .text_origin();
     host.human_text(
-        "1000",
+        LOCAL,
         rpt_advanced_core::link::HumanMessage {
             origin,
             source: "4000".into(),
@@ -607,28 +801,111 @@ fn text_forwarding_distinguishes_replacement_from_retiring_connection() {
         },
     );
     pump_until(&mut host, |_| {
-        [&old, &replacement].iter().all(|state| {
-            state
+        old.lock().unwrap().drops == 1
+            && replacement
                 .lock()
                 .unwrap()
                 .texts
                 .iter()
                 .any(|text| text == b"M 4000 0 one copy per connection")
-        })
     });
-    for state in [old, replacement] {
-        assert_eq!(
-            state
-                .lock()
-                .unwrap()
-                .texts
-                .iter()
-                .filter(|text| text.starts_with(b"M "))
-                .count(),
-            1
-        );
-    }
-    assert!(host.stop(20));
+    let count = |state: &Mutex<crate::link::session::tests::State>| {
+        state
+            .lock()
+            .unwrap()
+            .texts
+            .iter()
+            .filter(|text| text.starts_with(b"M "))
+            .count()
+    };
+    assert_eq!(count(&old), 0);
+    assert_eq!(count(&replacement), 1);
+    let surviving = host
+        .peers
+        .iter()
+        .find(|peer| peer.control.connection_generation() == current)
+        .unwrap()
+        .control
+        .reply_target();
+    host.detach_connection(LOCAL, "2000", Some(retired), clock().now_ms);
+    assert!(!surviving.ended());
+    let links = host.runtime.node(LOCAL).unwrap().links();
+    assert!(
+        links
+            .peer_digit("2000", '6', clock().now_ms, surviving.clone())
+            .is_none()
+    );
+    let Some(DigitOutcome::Mapped(input)) =
+        links.peer_digit("2000", '#', clock().now_ms, surviving)
+    else {
+        panic!("live source mapping")
+    };
+    assert!(host.runtime.dispatch_mapping(LOCAL, input, clock()).is_ok());
+    assert!(
+        host.runtime
+            .node(LOCAL)
+            .unwrap()
+            .radio_receive_status()
+            .muted
+    );
+    assert!(host.fixture_stop(20));
+}
+
+#[test]
+fn registered_control_digit_and_logical_disconnect_choose_current_transport() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let mut host = host();
+    let old = attach(&mut host, "2000", LinkAction::Transceive, Mode::TRANSCEIVE);
+    host.runtime
+        .command(
+            LOCAL,
+            operation(LinkAction::Disconnect, "2000"),
+            clock(),
+            false,
+        )
+        .unwrap();
+    host.runtime.incoming(LOCAL, "2000", true).unwrap();
+    let (io, current) = peer(48000);
+    host.attach_peer(LOCAL, "2000", Mode::TRANSCEIVE, io, clock())
+        .unwrap();
+    let logical = host
+        .peers
+        .iter()
+        .find(|p| !p.superseded && p.remote == "2000")
+        .unwrap()
+        .control
+        .reply_target();
+    host.immediate(
+        LOCAL,
+        LinkEffect::ForwardDigits(vec![("2000".into(), "D 2000 1000 1 5".into())]),
+        clock(),
+    )
+    .unwrap();
+    pump_until(&mut host, |_| {
+        current
+            .lock()
+            .unwrap()
+            .texts
+            .iter()
+            .any(|t| t == b"D 2000 1000 1 5")
+    });
+    assert!(
+        !old.lock()
+            .unwrap()
+            .texts
+            .iter()
+            .any(|t| t == b"D 2000 1000 1 5")
+    );
+    host.detach(LOCAL, "2000", clock().now_ms);
+    assert!(logical.ended());
+    assert!(
+        host.peers
+            .iter()
+            .all(|p| p.remote != "2000" || p.superseded)
+    );
+    assert!(host.fixture_stop(20));
 }
 
 #[test]
@@ -660,7 +937,7 @@ fn text_forwarding_backpressure_does_not_block_local_speech() {
         .is_ok()
     {}
     host.human_text(
-        "1000",
+        LOCAL,
         rpt_advanced_core::link::HumanMessage {
             origin,
             source: "2000".into(),
@@ -672,7 +949,7 @@ fn text_forwarding_backpressure_does_not_block_local_speech() {
     assert_eq!(host.text.observation().forwarding_rejected, 1);
     assert_eq!(host.text.observation().admitted, 1);
     drop(resume);
-    assert!(host.stop(20));
+    assert!(host.fixture_stop(20));
 }
 
 #[test]
@@ -680,14 +957,16 @@ fn local_radio_digits_reach_the_same_control_dispatch_as_peer_digits() {
     let _serial = crate::fixture::LIFECYCLE
         .lock()
         .unwrap_or_else(|error| error.into_inner());
-    let mut host = host();
+    let mut host = mapped_host(
+        json!({"test":{"command":"*AB","protected":false,"action":"rx_mute_toggle","target":"port"}}),
+    );
     let lease = Arc::clone(&host.leases[0].1);
     assert!(lease.lock().unwrap().quiesce());
     let mut owners = lease.lock().unwrap().owners.take().unwrap();
     for (row, column) in [
         (941.0, 1209.0),
-        (852.0, 1209.0),
-        (941.0, 1336.0),
+        (697.0, 1633.0),
+        (770.0, 1633.0),
         (941.0, 1477.0),
     ] {
         for block in 0..5 {
@@ -712,13 +991,16 @@ fn local_radio_digits_reach_the_same_control_dispatch_as_peer_digits() {
         }
     }
     host.pump(clock()).unwrap();
-    let commands = host.take_operations();
-    assert_eq!(commands.len(), 1);
     assert!(
-        matches!(&commands[0].1, DigitOutcome::Operation(operation) if operation.command.action == LinkAction::Status)
+        host.runtime
+            .node(LOCAL)
+            .unwrap()
+            .radio_receive_status()
+            .muted,
+        "decoded RF symbols must invoke the managed port mapping"
     );
     lease.lock().unwrap().owners = Some(owners);
-    assert!(host.stop(20));
+    assert!(host.fixture_stop(20));
 }
 
 #[test]
@@ -726,10 +1008,19 @@ fn text_lifecycle_host_admits_local_speech_and_fences_same_device_reload() {
     let _serial = crate::fixture::LIFECYCLE
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    let config = document("usb", "[speech]\nvoice=voice.onnx\nlevel_db=-6\n");
+    let config = || {
+        configuration(
+            "usb",
+            &[(
+                Kind::TelemetrySettings,
+                "",
+                json!({"speech":{"voice":"voice.onnx","level_db":-6}}),
+            )],
+        )
+    };
     let speech = Arc::<crate::media::text::tests::SpeechFixture>::default();
-    let mut host = Host::start(
-        config.clone(),
+    let mut host = Host::fixture_start(
+        config(),
         crate::media::text::tests::preparer(speech.clone()),
         services(),
         Instant::now(),
@@ -773,7 +1064,7 @@ fn text_lifecycle_host_admits_local_speech_and_fences_same_device_reload() {
         let observation = host.text.observation();
         observation.admitted == 2 && observation.active == 1 && observation.queued == 0
     });
-    host.reload(config, clock()).unwrap();
+    host.fixture_reload(config(), clock()).unwrap();
     pump_until(&mut host, |host| {
         host.runtime.status(10)[0].1.retiring.is_none()
     });
@@ -788,7 +1079,7 @@ fn text_lifecycle_host_admits_local_speech_and_fences_same_device_reload() {
     assert_eq!(old.connection_generation, current.connection_generation);
     // A delayed event from the retired audio generation is inert on both paths.
     host.human_text(
-        "1000",
+        LOCAL,
         rpt_advanced_core::link::HumanMessage {
             origin: old,
             source: "4000".into(),
@@ -806,7 +1097,7 @@ fn text_lifecycle_host_admits_local_speech_and_fences_same_device_reload() {
             .iter()
             .any(|text| text == b"M 4000 0 B stale speech")
     );
-    assert!(host.stop(20));
+    assert!(host.fixture_stop(20));
 }
 
 #[test]
@@ -814,8 +1105,15 @@ fn text_lifecycle_speech_failure_keeps_forwarding_and_logs_no_human_body() {
     let _serial = crate::fixture::LIFECYCLE
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    let mut host = Host::start(
-        document("usb", "[speech]\nvoice=voice.onnx\nlevel_db=-6\n"),
+    let mut host = Host::fixture_start(
+        configuration(
+            "usb",
+            &[(
+                Kind::TelemetrySettings,
+                "",
+                json!({"speech":{"voice":"voice.onnx","level_db":-6}}),
+            )],
+        ),
         crate::media::text::tests::preparer(Arc::default()),
         services(),
         Instant::now(),
@@ -854,7 +1152,7 @@ fn text_lifecycle_speech_failure_keeps_forwarding_and_logs_no_human_body() {
         .control
         .text_origin();
     host.human_text(
-        "1000",
+        LOCAL,
         rpt_advanced_core::link::HumanMessage {
             origin,
             source: "4000".into(),
@@ -867,7 +1165,7 @@ fn text_lifecycle_speech_failure_keeps_forwarding_and_logs_no_human_body() {
     host.report_text_failures(clock().now_ms);
     assert_eq!(crate::fixture::ERROR_LOGS.with_borrow(Vec::len), 1);
     assert!(host.peers.iter().all(|peer| !peer.control.ended()));
-    assert!(host.stop(20));
+    assert!(host.fixture_stop(20));
 }
 
 #[test]
@@ -875,8 +1173,15 @@ fn text_lifecycle_host_stream_reaches_local_callback_before_telemetry_is_ready()
     let _serial = crate::fixture::LIFECYCLE
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    let mut host = Host::start(
-        document("usb", "[speech]\nvoice=voice.onnx\nlevel_db=-6\n"),
+    let mut host = Host::fixture_start(
+        configuration(
+            "usb",
+            &[(
+                Kind::TelemetrySettings,
+                "",
+                json!({"speech":{"voice":"voice.onnx","level_db":-6}}),
+            )],
+        ),
         crate::media::text::tests::preparer(Arc::default()),
         services(),
         Instant::now(),
@@ -924,7 +1229,7 @@ fn text_lifecycle_host_stream_reaches_local_callback_before_telemetry_is_ready()
             .any(|text| text.starts_with(b"M "))
     );
     lease.lock().unwrap().owners = Some(owners);
-    assert!(host.stop(20));
+    assert!(host.fixture_stop(20));
 }
 
 #[test]
@@ -933,23 +1238,25 @@ fn remote_selection_precedes_the_next_digit_in_one_host_batch() {
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     for asynchronous in [false, true] {
-        for suffix in ["5", "#5"] {
-            let mut host = host();
-            host.runtime.incoming("1000", "2000", true).unwrap();
+        for suffix in ["5", "#5#"] {
+            let mut host = mapped_host(
+                json!({"mute":{"command":"5","protected":false,"action":"rx_mute_toggle","target":"port"}}),
+            );
+            host.runtime.incoming(LOCAL, "2000", true).unwrap();
             let (io, state) = peer_with_async(48000, asynchronous);
             state.lock().unwrap().continuous_async = true;
-            host.attach_peer("1000", "2000", Mode::TRANSCEIVE, io, clock())
+            host.attach_peer(LOCAL, "2000", Mode::TRANSCEIVE, io, clock())
                 .unwrap();
             pump_until(&mut host, |host| {
                 named_peer_ready(host, "2000") && host.runtime.status(10)[0].1.retiring.is_none()
             });
             let _other = attach(&mut host, "3000", LinkAction::Transceive, Mode::TRANSCEIVE);
-            // The fixture directory resolves every numeric name, including "3".
+            // The selected account resolves the requested node before the following symbol.
             state
                 .lock()
                 .unwrap()
                 .input
-                .extend(format!("*43{suffix}").bytes().map(Input::Digit));
+                .extend(format!("*43#{suffix}").bytes().map(Input::Digit));
             let mut outcomes = Vec::new();
             for _ in 0..100 {
                 host.pump(clock()).unwrap();
@@ -963,12 +1270,16 @@ fn remote_selection_precedes_the_next_digit_in_one_host_batch() {
                     "{outcomes:?}"
                 );
             } else {
-                assert_eq!(
-                    outcomes,
-                    vec![("1000".into(), DigitOutcome::Regenerate('5'))]
+                assert!(
+                    host.runtime
+                        .node(LOCAL)
+                        .unwrap()
+                        .radio_receive_status()
+                        .muted
                 );
+                assert!(outcomes.is_empty());
             }
-            assert!(host.stop(20));
+            assert!(host.fixture_stop(20));
         }
     }
 }
@@ -979,11 +1290,13 @@ fn remote_digits_use_shared_policy_for_polling_and_async_hosts() {
         .lock()
         .unwrap_or_else(|error| error.into_inner());
     for asynchronous in [false, true] {
-        let mut host = host();
-        host.runtime.incoming("1000", "2000", true).unwrap();
+        let mut host = mapped_host(
+            json!({"mute":{"command":"5","protected":false,"action":"rx_mute_toggle","target":"port"}}),
+        );
+        host.runtime.incoming(LOCAL, "2000", true).unwrap();
         let (io, state) = peer_with_async(48000, asynchronous);
         state.lock().unwrap().continuous_async = true;
-        host.attach_peer("1000", "2000", Mode::TRANSCEIVE, io, clock())
+        host.attach_peer(LOCAL, "2000", Mode::TRANSCEIVE, io, clock())
             .unwrap();
         pump_until(&mut host, |host| {
             named_peer_ready(host, "2000") && host.runtime.status(10)[0].1.retiring.is_none()
@@ -992,9 +1305,14 @@ fn remote_digits_use_shared_policy_for_polling_and_async_hosts() {
         state.lock().unwrap().input.extend([
             Input::Text(b"D 3000 4000 11 9"),
             Input::Text(b"D 1000 4000 12 5"),
+            Input::Text(b"D 1000 4000 13 #"),
         ]);
         pump_until(&mut host, |host| {
-            !host.operations.is_empty()
+            host.runtime
+                .node(LOCAL)
+                .unwrap()
+                .radio_receive_status()
+                .muted
                 && other
                     .lock()
                     .unwrap()
@@ -1002,10 +1320,6 @@ fn remote_digits_use_shared_policy_for_polling_and_async_hosts() {
                     .iter()
                     .any(|text| text == b"D 3000 4000 11 9")
         });
-        assert_eq!(
-            host.take_operations(),
-            vec![("1000".into(), DigitOutcome::Regenerate('5'))]
-        );
         assert!(
             !state
                 .lock()
@@ -1015,7 +1329,7 @@ fn remote_digits_use_shared_policy_for_polling_and_async_hosts() {
                 .any(|text| text.starts_with(b"D "))
         );
         assert!(other.lock().unwrap().digits.is_empty());
-        assert!(host.stop(20));
+        assert!(host.fixture_stop(20));
     }
 }
 
@@ -1024,13 +1338,32 @@ fn same_device_reload_refreshes_local_ring_without_reopening_radio() {
     let _serial = crate::fixture::LIFECYCLE
         .lock()
         .unwrap_or_else(|error| error.into_inner());
-    let mut host = host();
+    let calls = Mutex::new(native_maintenance::Calls::default());
+    let mut host = Host::fixture_start(
+        configuration("usb", &[]),
+        media(),
+        native_maintenance::tracked_services(&calls),
+        Instant::now(),
+        clock(),
+    )
+    .unwrap();
     let drops = crate::fixture::RADIO_DROPS.load(std::sync::atomic::Ordering::Relaxed);
-    assert!(host.status_text("1000").unwrap().contains("reserve=0ms"));
-    host.reload(
-        document(
+    assert!(host.status_text(LOCAL).unwrap().contains("reserve=0ms"));
+    host.fixture_reload(
+        configuration(
             "usb",
-            "squelch_delay_ms=20\nstatus_snapshot_interval_ms=1\n",
+            &[
+                (
+                    Kind::RxSignaling,
+                    "",
+                    json!({"timing":{"squelch_delay_ms":20}}),
+                ),
+                (
+                    Kind::Radio,
+                    "",
+                    json!({"timing":{"status_snapshot_interval_ms":1}}),
+                ),
+            ],
         ),
         clock(),
     )
@@ -1038,7 +1371,7 @@ fn same_device_reload_refreshes_local_ring_without_reopening_radio() {
     pump_until(&mut host, |host| {
         host.runtime.status(10)[0].1.retiring.is_none()
     });
-    let status = host.status_text("1000").unwrap();
+    let status = host.status_text(LOCAL).unwrap();
     assert!(
         status.contains("reserve=20ms target=20ms configured-delay=20ms"),
         "{status}"
@@ -1048,7 +1381,7 @@ fn same_device_reload_refreshes_local_ring_without_reopening_radio() {
         drops,
         "same-device settings must preserve the active hardware stream"
     );
-    assert!(host.stop(10));
+    assert!(host.fixture_stop(10));
 }
 
 #[test]
@@ -1069,19 +1402,29 @@ fn local_ring_reload_retains_update_until_worker_can_accept_it() {
                 .is_ok()
         );
     }
-    host.reload(document("usb", "squelch_delay_ms=20\n"), clock())
-        .unwrap();
+    host.fixture_reload(
+        configuration(
+            "usb",
+            &[(
+                Kind::RxSignaling,
+                "",
+                json!({"timing":{"squelch_delay_ms":20}}),
+            )],
+        ),
+        clock(),
+    )
+    .unwrap();
     let active = host.runtime.status(10)[0].1.active.unwrap();
-    let control = host.runtime.adapter_control_mut("1000", active).unwrap();
+    let control = host.runtime.adapter_control_mut(LOCAL, active).unwrap();
     assert!(control.awaiting_local);
     assert!(control.local_update.is_some());
 
     assert!(host.leases[0].1.lock().unwrap().quiesce());
     host.pump(clock()).unwrap();
-    let control = host.runtime.adapter_control_mut("1000", active).unwrap();
+    let control = host.runtime.adapter_control_mut(LOCAL, active).unwrap();
     assert!(control.awaiting_local);
     assert!(control.local_update.is_some());
-    assert!(host.stop(20));
+    assert!(host.fixture_stop(20));
 }
 
 #[test]
@@ -1094,12 +1437,22 @@ fn failed_local_ring_reload_preserves_the_active_configuration() {
     let drops = crate::fixture::RADIO_DROPS.load(std::sync::atomic::Ordering::Relaxed);
     // The fixed local ring holds 300 ms, so this candidate cannot be prepared.
     assert!(
-        host.reload(document("usb", "squelch_delay_ms=301\n"), clock())
-            .is_err()
+        host.fixture_reload(
+            configuration(
+                "usb",
+                &[(
+                    Kind::RxSignaling,
+                    "",
+                    json!({"timing":{"squelch_delay_ms":301}})
+                )]
+            ),
+            clock()
+        )
+        .is_err()
     );
     assert_eq!(host.runtime.status(10)[0].1.active, generation);
     assert!(
-        host.status_text("1000")
+        host.status_text(LOCAL)
             .unwrap()
             .contains("reserve=0ms target=0ms configured-delay=0ms")
     );
@@ -1107,7 +1460,7 @@ fn failed_local_ring_reload_preserves_the_active_configuration() {
         crate::fixture::RADIO_DROPS.load(std::sync::atomic::Ordering::Relaxed),
         drops
     );
-    assert!(host.stop(10));
+    assert!(host.fixture_stop(10));
 }
 
 #[test]
@@ -1122,14 +1475,14 @@ fn egress_admission_host_reservation_failure_preserves_running_generation() {
     let bytes = probe.capacity() * std::mem::size_of::<PeerOwner>();
     let (io, state) = peer(48000);
     let result = crate::fixture::fail_allocation(bytes, || {
-        host.attach_peer("1000", "2000", Mode::TRANSCEIVE, io, clock())
+        host.attach_peer(LOCAL, "2000", Mode::TRANSCEIVE, io, clock())
     });
     assert_eq!(result, Err(RuntimeError::Preparation));
     assert_eq!(host.runtime.status(10)[0].1.active, generation);
     assert!(host.peers.is_empty());
     assert_eq!(state.lock().unwrap().drops, 1);
     assert!(state.lock().unwrap().bound_radio.is_none());
-    assert!(host.stop(20));
+    assert!(host.fixture_stop(20));
 }
 
 #[test]
@@ -1139,7 +1492,7 @@ fn parrot_live_state_effect_needs_no_external_host_action() {
         .unwrap_or_else(|error| error.into_inner());
     let mut host = host();
     assert!(
-        host.immediate("1000", LinkEffect::ParrotEnabled(true), clock())
+        host.immediate(LOCAL, LinkEffect::ParrotEnabled(true), clock())
             .is_ok()
     );
 }
@@ -1156,7 +1509,7 @@ fn pump_until(host: &mut Host, mut condition: impl FnMut(&mut Host) -> bool) {
 }
 fn named_peer_ready(host: &Host, remote: &str) -> bool {
     host.peers.iter().any(|peer| {
-        peer.local == "1000"
+        peer.local == LOCAL
             && peer.remote == remote
             && peer.control.owner_thread().is_some()
             && peer
@@ -1180,20 +1533,30 @@ fn attach(
     action: LinkAction,
     mode: Mode,
 ) -> Arc<Mutex<crate::link::session::tests::State>> {
+    attach_at_rate(host, remote, action, mode, 48_000)
+}
+
+fn attach_at_rate(
+    host: &mut Host,
+    remote: &str,
+    action: LinkAction,
+    mode: Mode,
+    codec_rate: u32,
+) -> Arc<Mutex<crate::link::session::tests::State>> {
     let effect = host
         .runtime
-        .command("1000", operation(action, remote), clock(), false)
+        .command(LOCAL, operation(action, remote), clock(), false)
         .unwrap();
     let LinkEffect::Connect(attempt) = effect else {
         panic!("expected a new dial");
     };
     assert!(
         host.runtime
-            .finish_connect("1000", attempt, true, clock())
+            .finish_connect(LOCAL, attempt, true, clock())
             .unwrap()
     );
-    let (io, state) = peer(48000);
-    host.attach_peer("1000", remote, mode, io, clock()).unwrap();
+    let (io, state) = peer(codec_rate);
+    host.attach_peer(LOCAL, remote, mode, io, clock()).unwrap();
     pump_until(host, |host| {
         named_peer_ready(host, remote)
             && host.peers.iter().all(|peer| {
@@ -1206,7 +1569,7 @@ fn attach(
                 .status(clock().now_ms)
                 .iter()
                 .any(|(node, status)| {
-                    node == "1000" && status.active.is_some() && status.retiring.is_none()
+                    node == LOCAL && status.active.is_some() && status.retiring.is_none()
                 })
     });
     state
@@ -1249,9 +1612,23 @@ fn scheduled_and_manual_messages_share_streaming_and_cancel_in_both_hosts() {
     let _serial = crate::fixture::LIFECYCLE
         .lock()
         .unwrap_or_else(|error| error.into_inner());
+    // The calendar provider evaluates the UTC epoch and its local civil projection together.
+    let clock = || RuntimeClock {
+        wall_seconds: 1_893_488_823,
+        ..clock()
+    };
     for device in ["native-cm119", "RadioPlus/1000"] {
-        let mut host = Host::start(
-            document(device, "transmit_timeout_ms=1\nkerchunk_max_ms=0\n[event 1000 report]\nat=every 1 minute\ncontent={tone_sequence} {media}\ntone_sequence=600/5000\nmorse_text=E\ndtmf_id=9\n"),
+        let mut host = Host::fixture_start(
+            configuration(device,&[
+                (Kind::TxSignaling,"",json!({"ptt":{"timing":{"hang_ms":0}}})),
+                (Kind::RxSignaling,"",json!({"timing":{"kerchunk_max_ms":0}})),
+                (Kind::Message,"report",json!({"content":"{ attention } { call-id }","dtmf_id":"9"})),
+                (Kind::Message,"attention",json!({"tone":{"sequence":"600/5000"}})),
+                (Kind::Message,"call-id",json!({"morse":{"text":"E"}})),
+                (Kind::Macro,"speak",json!({"actions":[{"action":"message","message":"{ report }","destination":"local"}]})),
+                (Kind::Event,"first-report",json!({"start":{"at":"every day at 09:07 in UTC","macro":"speak"}})),
+                (Kind::Event,"next-report",json!({"start":{"at":"every day at 09:08 in UTC","macro":"speak"}})),
+            ]),
             media(), services(), Instant::now(), clock(),
         ).unwrap();
         let lease = Arc::clone(&host.leases[0].1);
@@ -1259,19 +1636,15 @@ fn scheduled_and_manual_messages_share_streaming_and_cancel_in_both_hosts() {
         let mut owners = lease.lock().unwrap().owners.take().unwrap();
         for manual in [false, true] {
             if manual {
-                host.immediate(
-                    "1000",
-                    LinkEffect::Message {
-                        selector: "9".into(),
-                        reply: None,
-                    },
-                    clock(),
-                )
-                .unwrap();
+                play_message(&mut host, "report");
             } else {
-                let dispatch = host.runtime.next_event(clock()).unwrap().unwrap();
-                host.runtime.queue_event(&dispatch).unwrap();
-                assert!(host.runtime.complete_event(&dispatch));
+                let Some((effect, receipt)) =
+                    host.runtime.advance_commands(LOCAL, clock()).unwrap()
+                else {
+                    panic!("due scheduled message")
+                };
+                host.immediate(LOCAL, effect, clock()).unwrap();
+                receipt.settle(true);
             }
             let mut heard = false;
             for _ in 0..1000 {
@@ -1297,13 +1670,13 @@ fn scheduled_and_manual_messages_share_streaming_and_cancel_in_both_hosts() {
             let effect = host
                 .runtime
                 .command(
-                    "1000",
+                    LOCAL,
                     operation(LinkAction::CancelMessage, ""),
                     clock(),
                     false,
                 )
                 .unwrap();
-            host.immediate("1000", effect, clock()).unwrap();
+            host.immediate(LOCAL, effect, clock()).unwrap();
             let mut after = [0.0; 3000];
             let keyed = owners
                 .1
@@ -1317,7 +1690,12 @@ fn scheduled_and_manual_messages_share_streaming_and_cancel_in_both_hosts() {
                 "cancel must remove unread producer PCM, {device}"
             );
             host.pump(clock()).unwrap();
-            assert!(host.runtime.next_event(clock()).unwrap().is_none());
+            assert!(
+                host.runtime
+                    .advance_commands(LOCAL, clock())
+                    .unwrap()
+                    .is_none()
+            );
         }
         let mut next = clock();
         next.civil = Some((
@@ -1333,12 +1711,16 @@ fn scheduled_and_manual_messages_share_streaming_and_cancel_in_both_hosts() {
             0,
         ));
         next.now_ms += 57_000;
+        next.wall_seconds += 57;
         assert!(
-            host.runtime.next_event(next).unwrap().is_some(),
+            host.runtime
+                .advance_commands(LOCAL, next)
+                .unwrap()
+                .is_some(),
             "manual playback cannot consume the next clock occurrence"
         );
         lease.lock().unwrap().owners = Some(owners);
-        assert!(host.stop(30));
+        assert!(host.fixture_stop(30));
     }
 }
 
@@ -1349,23 +1731,33 @@ fn composition_shared_host_pump_preserves_receive_interruption() {
         .unwrap_or_else(|error| error.into_inner());
     // Both composition hosts hand the same prepared program to this shared product.
     for (device, local) in [("native-cm119", true), ("RadioPlus/1000", false)] {
-        let config = document(
+        let config = configuration(
             device,
-            "kerchunk_max_ms=0\n[message notice]\ncontent={tone_sequence} {media}\ntone_sequence=600/1000\nmorse_text=E\ndtmf_id=1\n",
+            &[
+                (
+                    Kind::RxSignaling,
+                    "",
+                    json!({"timing":{"kerchunk_max_ms":0}}),
+                ),
+                (
+                    Kind::Message,
+                    "attention",
+                    json!({"tone":{"sequence":"600/1000"}}),
+                ),
+                (
+                    Kind::Message,
+                    "notice",
+                    json!({"content":"{ attention } { call-id }","dtmf_id":"1"}),
+                ),
+                (Kind::Message, "call-id", json!({"morse":{"text":"E"}})),
+            ],
         );
-        let mut host = Host::start(config, media(), services(), Instant::now(), clock()).unwrap();
+        let mut host =
+            Host::fixture_start(config, media(), services(), Instant::now(), clock()).unwrap();
         let lease = Arc::clone(&host.leases[0].1);
         assert!(lease.lock().unwrap().quiesce());
         let mut owners = lease.lock().unwrap().owners.take().unwrap();
-        host.immediate(
-            "1000",
-            LinkEffect::Message {
-                selector: "1".into(),
-                reply: None,
-            },
-            clock(),
-        )
-        .unwrap();
+        play_message(&mut host, "notice");
         let mut heard_primary = false;
         for _ in 0..1000 {
             let mut audio = [0.0; 48];
@@ -1419,7 +1811,7 @@ fn composition_shared_host_pump_preserves_receive_interruption() {
             "primary must not resume: {device}, audible={audible}"
         );
         lease.lock().unwrap().owners = Some(owners);
-        assert!(host.stop(30));
+        assert!(host.fixture_stop(30));
     }
 }
 
@@ -1439,17 +1831,17 @@ fn peer_attach_and_detach_queue_lifecycle_telemetry() {
     let effect = host
         .runtime
         .command(
-            "1000",
+            LOCAL,
             operation(LinkAction::Disconnect, "2000"),
             clock(),
             false,
         )
         .unwrap();
-    host.immediate("1000", effect, clock()).unwrap();
+    host.immediate(LOCAL, effect, clock()).unwrap();
     assert!(render_queued_telemetry(&mut host, &mut owners));
 
     lease.lock().unwrap().owners = Some(owners);
-    assert!(host.stop(30));
+    assert!(host.fixture_stop(30));
 }
 
 #[test]
@@ -1472,7 +1864,7 @@ fn peer_sessions_share_one_io_owner_outside_the_control_pump() {
         .collect();
     assert!(owners.iter().all(|owner| *owner == owners[0]));
     assert_ne!(owners[0], std::thread::current().id());
-    assert!(host.stop(30));
+    assert!(host.fixture_stop(30));
 }
 
 #[test]
@@ -1495,7 +1887,7 @@ fn blocked_peer_io_does_not_block_control_pump() {
     let elapsed = started.elapsed();
     release.join().unwrap();
     assert!(elapsed < Duration::from_millis(50), "pump took {elapsed:?}");
-    assert!(host.stop(30));
+    assert!(host.fixture_stop(30));
 }
 
 #[test]
@@ -1507,7 +1899,7 @@ fn status_reports_cached_peer_jitter_and_ingress_metrics() {
     let effect = host
         .runtime
         .command(
-            "1000",
+            LOCAL,
             operation(LinkAction::Transceive, "2000"),
             clock(),
             false,
@@ -1518,11 +1910,11 @@ fn status_reports_cached_peer_jitter_and_ingress_metrics() {
     };
     assert!(
         host.runtime
-            .finish_connect("1000", attempt, true, clock())
+            .finish_connect(LOCAL, attempt, true, clock())
             .unwrap()
     );
     let (io, state) = peer_with_async(48000, true);
-    host.attach_peer("1000", "2000", Mode::TRANSCEIVE, io, clock())
+    host.attach_peer(LOCAL, "2000", Mode::TRANSCEIVE, io, clock())
         .unwrap();
     pump_until(&mut host, |host| {
         host.peers.iter().any(|peer| {
@@ -1531,7 +1923,7 @@ fn status_reports_cached_peer_jitter_and_ingress_metrics() {
                 .is_ok_and(|snapshot| snapshot.peer.is_some())
         })
     });
-    let status = host.status_text("1000").unwrap();
+    let status = host.status_text(LOCAL).unwrap();
     assert!(
         status.contains("jitter delay=10ms buffered-span=13ms queued=3"),
         "{status}"
@@ -1544,7 +1936,7 @@ fn status_reports_cached_peer_jitter_and_ingress_metrics() {
     ));
     assert!(status.contains("media accepted=0 blocked=0 expired-native-samples=0"));
     assert_eq!(state.lock().unwrap().observe_calls, 1);
-    assert!(host.stop(20));
+    assert!(host.fixture_stop(20));
 }
 
 #[test]
@@ -1552,13 +1944,11 @@ fn peers_survive_reload_route_events_and_detach_before_generation_reclamation() 
     let _serial = crate::fixture::LIFECYCLE
         .lock()
         .unwrap_or_else(|error| error.into_inner());
-    let mut host = host();
-    assert!(
-        host.status_text("1000")
-            .unwrap()
-            .contains("no active links")
+    let mut host = mapped_host(
+        json!({"mute":{"command":"*AB","protected":false,"action":"rx_mute_toggle","target":"peer"}}),
     );
-    let local = host.status_text("1000").unwrap();
+    assert!(host.status_text(LOCAL).unwrap().contains("no active links"));
+    let local = host.status_text(LOCAL).unwrap();
     assert!(
         local.contains("local-rx:"),
         "status must identify the local receive ring"
@@ -1570,8 +1960,8 @@ fn peers_survive_reload_route_events_and_detach_before_generation_reclamation() 
         Err(RuntimeError::MissingNode)
     ));
     assert_eq!(
-        host.lookup("1000", "2000", Some("127.0.0.1")).unwrap(),
-        "radio@fixture/2000"
+        asl_route(&host, "2000", Some("127.0.0.1")).unwrap(),
+        "radio@127.0.0.1:4569/2000"
     );
     assert!(matches!(
         host.lookup("missing", "2000", None),
@@ -1585,55 +1975,69 @@ fn peers_survive_reload_route_events_and_detach_before_generation_reclamation() 
             .all(|(_, status)| status.retiring.is_none())
     });
     assert!(
-        host.status_text("1000")
+        host.status_text(LOCAL)
             .unwrap()
             .contains("2000: transceive")
     );
     host.immediate(
-        "1000",
+        LOCAL,
         LinkEffect::Text(vec![("2000".into(), "L T3000".into())]),
         clock(),
     )
     .unwrap();
     host.immediate(
-        "1000",
+        LOCAL,
         LinkEffect::ForwardDigits(vec![("2000".into(), "D 2000 1000 1 5".into())]),
         clock(),
     )
     .unwrap();
-    host.immediate("1000", LinkEffect::None, clock()).unwrap();
-    host.immediate("1000", LinkEffect::SelectedRemote, clock())
+    host.immediate(LOCAL, LinkEffect::None, clock()).unwrap();
+    host.immediate(LOCAL, LinkEffect::SelectedRemote, clock())
         .unwrap();
     state.lock().unwrap().input.extend([
         Input::Text(b"invalid"),
         Input::Text(b"L T3000"),
         Input::Digit(b'*'),
-        Input::Digit(b'7'),
+        Input::Digit(b'A'),
+        Input::Digit(b'B'),
+        Input::Digit(b'2'),
         Input::Digit(b'0'),
+        Input::Digit(b'0'),
+        Input::Digit(b'0'),
+        Input::Digit(b'#'),
     ]);
-    pump_until(&mut host, |host| !host.operations.is_empty());
-    let (_, operation) = host.take_operations().pop().unwrap();
-    let DigitOutcome::Operation(operation) = operation else {
-        panic!("expected command")
-    };
-    assert_eq!(operation.command.action, LinkAction::Status);
-    assert_eq!(operation.reply, Some(host.peers[0].control.reply_target()));
+    let source = host.peers[0].control.reply_target();
+    pump_until(&mut host, |_| source.rx_muted());
+    assert!(
+        !host
+            .runtime
+            .node(LOCAL)
+            .unwrap()
+            .radio_receive_status()
+            .muted
+    );
     assert!(host.take_operations().is_empty());
-    assert!(host.status_text("1000").unwrap().contains("3000"));
+    assert!(host.status_text(LOCAL).unwrap().contains("3000"));
     let guard = state.lock().unwrap();
     assert!(guard.texts.iter().any(|text| text == b"D 2000 1000 1 5"));
     assert!(guard.digits.is_empty());
     drop(guard);
     host.runtime.digit(
-        "1000",
+        LOCAL,
         DigitEvent::Digit {
             digit: '*',
             now_ms: 10,
         },
     );
     host.lost_digits();
-    host.reload(document("usb", "callsign=W1NEW\n"), clock())
-        .unwrap();
+    host.fixture_reload(
+        configuration(
+            "usb",
+            &[(Kind::Allstarlink, "", json!({"callsign":"W1NEW"}))],
+        ),
+        clock(),
+    )
+    .unwrap();
     pump_until(&mut host, |host| {
         host.runtime
             .status(10)
@@ -1647,7 +2051,7 @@ fn peers_survive_reload_route_events_and_detach_before_generation_reclamation() 
         LinkAction::LastKeyed,
         LinkAction::Time,
     ] {
-        host.immediate("1000", LinkEffect::Telemetry(action, None), clock())
+        host.immediate(LOCAL, LinkEffect::Telemetry(action, None), clock())
             .unwrap();
     }
     state
@@ -1658,12 +2062,8 @@ fn peers_survive_reload_route_events_and_detach_before_generation_reclamation() 
     pump_until(&mut host, |host| host.peers.is_empty());
     pump_until(&mut host, |_| state.lock().unwrap().drops == 1);
     assert_eq!(state.lock().unwrap().drops, 1);
-    assert!(
-        host.status_text("1000")
-            .unwrap()
-            .contains("no active links")
-    );
-    assert!(host.stop(20));
+    assert!(host.status_text(LOCAL).unwrap().contains("no active links"));
+    assert!(host.fixture_stop(20));
 }
 
 #[test]
@@ -1689,7 +2089,7 @@ fn status_reports_modes_permanent_retries_and_failed_resource_preparation() {
                 .all(|(_, status)| status.retiring.is_none())
         });
         assert!(
-            host.status_text("1000")
+            host.status_text(LOCAL)
                 .unwrap()
                 .contains(&format!("{remote}: {expected}"))
         );
@@ -1697,7 +2097,7 @@ fn status_reports_modes_permanent_retries_and_failed_resource_preparation() {
     let effect = host
         .runtime
         .command(
-            "1000",
+            LOCAL,
             operation(LinkAction::PermanentTransceive, "4000"),
             clock(),
             false,
@@ -1709,34 +2109,34 @@ fn status_reports_modes_permanent_retries_and_failed_resource_preparation() {
     assert!(
         !host
             .runtime
-            .finish_connect("1000", attempt, false, clock())
+            .finish_connect(LOCAL, attempt, false, clock())
             .unwrap()
     );
-    assert!(host.status_text("1000").unwrap().contains("(retrying)"));
+    assert!(host.status_text(LOCAL).unwrap().contains("(retrying)"));
     let effect = host
         .runtime
         .command(
-            "1000",
+            LOCAL,
             operation(LinkAction::DisconnectPermanentAll, ""),
             clock(),
             false,
         )
         .unwrap();
-    host.immediate("1000", effect, clock()).unwrap();
-    assert!(host.status_text("1000").unwrap().contains("(paused)"));
+    host.immediate(LOCAL, effect, clock()).unwrap();
+    assert!(host.status_text(LOCAL).unwrap().contains("(paused)"));
     assert!(
         host.immediate(
-            "1000",
+            LOCAL,
             LinkEffect::ForwardDigits(vec![("missing".into(), "D 3000 1000 1 1".into())]),
             clock()
         )
         .is_err()
     );
-    assert!(host.text("1000", "missing", "L", false).is_err());
+    assert!(host.text(LOCAL, "missing", "L", false).is_err());
     assert!(host.refresh("missing", clock()).is_err());
     let (io, state) = peer(0);
     assert!(
-        host.attach_peer("1000", "5000", Mode::TRANSCEIVE, io, clock())
+        host.attach_peer(LOCAL, "5000", Mode::TRANSCEIVE, io, clock())
             .is_err()
     );
     assert_eq!(state.lock().unwrap().drops, 1);
@@ -1746,7 +2146,7 @@ fn status_reports_modes_permanent_retries_and_failed_resource_preparation() {
             .is_err()
     );
     assert_eq!(state.lock().unwrap().drops, 1);
-    assert!(host.stop(30));
+    assert!(host.fixture_stop(30));
 }
 
 #[test]
@@ -1756,24 +2156,28 @@ fn host_audio_owner_publishes_one_configured_group_winner_to_status() {
     let _serial = crate::fixture::LIFECYCLE
         .lock()
         .unwrap_or_else(|error| error.into_inner());
-    let config = ConfigDocument::parse(
-        "[1000]\nradio_channel=usb\nduplex=full\n\
-         [permanent 1000 network]\nremote_node=2000,3000\ngroup_name=Network\n",
-    )
-    .unwrap();
-    let mut host = Host::start(config, media(), services(), Instant::now(), clock()).unwrap();
+    let config = configuration(
+        "usb",
+        &[(
+            Kind::PermanentGroup,
+            "network",
+            json!({"remote_node":["2000","3000"], "group_name":"Network"}),
+        )],
+    );
+    let mut host =
+        Host::fixture_start(config, media(), services(), Instant::now(), clock()).unwrap();
     let mut states = Vec::new();
     for (index, remote) in ["2000", "3000"].into_iter().enumerate() {
-        host.runtime.incoming("1000", remote, true).unwrap();
+        host.runtime.incoming(LOCAL, remote, true).unwrap();
         let (io, state) = peer(48000);
-        host.attach_peer("1000", remote, Mode::TRANSCEIVE, io, clock())
+        host.attach_peer(LOCAL, remote, Mode::TRANSCEIVE, io, clock())
             .unwrap();
         states.push(state);
         let expected = &["2000", "3000"][..=index];
         pump_until(&mut host, |host| {
             expected.iter().all(|remote| named_peer_ready(host, remote))
                 && host.runtime.status(10).iter().any(|(node, status)| {
-                    node == "1000" && status.active.is_some() && status.retiring.is_none()
+                    node == LOCAL && status.active.is_some() && status.retiring.is_none()
                 })
         });
     }
@@ -1797,20 +2201,23 @@ fn host_audio_owner_publishes_one_configured_group_winner_to_status() {
         .state()
         .process(false, &mut audio, 0);
     assert_eq!(selection.active(), NonZeroUsize::new(1));
-    let status = host.status_text("1000").unwrap();
+    let status = host.status_text(LOCAL).unwrap();
     assert!(status.contains("2000: transceive"));
     assert!(status.contains("3000: monitor"));
 
     lease.lock().unwrap().owners = Some(owners);
-    assert!(host.stop(30));
+    assert!(host.fixture_stop(30));
     drop(states);
 }
 
 #[test]
 fn reload_handoff_rolls_back_failed_open_and_releases_removed_devices() {
-    fn reload_after_busy(host: &mut Host, document: ConfigDocument) -> Result<(), RuntimeError> {
+    fn reload_after_busy(
+        host: &mut Host,
+        make: impl Fn() -> PreparedConfiguration,
+    ) -> Result<(), RuntimeError> {
         let mut outcome = None;
-        pump_until(host, |host| match host.reload(document.clone(), clock()) {
+        pump_until(host, |host| match host.fixture_reload(make(), clock()) {
             Err(RuntimeError::Busy) => false,
             result => {
                 outcome = Some(result);
@@ -1824,7 +2231,13 @@ fn reload_handoff_rolls_back_failed_open_and_releases_removed_devices() {
         .lock()
         .unwrap_or_else(|error| error.into_inner());
     let mut host = host();
-    reload_after_busy(&mut host, document("usb2", "link_lookup_method=dns\n")).unwrap();
+    reload_after_busy(&mut host, || {
+        configuration(
+            "usb2",
+            &[(Kind::Allstarlink, "", json!({"lookup_method":"dns"}))],
+        )
+    })
+    .unwrap();
     pump_until(&mut host, |host| {
         host.runtime
             .status(10)
@@ -1832,13 +2245,16 @@ fn reload_handoff_rolls_back_failed_open_and_releases_removed_devices() {
             .all(|(_, status)| status.retiring.is_none())
     });
     assert_eq!(
-        host.lookup("1000", "2000", None).unwrap(),
-        "radio@fixture/2000"
+        asl_route(&host, "2000", None).unwrap(),
+        "radio@127.0.0.1:4569/2000"
     );
     let revision = host.runtime.revision();
     crate::fixture::RADIO_OPEN_RESULT.store(1, std::sync::atomic::Ordering::Release);
     assert_eq!(
-        reload_after_busy(&mut host, document("usb3", "link_lookup_method=file\n")),
+        reload_after_busy(&mut host, || configuration(
+            "usb3",
+            &[(Kind::Allstarlink, "", json!({"lookup_method":"file"}))]
+        )),
         Err(RuntimeError::Device)
     );
     assert_eq!(
@@ -1846,7 +2262,13 @@ fn reload_handoff_rolls_back_failed_open_and_releases_removed_devices() {
         0
     );
     assert_eq!(host.runtime.revision(), revision);
-    reload_after_busy(&mut host, document("usb2", "link_lookup_method=file\n")).unwrap();
+    reload_after_busy(&mut host, || {
+        configuration(
+            "usb2",
+            &[(Kind::Allstarlink, "", json!({"lookup_method":"file"}))],
+        )
+    })
+    .unwrap();
     pump_until(&mut host, |host| {
         host.runtime
             .status(10)
@@ -1854,18 +2276,14 @@ fn reload_handoff_rolls_back_failed_open_and_releases_removed_devices() {
             .all(|(_, status)| status.retiring.is_none())
     });
     assert_eq!(
-        host.lookup("1000", "2000", None).unwrap(),
-        "radio@fixture/2000"
+        asl_route(&host, "2000", None).unwrap(),
+        "radio@127.0.0.1:4569/2000"
     );
-    reload_after_busy(
-        &mut host,
-        ConfigDocument::parse("[general]\nenabled=no\n").unwrap(),
-    )
-    .unwrap();
+    reload_after_busy(&mut host, || stations(&[], &[])).unwrap();
     assert!(host.runtime.node_names().is_empty());
     pump_until(&mut host, |host| host.runtime.status(40).is_empty());
     assert!(host.media_workers.is_empty());
-    assert!(host.stop(40));
+    assert!(host.fixture_stop(40));
     assert!(host.leases.is_empty());
 }
 
@@ -1902,22 +2320,28 @@ fn egress_retirement_waits_for_dispatch_and_redirect() {
             .ok()
             .unwrap();
     }
-    assert!(host.text("1000", "2000", "\0", false).is_err());
-    assert!(host.text("1000", "2000", "L", false).is_err());
+    assert!(host.text(LOCAL, "2000", "\0", false).is_err());
+    assert!(host.text(LOCAL, "2000", "L", false).is_err());
     assert!(
         host.immediate(
-            "1000",
+            LOCAL,
             LinkEffect::ForwardDigits(vec![("2000".into(), "D 2000 1000 1 2".into())]),
             clock()
         )
         .is_err()
     );
-    host.reload(document("usb", "callsign=W1NEW\n"), clock())
-        .unwrap();
+    host.fixture_reload(
+        configuration(
+            "usb",
+            &[(Kind::Allstarlink, "", json!({"callsign":"W1NEW"}))],
+        ),
+        clock(),
+    )
+    .unwrap();
     let active = host.runtime.status(10)[0].1.active.unwrap();
     assert_eq!(
         host.runtime
-            .adapter_control_mut("1000", active)
+            .adapter_control_mut(LOCAL, active)
             .unwrap()
             .redirects
             .len(),
@@ -1926,7 +2350,7 @@ fn egress_retirement_waits_for_dispatch_and_redirect() {
     let retiring = host.runtime.status(10)[0].1.retiring.unwrap();
     pump_until(&mut host, |host| {
         host.runtime
-            .adapter_control_mut("1000", retiring)
+            .adapter_control_mut(LOCAL, retiring)
             .unwrap()
             .dispatcher
             .is_quiescent()
@@ -1947,20 +2371,25 @@ fn egress_retirement_waits_for_dispatch_and_redirect() {
     // Direct publication needs quiescent audio; retain the peer owner for its pending ack.
     assert!(host.leases[0].1.lock().unwrap().quiesce());
     let candidate = prepared(
-        "1000",
-        host.runtime.settings("1000").unwrap(),
-        &host.peers,
-        media_worker(&mut host.media_workers, "1000").unwrap(),
+        LOCAL,
+        host.runtime.settings(LOCAL).unwrap(),
+        StationPeers {
+            links: &host.peers,
+            calls: Some(&host.phone_calls),
+            applications: &[],
+        },
+        media_worker(&mut host.media_workers, LOCAL).unwrap(),
         &mut host.text,
         host.services,
+        StationAudio::Modular(host.radio_preparation.active_plan(LOCAL).unwrap()),
     )
     .unwrap();
-    host.runtime.replace_adapter("1000", candidate, 11).unwrap();
-    host.reject_peer("1000", "2000", 12);
+    host.runtime.replace_adapter(LOCAL, candidate, 11).unwrap();
+    host.reject_peer(LOCAL, "2000", 12);
     pump_until(&mut host, |_| state.lock().unwrap().drops == 1);
     assert_eq!(state.lock().unwrap().drops, 1);
-    host.reject_peer("1000", "missing", 12);
-    assert!(host.stop(13));
+    host.reject_peer(LOCAL, "missing", 12);
+    assert!(host.fixture_stop(13));
 }
 
 #[test]
@@ -1990,24 +2419,30 @@ fn withdrawn_peer_clears_a_queued_redirect_and_acknowledgment() {
             .ok()
             .unwrap();
     }
-    host.reload(document("usb", "callsign=W1NEW\n"), clock())
-        .unwrap();
+    host.fixture_reload(
+        configuration(
+            "usb",
+            &[(Kind::Allstarlink, "", json!({"callsign":"W1NEW"}))],
+        ),
+        clock(),
+    )
+    .unwrap();
     let active = host.runtime.status(10)[0].1.active.unwrap();
     assert_eq!(
         host.runtime
-            .adapter_control_mut("1000", active)
+            .adapter_control_mut(LOCAL, active)
             .unwrap()
             .redirects
             .len(),
         1
     );
-    host.reject_peer("1000", "2000", 12);
+    host.reject_peer(LOCAL, "2000", 12);
     host.pump(clock()).unwrap();
-    let control = host.runtime.adapter_control_mut("1000", active).unwrap();
+    let control = host.runtime.adapter_control_mut(LOCAL, active).unwrap();
     assert!(control.redirects.is_empty());
     assert!(control.awaiting.is_empty());
     drop(resume);
-    assert!(host.stop(13));
+    assert!(host.fixture_stop(13));
     assert_eq!(state.lock().unwrap().drops, 1);
 }
 
@@ -2024,7 +2459,7 @@ fn ended_ingress_is_omitted_and_unknown_peer_events_do_not_change_routes() {
             .iter()
             .all(|(_, status)| status.retiring.is_none())
     });
-    host.runtime.node("1000").unwrap().links().ended("2000");
+    host.runtime.node(LOCAL).unwrap().links().ended("2000");
     state
         .lock()
         .unwrap()
@@ -2034,18 +2469,23 @@ fn ended_ingress_is_omitted_and_unknown_peer_events_do_not_change_routes() {
     host.pump(clock()).unwrap();
     host.peers[0].control.stop();
     let candidate = prepared(
-        "1000",
-        host.runtime.settings("1000").unwrap(),
-        &host.peers,
-        media_worker(&mut host.media_workers, "1000").unwrap(),
+        LOCAL,
+        host.runtime.settings(LOCAL).unwrap(),
+        StationPeers {
+            links: &host.peers,
+            calls: Some(&host.phone_calls),
+            applications: &[],
+        },
+        media_worker(&mut host.media_workers, LOCAL).unwrap(),
         &mut host.text,
         host.services,
+        StationAudio::Modular(host.radio_preparation.active_plan(LOCAL).unwrap()),
     )
     .unwrap();
     assert!(candidate.control.redirects.is_empty());
     host.pump(clock()).unwrap();
     assert!(host.peers.is_empty());
-    assert!(host.stop(20));
+    assert!(host.fixture_stop(20));
 }
 
 #[test]
@@ -2053,43 +2493,49 @@ fn new_node_reload_and_missing_or_busy_operations_leave_live_owners_intact() {
     let _serial = crate::fixture::LIFECYCLE
         .lock()
         .unwrap_or_else(|error| error.into_inner());
-    let mut host = Host::start(
-        ConfigDocument::parse("[general]\nenabled=no\n").unwrap(),
+    let mut host = Host::fixture_start(
+        stations(&[], &[]),
         media(),
         services(),
         Instant::now(),
         clock(),
     )
     .unwrap();
-    host.reload(
-        document("usb", "[2000]\nradio_channel=usb2\nduplex=full\n"),
+    host.fixture_reload(
+        stations(
+            &[
+                (LOCAL, "1000", "usb", json!({})),
+                (SECOND_LOCAL, "2000", "usb2", json!({})),
+            ],
+            &[],
+        ),
         clock(),
     )
     .unwrap();
     let effect = host
         .runtime
         .command(
-            "1000",
+            LOCAL,
             operation(LinkAction::Transceive, "2000"),
             clock(),
             false,
         )
         .unwrap();
-    assert!(host.immediate("1000", effect, clock()).is_err());
+    assert!(host.immediate(LOCAL, effect, clock()).is_err());
     let first = attach(&mut host, "3000", LinkAction::Transceive, Mode::TRANSCEIVE);
     let (io, second) = peer(48000);
-    host.runtime.incoming("2000", "3000", true).unwrap();
-    host.attach_peer("2000", "3000", Mode::TRANSCEIVE, io, clock())
+    host.runtime.incoming(SECOND_LOCAL, "3000", true).unwrap();
+    host.attach_peer(SECOND_LOCAL, "3000", Mode::TRANSCEIVE, io, clock())
         .unwrap();
     host.immediate(
-        "2000",
+        SECOND_LOCAL,
         LinkEffect::ForwardDigits(vec![("3000".into(), "D 3000 2000 1 9".into())]),
         clock(),
     )
     .unwrap();
-    host.text("2000", "3000", "L", false).unwrap();
+    host.text(SECOND_LOCAL, "3000", "L", false).unwrap();
     assert!(
-        host.status_text("2000")
+        host.status_text(SECOND_LOCAL)
             .unwrap()
             .contains("3000: transceive")
     );
@@ -2113,7 +2559,7 @@ fn new_node_reload_and_missing_or_busy_operations_leave_live_owners_intact() {
     assert!(second_state.digits.is_empty());
     drop(second_state);
     drop(first_state);
-    host.reject_peer("2000", "3000", 15);
+    host.reject_peer(SECOND_LOCAL, "3000", 15);
     pump_until(&mut host, |_| second.lock().unwrap().drops == 1);
     assert_eq!(second.lock().unwrap().drops, 1);
     assert_eq!(first.lock().unwrap().drops, 0);
@@ -2124,13 +2570,9 @@ fn new_node_reload_and_missing_or_busy_operations_leave_live_owners_intact() {
             .iter()
             .all(|(_, status)| status.retiring.is_none())
     });
-    host.reload(
-        ConfigDocument::parse("[general]\nenabled=no\n").unwrap(),
-        clock(),
-    )
-    .unwrap();
+    host.fixture_reload(stations(&[], &[]), clock()).unwrap();
     assert!(host.peers.is_empty());
-    assert!(host.stop(20));
+    assert!(host.fixture_stop(20));
 }
 
 #[test]
@@ -2141,9 +2583,13 @@ fn device_handoff_retains_unique_owners_and_refuses_failed_or_duplicate_open() {
     let mut first = host();
     let mut second = host();
     let first_lease = first.leases[0].1.clone();
+    {
+        let mut lease = first_lease.lock().unwrap();
+        lease.binding.next = lease.binding.active.clone();
+    }
     let second_lease = second.leases[0].1.clone();
     let settings = GenerationSettings {
-        node: "1000".into(),
+        node: LOCAL.into(),
         device: "usb".into(),
         receive_maximum: MAXIMUM_FRAMES,
         transmit_maximum: MAXIMUM_FRAMES,
@@ -2152,7 +2598,7 @@ fn device_handoff_retains_unique_owners_and_refuses_failed_or_duplicate_open() {
     };
     let mut device = Device {
         lease: first_lease.clone(),
-        name: "1000".into(),
+        name: LOCAL.into(),
         services: services(),
     };
     assert!(!device.open(&settings));
@@ -2169,10 +2615,16 @@ fn device_handoff_retains_unique_owners_and_refuses_failed_or_duplicate_open() {
         assert!(!first_lease.lock().unwrap().attach(owners));
         lease.owners = first_lease.lock().unwrap().owners.take();
     }
-    assert!(first.stop(10));
-    assert!(second.stop(10));
+    assert!(first.fixture_stop(10));
+    assert!(second.fixture_stop(10));
 
     let lease = Arc::new(Mutex::new(Lease {
+        #[cfg(target_os = "linux")]
+        binding: native::LeaseBindings {
+            next: Some(Arc::new(crate::fixture::station::binding(services()))),
+            ..Default::default()
+        },
+        maintenance: None,
         quiesced: false,
         quiescing: false,
         owners: None,
@@ -2182,7 +2634,7 @@ fn device_handoff_retains_unique_owners_and_refuses_failed_or_duplicate_open() {
     }));
     let mut device = Device {
         lease: lease.clone(),
-        name: "1000".into(),
+        name: LOCAL.into(),
         services: services(),
     };
     RadioWorker::fail_next_for_test(crate::worker::TestFailure::Prepare);
@@ -2209,11 +2661,11 @@ fn pending_radio_retirement_is_pumped_without_reopening_or_discarding_owners() {
     let _serial = crate::fixture::LIFECYCLE
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    let mut table = unsafe { crate::fixture::host_descriptor().read() };
+    let mut table = service_table();
     table.radio_quiesce = Some(quiesce);
     let services = unsafe { HostServices::open(Box::leak(Box::new(table))) }.unwrap();
-    let mut host = Host::start(
-        document("usb", ""),
+    let mut host = Host::fixture_start(
+        configuration("usb", &[]),
         media(),
         services,
         Instant::now(),
@@ -2222,7 +2674,7 @@ fn pending_radio_retirement_is_pumped_without_reopening_or_discarding_owners() {
     .unwrap();
     let lease = Arc::clone(&host.leases[0].1);
     let mut device = Device {
-        name: "1000".into(),
+        name: LOCAL.into(),
         lease: Arc::clone(&lease),
         services,
     };
@@ -2237,25 +2689,26 @@ fn pending_radio_retirement_is_pumped_without_reopening_or_discarding_owners() {
     assert!(lease.lock().unwrap().worker.is_none());
     assert!(lease.lock().unwrap().owners.is_some());
     device.close();
-    assert!(host.stop(20));
+    assert!(host.fixture_stop(20));
 }
 
 #[test]
 fn peer_radio_unkey_completes_remote_commands_with_the_original_reply_target() {
-    use rpt_advanced_core::remote_base_command::{RemoteCommand, RemoteDtmfAccess};
+    use rpt_advanced_core::remote_base_command::RemoteCommand;
     let _serial = crate::fixture::LIFECYCLE
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    let mut host = host();
-    host.runtime
-        .node("1000")
-        .unwrap()
-        .links()
-        .configure_remote("6", RemoteDtmfAccess::Open)
-        .unwrap();
-    host.runtime.incoming("1000", "2000", true).unwrap();
+    let mut host = Host::fixture_start(
+        remote::remote_configuration(),
+        media(),
+        remote::remote_services(),
+        Instant::now(),
+        clock(),
+    )
+    .unwrap();
+    host.runtime.incoming(LOCAL, "2000", true).unwrap();
     let (io, state) = peer(48000);
-    host.attach_peer("1000", "2000", Mode::TRANSCEIVE, io, clock())
+    host.attach_peer(LOCAL, "2000", Mode::TRANSCEIVE, io, clock())
         .unwrap();
     pump_until(&mut host, |host| {
         named_peer_ready(host, "2000") && host.runtime.status(10)[0].1.retiring.is_none()
@@ -2270,15 +2723,55 @@ fn peer_radio_unkey_completes_remote_commands_with_the_original_reply_target() {
         Input::Digit(b'1'),
         Input::RadioUnkey,
     ]);
-    pump_until(&mut host, |host| !host.operations.is_empty());
-    let outcomes = host.take_operations();
-    assert!(
-        matches!(outcomes.as_slice(), [(local, DigitOutcome::Operation(operation))]
-        if local == "1000" && operation.remote == Some(RemoteCommand::Status { long: true })
-            && operation.reply.as_ref() == Some(&reply) && operation.origin.as_deref() == Some("2000")),
-        "{outcomes:?}"
-    );
-    assert!(host.stop(20));
+    // Read the actual peer owner's events, separating the dispatch receipt from
+    // submission so this test can verify which transport owns the answer.
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let input = loop {
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for peer unkey"
+        );
+        match host.peers[0].control.received_event() {
+            Some(Event::ReceivedDigit(symbol, receipt)) => {
+                assert_eq!(receipt.reply, reply);
+                assert!(
+                    host.runtime
+                        .node(LOCAL)
+                        .unwrap()
+                        .links()
+                        .peer_digit("2000", symbol, receipt.at, receipt.reply)
+                        .is_none()
+                );
+            }
+            Some(Event::ReceivedUnkey(receipt)) => {
+                assert_eq!(receipt.reply, reply);
+                let mut outcomes = host
+                    .runtime
+                    .node(LOCAL)
+                    .unwrap()
+                    .links()
+                    .peer_remote_unkey(receipt.at, receipt.reply);
+                assert_eq!(outcomes.len(), 1);
+                let DigitOutcome::Mapped(input) = outcomes.pop().unwrap() else {
+                    panic!("unkey must complete a mapped radio command")
+                };
+                break input;
+            }
+            Some(_) => {}
+            None => std::thread::yield_now(),
+        }
+    };
+    let LinkEffect::RemoteBase(operation) = host
+        .runtime
+        .dispatch_mapping(LOCAL, input, clock())
+        .unwrap()
+    else {
+        panic!("radio operation")
+    };
+    assert_eq!(operation.remote, Some(RemoteCommand::Status { long: true }));
+    assert_eq!(operation.reply.as_ref(), Some(&reply));
+    assert_eq!(operation.origin.as_deref(), Some("2000"));
+    assert!(host.fixture_stop(20));
 }
 
 #[test]
@@ -2288,13 +2781,19 @@ fn pending_audio_generation_bounds_adapter_refresh_retries() {
         .unwrap_or_else(|error| error.into_inner());
     let mut host = host();
     assert!(host.leases[0].1.lock().unwrap().quiesce());
-    host.reload(document("usb", "callsign=W1NEW\n"), clock())
-        .unwrap();
+    host.fixture_reload(
+        configuration(
+            "usb",
+            &[(Kind::Allstarlink, "", json!({"callsign":"W1NEW"}))],
+        ),
+        clock(),
+    )
+    .unwrap();
     assert!(matches!(
-        host.refresh("1000", clock()),
+        host.refresh(LOCAL, clock()),
         Err(RuntimeError::Busy)
     ));
-    assert!(host.stop(20));
+    assert!(host.fixture_stop(20));
 }
 
 #[test]
@@ -2310,12 +2809,17 @@ fn saturated_media_publication_keeps_the_running_generation() {
     for _ in 0..3 {
         loop {
             match prepared(
-                "1000",
-                host.runtime.settings("1000").unwrap(),
-                &host.peers,
-                media_worker(&mut host.media_workers, "1000").unwrap(),
+                LOCAL,
+                host.runtime.settings(LOCAL).unwrap(),
+                StationPeers {
+                    links: &host.peers,
+                    calls: Some(&host.phone_calls),
+                    applications: &[],
+                },
+                media_worker(&mut host.media_workers, LOCAL).unwrap(),
                 &mut host.text,
                 host.services,
+                StationAudio::Modular(host.radio_preparation.active_plan(LOCAL).unwrap()),
             ) {
                 Ok(candidate) => {
                     held.push(candidate);
@@ -2328,17 +2832,27 @@ fn saturated_media_publication_keeps_the_running_generation() {
         }
     }
     assert!(matches!(
-        host.refresh("1000", clock()),
+        host.refresh(LOCAL, clock()),
         Err(RuntimeError::Busy)
     ));
     assert_eq!(host.runtime.status(10)[0].1.active, active);
     assert!(matches!(
-        host.reload(document("usb", "transmit_hang_ms=10\n"), clock()),
+        host.fixture_reload(
+            configuration(
+                "usb",
+                &[(
+                    Kind::TxSignaling,
+                    "",
+                    json!({"ptt":{"timing":{"hang_ms":10}}})
+                )]
+            ),
+            clock()
+        ),
         Err(RuntimeError::Busy)
     ));
     assert_eq!(host.runtime.status(10)[0].1.active, active);
     drop(held);
-    assert!(host.stop(20));
+    assert!(host.fixture_stop(20));
 }
 
 #[test]
@@ -2354,6 +2868,7 @@ fn queued_peer_events_after_runtime_stop_cannot_reenter_removed_node_policy() {
             .iter()
             .all(|(_, status)| status.retiring.is_none())
     });
+    assert_eq!(host.site_shutdown(20), Ok(true));
     assert!(!host.runtime.stop(20));
     state
         .lock()
@@ -2369,7 +2884,7 @@ fn queued_peer_events_after_runtime_stop_cannot_reenter_removed_node_policy() {
     std::thread::sleep(Duration::from_millis(1));
     host.pump(clock()).unwrap();
     assert!(host.take_operations().is_empty());
-    assert!(host.stop(30));
+    assert!(host.fixture_stop(30));
     assert_eq!(state.lock().unwrap().drops, 1);
 }
 
@@ -2380,8 +2895,8 @@ fn failed_audio_preparation_and_attachment_preserve_start_and_reload_state() {
         .unwrap_or_else(|error| error.into_inner());
     RadioWorker::fail_next_for_test(crate::worker::TestFailure::Prepare);
     assert!(matches!(
-        Host::start(
-            document("usb", ""),
+        Host::fixture_start(
+            configuration("usb", &[]),
             media(),
             services(),
             Instant::now(),
@@ -2390,30 +2905,33 @@ fn failed_audio_preparation_and_attachment_preserve_start_and_reload_state() {
         Err(RuntimeError::Device)
     ));
     let mut host = host();
-    let old_document = host.runtime.document().clone();
+    let old_document = Arc::clone(host.runtime.modular_configuration().unwrap());
     let revision = host.runtime.revision();
     let lease = Arc::clone(&host.leases[0].1);
     crate::fixture::RADIO_ACTIVATE_RESULT.store(1, std::sync::atomic::Ordering::Release);
     assert!(matches!(
-        host.reload(
-            document("usb", "[2000]\nradio_channel=usb2\nduplex=full\n"),
+        host.fixture_reload(
+            stations(
+                &[
+                    (LOCAL, "1000", "usb", json!({})),
+                    (SECOND_LOCAL, "2000", "usb2", json!({}))
+                ],
+                &[]
+            ),
             clock()
         ),
         Err(RuntimeError::Device)
     ));
-    assert_eq!(host.runtime.document(), &old_document);
+    assert!(Arc::ptr_eq(
+        host.runtime.modular_configuration().unwrap(),
+        &old_document
+    ));
     assert_eq!(host.runtime.revision(), revision);
-    assert_eq!(host.runtime.node_names(), ["1000"]);
+    assert_eq!(host.runtime.node_names(), [LOCAL]);
     assert!(Arc::ptr_eq(&host.leases[0].1, &lease));
     assert!(lease.lock().unwrap().worker.is_some());
-    assert!(
-        host.runtime
-            .node("1000")
-            .unwrap()
-            .register_audio()
-            .is_none()
-    );
-    assert!(host.stop(20));
+    assert!(host.runtime.node(LOCAL).unwrap().register_audio().is_none());
+    assert!(host.fixture_stop(20));
 }
 
 #[test]
@@ -2429,68 +2947,96 @@ fn peer_processing_preparation_and_retirement_follow_the_audio_generation() {
         destroyed: Mutex<BTreeSet<usize>>,
         processed: AtomicUsize,
     }
-    struct Processor {
-        state: *const State,
-        id: usize,
-    }
-    unsafe extern "C" fn process(context: *mut c_void, _: *mut f32, _: usize) -> i32 {
-        let processor = unsafe { &*context.cast::<Processor>() };
-        unsafe { &*processor.state }
+    // The SDK has no application context on its link descriptor. This fixture is
+    // serialized by LIFECYCLE, and its state outlives every media callback.
+    static TRACKER: std::sync::LazyLock<State> = std::sync::LazyLock::new(|| State {
+        reject: AtomicBool::new(false),
+        next: AtomicUsize::new(1),
+        prepared: Default::default(),
+        destroyed: Default::default(),
+        processed: AtomicUsize::new(0),
+    });
+    unsafe extern "C" fn process(
+        context: *mut c_void,
+        _: u32,
+        rate: u32,
+        _: *mut i16,
+        _: u32,
+    ) -> i32 {
+        if rate != 48000 {
+            return -1;
+        }
+        TRACKER
             .processed
-            .store(processor.id, Ordering::Release);
+            .store(unsafe { *context.cast::<usize>() }, Ordering::Release);
         0
     }
     unsafe extern "C" fn destroy(context: *mut c_void) {
-        let processor = unsafe { Box::from_raw(context.cast::<Processor>()) };
-        let state = unsafe { &*processor.state };
-        let fresh = state.destroyed.lock().unwrap().insert(processor.id);
-        assert!(fresh, "each prepared processor is destroyed exactly once");
+        let id = unsafe { Box::from_raw(context.cast::<usize>()) };
+        assert!(
+            TRACKER.destroyed.lock().unwrap().insert(*id),
+            "each prepared processor retires once"
+        );
+    }
+    unsafe extern "C" fn role(
+        bytes: *const u8,
+        len: u32,
+        _: abi::UrpNativeProcessingDiagnostic,
+        _: *mut c_void,
+        out: *mut *mut abi::UrpPreparedLinkRole,
+    ) -> i32 {
+        let raw = unsafe { std::slice::from_raw_parts(bytes, len as usize) };
+        let Ok(dto) = serde_json::from_slice::<Value>(raw) else {
+            return -1;
+        };
+        let Some(threshold) = dto
+            .pointer("/link/limiter/low/threshold_dbfs")
+            .and_then(Value::as_f64)
+        else {
+            return -1;
+        };
+        unsafe { out.write(Box::into_raw(Box::new(threshold)).cast()) };
+        0
+    }
+    unsafe extern "C" fn role_equal(
+        a: *const abi::UrpPreparedLinkRole,
+        b: *const abi::UrpPreparedLinkRole,
+        out: *mut u32,
+    ) -> i32 {
+        unsafe { out.write(u32::from(*a.cast::<f64>() == *b.cast::<f64>())) };
+        0
+    }
+    unsafe extern "C" fn role_destroy(role: *mut abi::UrpPreparedLinkRole) {
+        if !role.is_null() {
+            drop(unsafe { Box::from_raw(role.cast::<f64>()) });
+        }
     }
     unsafe extern "C" fn prepare(
-        context: *mut c_void,
-        configuration: *const std::ffi::c_char,
-        length: usize,
-        local: *const std::ffi::c_char,
-        local_length: usize,
-        maximum: usize,
-        output: *mut abi::rptadv_pcm_processor_v1,
+        role: *const abi::UrpPreparedLinkRole,
+        ffmpeg: *const c_void,
+        rate: u32,
+        frames: u32,
+        out: *mut *mut c_void,
     ) -> i32 {
-        let state = unsafe { &*context.cast::<State>() };
-        let configuration = unsafe {
-            std::str::from_utf8(std::slice::from_raw_parts(
-                configuration.cast::<u8>(),
-                length,
-            ))
-        }
-        .unwrap();
-        assert!(configuration.starts_with("[1000]\n[link]\n"));
-        assert_eq!(
-            unsafe { std::slice::from_raw_parts(local.cast::<u8>(), local_length) },
-            b"1000"
-        );
-        assert_eq!(maximum, MAXIMUM_FRAMES);
-        if state.reject.load(Ordering::Relaxed) {
+        unsafe { out.write(ptr::null_mut()) };
+        if TRACKER.reject.load(Ordering::Acquire)
+            || ffmpeg.is_null()
+            || rate != 48000
+            || frames as usize != MAXIMUM_FRAMES
+        {
             return -1;
         }
-        let threshold = configuration
-            .lines()
-            .find_map(|line| line.strip_prefix("limiter_low_threshold_dbfs="))
-            .unwrap()
-            .parse()
-            .unwrap();
-        let id = state.next.fetch_add(1, Ordering::Relaxed);
+        let id = TRACKER.next.fetch_add(1, Ordering::Relaxed);
+        let threshold = unsafe { *role.cast::<f64>() };
         assert!(
-            state
+            TRACKER
                 .prepared
                 .lock()
                 .unwrap()
                 .insert(id, threshold)
                 .is_none()
         );
-        let output = unsafe { &mut *output };
-        output.context = Box::into_raw(Box::new(Processor { state, id })).cast();
-        output.process = Some(process);
-        output.destroy = Some(destroy);
+        unsafe { out.write(Box::into_raw(Box::new(id)).cast()) };
         0
     }
     fn only_live(state: &State, expected_threshold: f64) -> usize {
@@ -2513,70 +3059,98 @@ fn peer_processing_preparation_and_retirement_follow_the_audio_generation() {
     let _serial = crate::fixture::LIFECYCLE
         .lock()
         .unwrap_or_else(|error| error.into_inner());
-    let mut state = Box::new(State {
-        reject: AtomicBool::new(false),
-        next: AtomicUsize::new(1),
-        prepared: Mutex::new(BTreeMap::new()),
-        destroyed: Mutex::new(BTreeSet::new()),
-        processed: AtomicUsize::new(0),
-    });
-    let mut table = unsafe { crate::fixture::host_descriptor().read() };
-    table.context = ptr::from_mut(state.as_mut()).cast();
-    table.peer_processing_prepare = Some(prepare);
-    let services = unsafe { HostServices::open(Box::leak(Box::new(table))) }.unwrap();
-    let config = |threshold| {
-        document(
+    let state = &*TRACKER;
+    let api = unsafe {
+        crate::configuration_radio::RadioPreparationApi::fixture_descriptors(|ordinary, roles| {
+            ordinary.link_process = Some(process);
+            ordinary.link_process_f32 = None;
+            ordinary.link_destroy = Some(destroy);
+            roles.prepare = Some(role);
+            roles.equal = Some(role_equal);
+            roles.link_prepare = Some(prepare);
+            roles.destroy = Some(role_destroy);
+        })
+    }
+    .unwrap();
+    let config = |threshold: i32| {
+        configuration(
             "usb",
-            &format!("[link]\nlimiter_low_threshold_dbfs={threshold}\n"),
+            &[(
+                Kind::PeerAudio,
+                "",
+                json!({"multiband_limiter":{"low":{"threshold_dbfs":threshold}}}),
+            )],
         )
     };
-    let mut host = Host::start(config(-10), media(), services, Instant::now(), clock()).unwrap();
+    let mut host = Host::management_only(media(), services(), Instant::now()).unwrap();
+    host.radio_preparation.fixture_set_api(api);
+    host.fixture_reload(config(-10), clock()).unwrap();
     assert!(state.prepared.lock().unwrap().is_empty());
-    let _peer = attach(&mut host, "2000", LinkAction::Transceive, Mode::TRANSCEIVE);
+    let codec_rate = 8_000;
+    let _peer = attach_at_rate(
+        &mut host,
+        "2000",
+        LinkAction::Transceive,
+        Mode::TRANSCEIVE,
+        codec_rate,
+    );
+    assert_eq!(
+        host.peers[0].control.snapshot().unwrap().input_rate,
+        codec_rate,
+        "the ingress ring must retain the negotiated codec rate"
+    );
     pump_until(&mut host, |host| {
         host.runtime.status(10)[0].1.retiring.is_none()
     });
-    let original = only_live(&state, -10.0);
+    let original = only_live(state, -10.0);
     pump_until(&mut host, |_| {
         state.processed.load(Ordering::Acquire) == original
     });
-    let prior_document = host.runtime.document().clone();
+    let prior_document = Arc::clone(host.runtime.modular_configuration().unwrap());
     let prior_revision = host.runtime.revision();
     let prior_generation = host.runtime.status(10)[0].1.active;
     let prepared = state.prepared.lock().unwrap().clone();
     let destroyed = state.destroyed.lock().unwrap().clone();
     state.reject.store(true, Ordering::Relaxed);
     assert_eq!(
-        host.reload(config(-11), clock()),
+        host.fixture_reload(config(-11), clock()),
         Err(RuntimeError::Preparation)
     );
-    assert_eq!(host.runtime.document(), &prior_document);
+    assert!(Arc::ptr_eq(
+        host.runtime.modular_configuration().unwrap(),
+        &prior_document
+    ));
     assert_eq!(host.runtime.revision(), prior_revision);
     assert_eq!(host.runtime.status(10)[0].1.active, prior_generation);
     let after_prepared = state.prepared.lock().unwrap().clone();
     let after_destroyed = state.destroyed.lock().unwrap().clone();
     assert_eq!(after_prepared, prepared);
     assert_eq!(after_destroyed, destroyed);
-    assert_eq!(only_live(&state, -10.0), original);
+    assert_eq!(only_live(state, -10.0), original);
     state.processed.store(0, Ordering::Release);
     pump_until(&mut host, |_| {
         state.processed.load(Ordering::Acquire) == original
     });
     state.reject.store(false, Ordering::Relaxed);
     let mut accepted = None;
-    pump_until(&mut host, |host| match host.reload(config(-11), clock()) {
-        Err(RuntimeError::Busy) => {
-            // Discarded candidates may still occupy dispatcher publication credit.
-            // Busy never changes the adopted configuration or processor.
-            assert_eq!(host.runtime.document(), &prior_document);
-            assert_eq!(host.runtime.revision(), prior_revision);
-            assert_eq!(host.runtime.status(10)[0].1.active, prior_generation);
-            assert_eq!(only_live(&state, -10.0), original);
-            false
-        }
-        result => {
-            accepted = Some(result);
-            true
+    pump_until(&mut host, |host| {
+        match host.fixture_reload(config(-11), clock()) {
+            Err(RuntimeError::Busy) => {
+                // Discarded candidates may still occupy dispatcher publication credit.
+                // Busy never changes the adopted configuration or processor.
+                assert!(Arc::ptr_eq(
+                    host.runtime.modular_configuration().unwrap(),
+                    &prior_document
+                ));
+                assert_eq!(host.runtime.revision(), prior_revision);
+                assert_eq!(host.runtime.status(10)[0].1.active, prior_generation);
+                assert_eq!(only_live(state, -10.0), original);
+                false
+            }
+            result => {
+                accepted = Some(result);
+                true
+            }
         }
     });
     accepted
@@ -2585,13 +3159,13 @@ fn peer_processing_preparation_and_retirement_follow_the_audio_generation() {
     pump_until(&mut host, |host| {
         host.runtime.status(10)[0].1.retiring.is_none()
     });
-    let replacement = only_live(&state, -11.0);
+    let replacement = only_live(state, -11.0);
     assert_ne!(replacement, original);
     pump_until(&mut host, |_| {
         state.processed.load(Ordering::Acquire) == replacement
     });
     assert!(state.destroyed.lock().unwrap().contains(&original));
-    assert!(host.stop(20));
+    assert!(host.fixture_stop(20));
     let prepared: BTreeSet<_> = state.prepared.lock().unwrap().keys().copied().collect();
     let destroyed = state.destroyed.lock().unwrap().clone();
     assert_eq!(
@@ -2608,8 +3182,7 @@ fn failed_device_restoration_leaves_inactive_generations_safe_to_pump_and_stop()
     static DESTROYS: AtomicUsize = AtomicUsize::new(0);
     unsafe extern "C" fn open(
         context: *mut c_void,
-        name: *const std::ffi::c_char,
-        length: usize,
+        plan: *const c_void,
         maximum: usize,
         output: *mut *mut c_void,
     ) -> i32 {
@@ -2621,8 +3194,8 @@ fn failed_device_restoration_leaves_inactive_generations_safe_to_pump_and_stop()
             -1
         } else {
             unsafe {
-                (*crate::fixture::host_descriptor()).radio_open.unwrap()(
-                    context, name, length, maximum, output,
+                crate::fixture::station::BINDING.0.open_prepared.unwrap()(
+                    context, plan, maximum, output,
                 )
             }
         }
@@ -2637,13 +3210,15 @@ fn failed_device_restoration_leaves_inactive_generations_safe_to_pump_and_stop()
     FAIL.store(false, Ordering::Release);
     OPEN_ATTEMPTS.store(0, Ordering::Release);
     DESTROYS.store(0, Ordering::Release);
-    let mut table = unsafe { crate::fixture::host_descriptor().read() };
+    let mut table = service_table();
     table.context = ptr::without_provenance_mut(1);
-    table.radio_open = Some(open);
+    let mut binding = crate::fixture::station::BINDING.0;
+    binding.open_prepared = Some(open);
+    table.station_binding = Box::leak(Box::new(binding));
     table.radio_destroy = Some(destroy);
     let services = unsafe { HostServices::open(Box::leak(Box::new(table))) }.unwrap();
-    let mut host = Host::start(
-        document("usb", ""),
+    let mut host = Host::fixture_start(
+        configuration("usb", &[]),
         media(),
         services,
         Instant::now(),
@@ -2657,16 +3232,24 @@ fn failed_device_restoration_leaves_inactive_generations_safe_to_pump_and_stop()
             .iter()
             .all(|(_, status)| status.retiring.is_none())
     });
-    // Take the real callback owners off the worker before controlling the two
-    // distinct outcomes: a protected-owner rejection, then failed restoration.
+    // Retain the real TX guard through the busy rejection and the subsequent pending handoff.
     let lease = host.leases[0].1.clone();
     assert!(lease.lock().unwrap().quiesce());
     let mut owners = lease.lock().unwrap().owners.take().unwrap();
     let held = owners.1.acquire().unwrap();
+    // Quiescing gave us exclusive callback storage. Reopen the incumbent plan
+    // so the typed provider can classify the next change on its actual handle.
+    let mut incumbent = Device {
+        name: LOCAL.into(),
+        lease: lease.clone(),
+        services: host.services,
+    };
+    incumbent.close();
+    assert!(incumbent.restore(held.settings()));
     let active = host.runtime.status(10)[0].1.active;
     assert_eq!(active, Some(held.id()));
     assert_eq!(host.runtime.status(10)[0].1.protected_owners, 1);
-    let previous = host.runtime.document().clone();
+    let previous = Arc::clone(host.runtime.modular_configuration().unwrap());
     let revision = host.runtime.revision();
     let resources = || {
         (
@@ -2675,30 +3258,68 @@ fn failed_device_restoration_leaves_inactive_generations_safe_to_pump_and_stop()
         )
     };
     let before = resources();
-    assert_eq!(before, (1, 1));
+    assert_eq!(before, (2, 1));
+    let work = host.runtime.node(LOCAL).unwrap().work().unwrap();
     FAIL.store(true, Ordering::Release);
+    // Exercise the physical rejection itself before applying any account edits.
+    let first = configuration("unavailable", &[]);
+    let ticket = host.stage_radio_plans(first.runtime()).unwrap();
+    host.prepare_core(&ticket, first.runtime().clone(), clock())
+        .unwrap();
     assert_eq!(
-        host.reload(document("unavailable", ""), clock()),
+        host.begin_core_adoption(
+            ticket,
+            "work-held".into(),
+            Default::default(),
+            first.inputs().clone(),
+            clock()
+        ),
         Err(RuntimeError::Busy)
     );
     assert_eq!(host.runtime.status(10)[0].1.active, active);
-    assert_eq!(host.runtime.document(), &previous);
+    assert!(Arc::ptr_eq(
+        host.runtime.modular_configuration().unwrap(),
+        &previous
+    ));
     assert_eq!(host.runtime.revision(), revision);
     assert!(!host.runtime.reload_pending());
     assert_eq!(resources(), before);
+    assert!(work.is_current());
+    drop(work);
+
+    let mut adoption = host
+        .fixture_begin_reload(configuration("unavailable", &[]), clock())
+        .unwrap();
+    assert!(host.runtime.reload_pending());
+    assert_eq!(adoption.poll(&mut host, clock()), Ok(false));
+    assert_eq!(host.runtime.status(10)[0].1.active, active);
+    assert_eq!(host.runtime.status(10)[0].1.protected_owners, 1);
+    assert!(host.runtime.node(LOCAL).unwrap().work().is_none());
+    assert!(Arc::ptr_eq(
+        host.runtime.modular_configuration().unwrap(),
+        &previous
+    ));
+    assert_eq!(host.runtime.revision(), revision);
+    // The incumbent physical callbacks have quiesced, while the outstanding
+    // software guard still prevents the candidate or reverse open.
+    assert_eq!(resources(), (before.0, before.1 + 1));
+
     drop(held);
     lease.lock().unwrap().owners = Some(owners);
     assert_eq!(host.runtime.status(10)[0].1.protected_owners, 0);
-    assert!(matches!(
-        host.reload(document("unavailable", ""), clock()),
+    assert_eq!(
+        adoption.poll(&mut host, clock()),
         Err(RuntimeError::Restore)
+    );
+    assert!(Arc::ptr_eq(
+        host.runtime.modular_configuration().unwrap(),
+        &previous
     ));
-    assert_eq!(host.runtime.document(), &previous);
     assert_eq!(host.runtime.revision(), revision);
     assert!(!host.runtime.reload_pending());
-    assert_eq!(resources(), (3, 1));
+    assert_eq!(resources(), (before.0 + 2, before.1 + 1));
     assert!(host.runtime.status(10)[0].1.active.is_none());
-    assert!(!host.status_text("1000").unwrap().contains("local-rx:"));
+    assert!(!host.status_text(LOCAL).unwrap().contains("local-rx:"));
     // A late peer acknowledgment cannot reactivate a failed radio generation.
     let (inbound, _input) = InboundRing::open(48000, InboundPolicy::Peer).unwrap();
     let (_, outbound) = LinkAudioQueue::new(960, 64).unwrap().into_endpoints();
@@ -2706,6 +3327,7 @@ fn failed_device_restoration_leaves_inactive_generations_safe_to_pump_and_stop()
         .control
         .send(PeerCommand::Redirect {
             inbound,
+            ingress_graph_generation: 0,
             dtmf_muting: true,
             outbound,
         })
@@ -2721,9 +3343,9 @@ fn failed_device_restoration_leaves_inactive_generations_safe_to_pump_and_stop()
     // Failed restore retains the configured node after reclaiming its audio generation.
     assert!(host.runtime.status(10)[0].1.active.is_none());
     host.pump(clock()).unwrap();
-    assert!(host.stop(20));
+    assert!(host.fixture_stop(20));
     assert_eq!(state.lock().unwrap().drops, 1);
-    assert_eq!(resources(), (3, 1));
+    assert_eq!(resources(), (before.0 + 2, before.1 + 1));
 }
 
 #[test]
@@ -2732,10 +3354,10 @@ fn stopped_host_status_does_not_retain_a_retired_radio_lease() {
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     let mut host = host();
-    assert!(host.stop(20));
+    assert!(host.fixture_stop(20));
     host.prune_leases();
     assert!(host.leases.is_empty());
-    assert_eq!(host.status_text("1000"), Err(RuntimeError::MissingNode));
+    assert_eq!(host.status_text(LOCAL), Err(RuntimeError::MissingNode));
 }
 
 #[test]
@@ -2744,10 +3366,15 @@ fn peer_ending_before_refresh_is_reaped_without_a_connected_announcement() {
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     let mut host = host();
-    let (io, state) = peer(48000);
-    state.lock().unwrap().fail_ready = true;
+    let (io, state) = peer_with_async(48000, true);
+    {
+        // This case requires an ended session before the first station refresh.
+        let mut provider = state.lock().unwrap();
+        provider.fail_ready = true;
+        provider.finish_first_step_before_registration = true;
+    }
     assert_eq!(
-        host.attach_peer("1000", "2000", Mode::TRANSCEIVE, io, clock()),
+        host.attach_peer(LOCAL, "2000", Mode::TRANSCEIVE, io, clock()),
         Ok(())
     );
     assert!(host.peers.is_empty());
@@ -2758,12 +3385,8 @@ fn peer_ending_before_refresh_is_reaped_without_a_connected_announcement() {
     let mut owners = lease.lock().unwrap().owners.take().unwrap();
     assert!(!render_queued_telemetry(&mut host, &mut owners));
     lease.lock().unwrap().owners = Some(owners);
-    assert!(
-        host.status_text("1000")
-            .unwrap()
-            .contains("no active links")
-    );
-    assert!(host.stop(20));
+    assert!(host.status_text(LOCAL).unwrap().contains("no active links"));
+    assert!(host.fixture_stop(20));
 }
 
 #[test]
@@ -2789,7 +3412,7 @@ fn peer_without_a_live_local_radio_is_rejected_before_starting_media() {
         .unwrap_or_else(|e| e.into_inner());
     for (local, expected) in [
         ("missing", RuntimeError::MissingNode),
-        ("1000", RuntimeError::Device),
+        (LOCAL, RuntimeError::Device),
     ] {
         let mut host = host();
         assert!(host.leases[0].1.lock().unwrap().quiesce());
@@ -2805,7 +3428,7 @@ fn peer_without_a_live_local_radio_is_rejected_before_starting_media() {
             "link setup must not start before radio binding"
         );
         assert_eq!(state.drops, 1);
-        assert!(host.stop(20));
+        assert!(host.fixture_stop(20));
     }
 }
 
@@ -2822,7 +3445,7 @@ fn rejected_radio_binding_drops_peer_without_starting_media_or_admitting_it() {
         state.input.push_back(Input::Audio(vec![0.25; 160]));
     }
     assert_eq!(
-        host.attach_peer("1000", "2000", Mode::TRANSCEIVE, io, clock()),
+        host.attach_peer(LOCAL, "2000", Mode::TRANSCEIVE, io, clock()),
         Err(RuntimeError::Preparation)
     );
     assert!(host.peers.is_empty());
@@ -2832,7 +3455,7 @@ fn rejected_radio_binding_drops_peer_without_starting_media_or_admitting_it() {
         assert_eq!(state.input.len(), 1, "no frame may be read before binding");
         assert_eq!(state.drops, 1);
     }
-    assert!(host.stop(20));
+    assert!(host.fixture_stop(20));
 }
 
 #[test]
@@ -2844,12 +3467,12 @@ fn stopped_peer_io_owner_rejects_and_releases_a_prepared_session() {
     host.peer_io.stop();
     let (io, state) = peer(48000);
     assert_eq!(
-        host.attach_peer("1000", "2000", Mode::TRANSCEIVE, io, clock()),
+        host.attach_peer(LOCAL, "2000", Mode::TRANSCEIVE, io, clock()),
         Err(RuntimeError::Rejected)
     );
     assert!(host.peers.is_empty());
     assert_eq!(state.lock().unwrap().drops, 1);
-    assert!(host.stop(20));
+    assert!(host.fixture_stop(20));
 }
 
 #[test]
@@ -2857,8 +3480,14 @@ fn incoming_and_outgoing_peers_bind_to_their_nodes_existing_radio_leases() {
     let _serial = crate::fixture::LIFECYCLE
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    let mut host = Host::start(
-        document("west-radio", "[2000]\nradio_channel=east-radio\n"),
+    let mut host = Host::fixture_start(
+        stations(
+            &[
+                (LOCAL, "1000", "west-radio", json!({})),
+                (SECOND_LOCAL, "2000", "east-radio", json!({})),
+            ],
+            &[],
+        ),
         media(),
         services(),
         Instant::now(),
@@ -2866,10 +3495,7 @@ fn incoming_and_outgoing_peers_bind_to_their_nodes_existing_radio_leases() {
     )
     .unwrap();
     let opens = crate::fixture::RADIO_OPENS.load(std::sync::atomic::Ordering::Relaxed);
-    for (local, remote, radio, incoming) in [
-        ("1000", "3000", "west-radio", true),
-        ("2000", "4000", "east-radio", false),
-    ] {
+    for (local, remote, incoming) in [(LOCAL, "3000", true), (SECOND_LOCAL, "4000", false)] {
         if incoming {
             host.runtime.incoming(local, remote, true).unwrap();
         } else {
@@ -2894,17 +3520,14 @@ fn incoming_and_outgoing_peers_bind_to_their_nodes_existing_radio_leases() {
         let (io, state) = peer(8000);
         host.attach_peer(local, remote, Mode::TRANSCEIVE, io, clock())
             .unwrap();
-        assert_eq!(
-            state.lock().unwrap().bound_radio.as_deref(),
-            Some(format!("{local}\0{radio}").as_str())
-        );
+        assert_eq!(state.lock().unwrap().bound_radio.as_deref(), Some(local));
     }
     assert_eq!(
         crate::fixture::RADIO_OPENS.load(std::sync::atomic::Ordering::Relaxed),
         opens,
         "binding must reuse existing radio reservations"
     );
-    assert!(host.stop(20));
+    assert!(host.fixture_stop(20));
 }
 
 #[test]
@@ -2922,7 +3545,7 @@ fn live_vad_policy_updates_ring_reserve_without_reopening_the_radio() {
     crate::fixture::RADIO_VAD_MODE.store(1, std::sync::atomic::Ordering::Release);
     let mut host = host();
     assert!(
-        host.status_text("1000").unwrap().contains("reserve=160ms"),
+        host.status_text(LOCAL).unwrap().contains("reserve=160ms"),
         "initial policy must reserve onset before callbacks activate"
     );
     let opens = crate::fixture::RADIO_OPENS.load(std::sync::atomic::Ordering::Relaxed);
@@ -2936,7 +3559,7 @@ fn live_vad_policy_updates_ring_reserve_without_reopening_the_radio() {
     ] {
         crate::fixture::RADIO_VAD_MODE.store(mode, std::sync::atomic::Ordering::Release);
         pump_until(&mut host, |host| {
-            host.status_text("1000").unwrap().contains(expected)
+            host.status_text(LOCAL).unwrap().contains(expected)
         });
         assert_eq!(host.runtime.status(10)[0].1.active, generation);
         assert_eq!(
@@ -2948,21 +3571,93 @@ fn live_vad_policy_updates_ring_reserve_without_reopening_the_radio() {
             drops
         );
     }
-    assert!(host.stop(20));
+    assert!(host.fixture_stop(20));
 }
 
-#[test]
-fn radio_maintenance_rejects_a_quiesced_device_lease() {
+// Install an actual registered command owner on the native host used by the media race.
+pub(crate) fn with_ingress_mute(
+    run: impl FnOnce(
+        &rpt_advanced_core::link::PeerSignals,
+        &mut Host,
+        rpt_advanced_core::config::resources::candidate::ResourceId,
+        RuntimeClock,
+        [DigitOutcome; 2],
+    ),
+) {
+    use rpt_advanced_core::link::{PeerIdentity, PeerSignals};
     let _serial = crate::fixture::LIFECYCLE
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     let mut host = host();
-    assert!(host.leases[0].1.lock().unwrap().quiesce());
-    // SAFETY: the complete scalar-only control record permits all-zero initialization.
-    let mut request: abi::rptadv_radio_control_v1 = unsafe { std::mem::zeroed() };
-    request.struct_size = std::mem::size_of_val(&request) as u32;
-    request.abi_version = 1;
-    request.operation = 1;
-    assert!(matches!(host.radio_control("1000", request), Err(-7)));
-    assert!(host.stop(20));
+    let port = LOCAL.parse().unwrap();
+    let signals = PeerSignals::new();
+    host.runtime.incoming(LOCAL, "2000", true).unwrap();
+    host.runtime
+        .node(LOCAL)
+        .unwrap()
+        .links()
+        .attach_ingress(
+            PeerIdentity::from_operator("2000").unwrap(),
+            signals.reply_target(),
+        )
+        .unwrap();
+    // Capture the actual receipt-time regeneration tokens; publication after a mute must recheck them.
+    let received = ['5', '5'].map(|symbol| {
+        DigitOutcome::ReceivedDigit(
+            symbol,
+            signals.reply_target().regeneration_origin().unwrap(),
+        )
+    });
+    run(&signals, &mut host, port, clock(), received);
+    host.runtime.peer_detached(LOCAL, "2000", clock().now_ms);
+    assert!(host.fixture_stop(20));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn status_keeps_network_connect_and_disconnect_between_captures() {
+    use crate::management::status::edges::Payload;
+
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let mut host = host();
+    host.runtime.incoming(LOCAL, "2000", true).unwrap();
+    host.attach_peer(LOCAL, "2000", Mode::TRANSCEIVE, peer(8000).0, clock())
+        .unwrap();
+    pump_until(&mut host, |host| {
+        host.peers
+            .first()
+            .is_some_and(|peer| peer.control.status_connected)
+    });
+    assert!(host.peers[0].announced);
+    let connection = host.peers[0].control.connection_generation();
+    host.detach(LOCAL, "2000", clock().now_ms);
+    let (lost, edges) = host.status_edges.drain();
+    assert!(!lost);
+    let observed: Vec<_> = edges
+        .into_iter()
+        .filter_map(|edge| match edge.payload {
+            Payload::Peer {
+                id,
+                connection: generation,
+                kind,
+                value,
+            } => {
+                assert_eq!(id, "allstarlink:2000");
+                assert_eq!(generation, connection);
+                Some((kind, value))
+            }
+            _ => None,
+        })
+        .collect();
+    let [(connected, Some(status)), (disconnected, None)] = observed.as_slice() else {
+        panic!("expected one exact connect and disconnect");
+    };
+    assert_eq!(*connected, "link.connected");
+    assert_eq!(*disconnected, "link.disconnected");
+    assert_eq!(status["state"], "connected");
+    assert_eq!(status["direction"], "incoming");
+    assert_eq!(status["connection_generation"], connection.to_string());
+    assert!(host.fixture_stop(20));
 }

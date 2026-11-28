@@ -1,0 +1,33 @@
+{
+  "mapping": {
+    "command": "*99",
+    "protected": false,
+    "action": "rx_mute_toggle",
+    "target": "phone_patch"
+  },
+  "actions": [
+    {
+      "action": "rx_mute_toggle",
+      "target": "port"
+    },
+    {
+      "action": "rx_mute_toggle",
+      "target": "peer",
+      "parameter": "2001"
+    },
+    {
+      "action": "rx_mute_toggle",
+      "target": "peers"
+    },
+    {
+      "action": "rx_mute_toggle",
+      "target": "peers",
+      "link_type": "echolink"
+    },
+    {
+      "action": "rx_mute_toggle",
+      "target": "phone_patch"
+    }
+  ],
+  "receive_gate": "normal_qualified_receive AND NOT muted"
+}

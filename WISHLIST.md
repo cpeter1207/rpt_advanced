@@ -28,6 +28,53 @@ qualification are distinct from software implementation and passive node health.
 
 ## Entries
 
+### Accessible React controller console
+
+**Status: Implementation started 2026-11-27.** The owner approved the
+[React controller console design](docs/superpowers/specs/2026-11-27-controller-react-management-design.md)
+and [Fluent mapping](docs/superpowers/specs/controller-react-fluent-mapping.tsv).
+Track browser implementation and remaining release evidence in the
+[implementation checklist](docs/superpowers/plans/2026-11-27-controller-react-management-implementation.md).
+
+- Use one responsive React app for site and port management, status, and
+  WebRTC listening and transmission through the existing HAL and media
+  boundaries. Keep the controller CLI and existing USBRadioPlus tuner.
+- Package the app independently as rpt-advanced-console with an nginx
+  dependency. Qualify colocated and separate hosting through the controller's
+  nginx ingress using the existing native Docker quality images.
+- Meet WCAG 2.2 AAA across complete workflows. Use native controls and
+  automate practical checks with Guidepup and available platform tools.
+  Qualify real screen reader use on desktop and mobile.
+- The owner deferred live captions for monitored broadcast audio on
+  2026-11-27. Keep the corresponding AAA conformance work open. Retain the
+  adapter checklist's transceive and interoperability requirements.
+
+### Modular JSON configuration and authenticated HAL management
+
+**Status: Implementation started 2026-11-19; runtime cutover pending.** Follow
+[ADR 0045](doc/architecture/decisions/0045-modular-json-and-hal-management.md), the
+[design](docs/superpowers/specs/2026-11-18-json-rest-configuration-design.md) and
+[updated checklist](docs/superpowers/plans/2026-11-19-json-rest-implementation-checklist.md).
+The decoder/metadata, registry/candidate, registered capture, immutable public
+storage, public manifest/readback, sealed-record/key-loader and typed private
+artifact I/O milestones are verified on the development host and native node.
+Public accepted-state/journal transactions and bounded mTLS/HTTPS transport
+passed 1,005 integrated tests on both the development host and native node. Private account
+graph adoption now passed scoped review and the integrated host checkpoint;
+its native checkpoint is next. HAL/runtime joins and full domain validation
+remain pending. Typed modular protocol profiles and resource-local JSON Patch staging passed
+focused, core and affected-host checks plus their native home-workspace checkpoint.
+Subsequent private/store/runtime joins remain tracked. These control-plane foundations do not replace the running INI path.
+Remove controller INI during the coordinated store/provider cutover and retain
+USBRadioPlus INI. Keep remaining resource, storage, API, provider, scheduler,
+action, message and native milestone verification items unchecked until tested.
+Unknown JSON keys and unsupported values warn and fall back; do not add a
+strict unknown-field rejection policy. Local store maintenance is in progress
+against the existing transaction/private owners: explicit bounded recovery roots,
+manifest/object backups, conservative reachability collection and stopped-writer
+rotation. Its independent review and constrained/native checkpoints remain open;
+no installed-store operation or service stop is authorized by that source work.
+
 ### Remove legacy VOX in favor of VAD
 
 **Status: Planned; requested 2026-11-17.** Earshot VAD supersedes the legacy
@@ -682,14 +729,14 @@ real-provider and physical-radio acceptance remain separate.
   is optional when supported. Provider destination/cost policies, incoming-call
   account limits and emergency-service setup remain with the provider.
 - Every incoming caller authenticates with a configured mailbox number and PIN,
-  associated with first name and callsign. Calls start with private control;
-  `*3` explicitly attaches transceive media to permitted local/remote nodes.
-- Public commands remain available to all authenticated callers; protected
-  commands retain node unlock. `*4` selects local/remote command destinations;
-  ordinary call digits go to the telephone.
-- Default outgoing autopatch isolates initiating-node peer audio in both
-  directions for the call. Per-call bypass always requires the node unlock
-  code. Configure local/all-peer playout and discontinuous Earshot-VAD audio.
+  associated with first name and callsign. Successful authentication attaches
+  the call to the account's local port. The caller hears its eligible mix-minus
+  and uses `*99#` to unmute its own audio and keying.
+- Authenticated callers issue commands to the called account's owning port.
+  Protected commands retain that call's unlock requirement on the port.
+- Default outgoing autopatch isolates initiating-port peer audio in both
+  directions for the call. Each call retains its own claim under the port's
+  isolation policy. Configure local/all-peer playout and Earshot-VAD audio.
 - Manual PTT is a configured alternative to VAD, never a temporary override.
   Both obey a configurable five-second forced receive-check deadline, preferring
   natural pauses, with warning tone, STE and measured radio switching allowances.

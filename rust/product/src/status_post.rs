@@ -99,7 +99,7 @@ impl Schedule {
 #[derive(Default)]
 pub(crate) struct StatusPostService {
     generation: u64,
-    schedules: HashMap<String, Schedule>,
+    schedules: HashMap<String, (String, Schedule)>,
     sequences: HashMap<String, u64>,
     destinations: Vec<PostConfig>,
     worker: Option<StatusPostWorker>,
@@ -108,13 +108,27 @@ pub(crate) struct StatusPostService {
 }
 
 impl StatusPostService {
-    pub(crate) fn configure(&mut self, config: Vec<PostConfig>) {
+    /// The observation key belongs to the station; each destination carries its wire number.
+    pub(crate) fn configure_bound(
+        &mut self,
+        config: impl IntoIterator<Item = (String, PostConfig)>,
+    ) {
         self.generation = self.generation.wrapping_add(1).max(1);
         self.schedules.clear();
-        let config = config
-            .into_iter()
-            .filter(|node| !node.url.is_empty())
-            .collect::<Vec<_>>();
+        let mut selected = Vec::new();
+        for (station, node) in config {
+            if node.url.is_empty() {
+                continue;
+            }
+            let schedule = Schedule::with_sequence(
+                node.interval_seconds,
+                self.sequences.get(&station).copied().unwrap_or(0),
+            );
+            self.schedules
+                .insert(station, (node.node.clone(), schedule));
+            selected.push(node);
+        }
+        let config = selected;
         self.destinations.clone_from(&config);
         if config.is_empty() {
             if let Some(worker) = &self.worker {
@@ -122,15 +136,6 @@ impl StatusPostService {
             }
             return;
         }
-        self.schedules.extend(config.iter().map(|node| {
-            (
-                node.node.clone(),
-                Schedule::with_sequence(
-                    node.interval_seconds,
-                    self.sequences.get(&node.node).copied().unwrap_or(0),
-                ),
-            )
-        }));
         self.ensure_worker();
         if let Some(worker) = &self.worker {
             worker.replace(self.generation, config);
@@ -145,11 +150,9 @@ impl StatusPostService {
         keyed: bool,
         links: Vec<LinkStatus>,
     ) {
-        let Some(snapshot) = self
-            .schedules
-            .get_mut(node)
-            .and_then(|schedule| schedule.snapshot(node, now_ms, wall_seconds, keyed, links))
-        else {
+        let Some(snapshot) = self.schedules.get_mut(node).and_then(|(wire, schedule)| {
+            schedule.snapshot(wire, now_ms, wall_seconds, keyed, links)
+        }) else {
             return;
         };
         self.ensure_worker();
@@ -160,6 +163,7 @@ impl StatusPostService {
                 self.schedules
                     .get_mut(node)
                     .expect("observed status retains its schedule")
+                    .1
                     .sent(now_ms, &snapshot);
                 self.sequences.insert(node.to_owned(), snapshot.sequence);
             }

@@ -1,0 +1,458 @@
+//! Registered reverse patch on the actual standalone foreground using the simulated station.
+use super::{
+    managed_asl,
+    phone_caller::Caller,
+    private_phone::{register, registrar},
+    *,
+};
+use std::{
+    net::{SocketAddr, UdpSocket},
+    panic::{AssertUnwindSafe, catch_unwind, resume_unwind},
+};
+
+const DIALOG: u32 = 1;
+
+enum Evidence {
+    Programme {
+        station_to_phone: bool,
+        phone_to_station: bool,
+        registered: bool,
+        private: bool,
+        attached: bool,
+    },
+    PromptClock {
+        rtp_ticks: u32,
+        wall_ms: u128,
+    },
+    LoginTimers {
+        retry_ms: Option<u128>,
+        attached: bool,
+    },
+    LoginBarge {
+        target_audible: bool,
+        unrelated_programme: bool,
+    },
+    MixMinus {
+        programme: bool,
+        paged: bool,
+    },
+}
+
+/// Answer registration keepalives while the media test owns the call.
+/// Join the reader before the caller resumes signaling on the same socket.
+fn with_keepalives<T>(
+    socket: &UdpSocket,
+    contact: SocketAddr,
+    measure: impl FnOnce() -> T,
+) -> (T, usize) {
+    let timeout = socket.read_timeout().unwrap();
+    let (measured, serviced) = thread::scope(|scope| {
+        let (stop, running) = std::sync::mpsc::channel::<()>();
+        let reader = scope.spawn(move || {
+            let mut bytes = [0; 8192];
+            let mut answered = 0;
+            while matches!(
+                running.try_recv(),
+                Err(std::sync::mpsc::TryRecvError::Empty)
+            ) {
+                socket
+                    .set_read_timeout(Some(Duration::from_millis(100)))
+                    .unwrap();
+                match registrar::receive_with_keepalives(socket, &mut bytes, |source| {
+                    assert_eq!(source, contact);
+                    answered += 1;
+                }) {
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                        ) => {}
+                    Err(error) => panic!("incoming SIP keepalive read failed: {error}"),
+                    Ok((_, source)) => {
+                        assert_eq!(source, contact);
+                        panic!("unexpected incoming SIP signaling during the media check");
+                    }
+                }
+            }
+            answered
+        });
+        let measured = catch_unwind(AssertUnwindSafe(measure));
+        drop(stop);
+        (measured, reader.join())
+    });
+    socket.set_read_timeout(timeout).unwrap();
+    let answered = serviced.unwrap_or_else(|failure| resume_unwind(failure));
+    (
+        measured.unwrap_or_else(|failure| resume_unwind(failure)),
+        answered,
+    )
+}
+
+/// Finish the registered account even when the fixture's call assertion unwinds.
+fn withdraw(socket: &UdpSocket, contact: SocketAddr, second_dialog: bool) {
+    let deadline = Instant::now() + Duration::from_secs(12);
+    let call_id = format!("grant{DIALOG}@fixture.invalid");
+    let second_id = format!("grant{}@fixture.invalid", DIALOG + 1);
+    let mut wire = [0; 8192];
+    loop {
+        let remaining = deadline
+            .checked_duration_since(Instant::now())
+            .expect("incoming SIP account did not withdraw");
+        socket.set_read_timeout(Some(remaining)).unwrap();
+        let (request, source) = registrar::receive_register(socket, &mut wire).unwrap();
+        assert_eq!(source, contact, "SIP account changed its signaling socket");
+        if request.starts_with("REGISTER ") {
+            assert_eq!(registrar::header(&request, "Expires"), "0");
+            socket
+                .send_to(registrar::response(&request, 200, false).as_bytes(), source)
+                .unwrap();
+            return;
+        }
+        let id = registrar::header(&request, "Call-ID");
+        assert!(id == call_id || (second_dialog && id == second_id));
+        if request.starts_with("BYE ") {
+            socket
+                .send_to(registrar::response(&request, 200, false).as_bytes(), source)
+                .unwrap();
+        } else {
+            assert!(request.starts_with("SIP/2.0 "));
+        }
+    }
+}
+
+pub(in super::super) fn run(scenario: &Scenario<'_>) {
+    let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+    socket
+        .set_read_timeout(Some(Duration::from_secs(12)))
+        .unwrap();
+    let authority = socket.local_addr().unwrap();
+    let (provision, address) = provisioning(scenario);
+    let document = scenario.client.pki.join("managed-phone-incoming.json");
+    fs::write(&document, serde_json::to_vec(&provision).unwrap()).unwrap();
+    fs::set_permissions(&document, fs::Permissions::from_mode(0o600)).unwrap();
+    let client = Client {
+        pki: scenario.client.pki,
+        port: address.port(),
+        proxy: None,
+    };
+    let mut process = managed_asl::start(&document);
+    managed_asl::wait_service(&client, address, &mut process);
+    let port = port(&client);
+    let station = port.trim_end_matches('/').rsplit('/').next().unwrap();
+    put(
+        &client,
+        &format!("{port}interface/"),
+        json!({"audio":{"device_identifier":"3-1"}}),
+    );
+    put(
+        &client,
+        &format!("{port}radio/"),
+        json!({"duplex_mode":"full"}),
+    );
+    // The same synthetic mailbox and PIN used by the in-process incoming success fixture.
+    edit(
+        &client,
+        "POST",
+        &format!("{port}mailboxes/"),
+        json!({"key":"741","configuration":{
+            "first_name":"Test","callsign":"N0TEST",
+            "pin_hash":"$argon2id$v=19$m=19456,t=2,p=1$c2l4dGVlbi1ieXRlLXNhbHQ$JJvcFomwgumB44bmQdOCEbN00saqrIis8c6S0WG6Kzw"
+        }}),
+    );
+    let account = edit(
+        &client,
+        "POST",
+        &format!("{port}protocols/phone-patch/"),
+        json!({"configuration":{
+            "provider":{"protocol":"sip","server":"127.0.0.1","port":authority.port(),"username":"desk"},
+            "credentials":{"password":"fixture-only"},"vad":{"enabled":false}
+        }}),
+    );
+
+    let (enabled, contact) = thread::scope(|scope| {
+        let peer = scope.spawn(|| {
+            let (request, contact) = register(&socket);
+            socket
+                .send_to(
+                    registrar::response(&request, 200, false).as_bytes(),
+                    contact,
+                )
+                .unwrap();
+            contact
+        });
+        let result = client.edit(
+            "PUT",
+            &port,
+            Some(&json!({"configuration":{
+                "name":"Radio","inherit_from":"site","enabled":true
+            }})),
+        );
+        (result, peer.join().unwrap())
+    });
+
+    let case = std::env::var(super::CASE);
+    let barge = case.as_deref() == Ok("standalone-managed-phone-login-barge");
+    let mix_minus = case.as_deref() == Ok("standalone-managed-phone-mix-minus");
+    let checked = catch_unwind(AssertUnwindSafe(|| {
+        assert_eq!(enabled.code, 202, "incoming SIP radio activation");
+        managed_asl::confirmed(
+            &client,
+            enabled.body["desired_revision"].as_str().unwrap(),
+            station,
+        );
+        if barge || mix_minus {
+            // Only one prompt is produced at a time per station. Let the
+            // unrelated dialog finish its login and own real station programme
+            // before the target requests a new greeting on the same account.
+            let mut other = Caller::connect(&socket, contact, DIALOG + 1, true);
+            let (unrelated_ready, _) = with_keepalives(&socket, contact, || {
+                other.audible_greeting();
+                other.digits("741#1234#");
+                other.fresh_station_audio()
+            });
+            assert!(
+                unrelated_ready,
+                "unrelated SIP call must already carry station programme"
+            );
+            if mix_minus {
+                // Settle the first caller's own unmute reply before listening for
+                // a second caller's private login greeting.
+                let (settled, _) = with_keepalives(&socket, contact, || {
+                    other.digits("*99#");
+                    other.fresh_station_audio()
+                });
+                assert!(settled, "first caller must resume station programme");
+            }
+            let mut caller = Caller::connect(&socket, contact, DIALOG, true);
+            if mix_minus {
+                let witness = std::path::PathBuf::from(
+                    std::env::var_os("RPTADV_TEST_PHONE_AUDIO")
+                        .expect("isolated station programme witness"),
+                );
+                let (proved, _) = with_keepalives(&socket, contact, || {
+                    other.two_caller_mix_minus(&mut caller, &witness)
+                });
+                let status = port.replacen("/configuration/", "/status/", 1);
+                let page_one = format!("{status}calls/?offset=0&limit=1");
+                let paged = live_status::wait_for(&client, &page_one, |doc| {
+                    doc["_links"]["next"]["href"].is_string()
+                }) && {
+                    let first = client.get(&page_one);
+                    let next = first.body["_links"]["next"]["href"].as_str();
+                    next.is_some_and(|next| {
+                        let second = client.get(next);
+                        let a = &first.body["_embedded"]["item"][0];
+                        let b = &second.body["_embedded"]["item"][0];
+                        first.code == 200
+                            && second.code == 200
+                            && first.body["_embedded"]["item"]
+                                .as_array()
+                                .is_some_and(|rows| rows.len() == 1)
+                            && second.body["_embedded"]["item"]
+                                .as_array()
+                                .is_some_and(|rows| rows.len() == 1)
+                            && a["attached"] == true
+                            && b["attached"] == true
+                            && a["call_id"].is_string()
+                            && b["call_id"].is_string()
+                            && a["call_id"] != b["call_id"]
+                            && second.body["_links"]["next"].is_null()
+                    })
+                };
+                other.hangup();
+                caller.hangup();
+                return Evidence::MixMinus {
+                    programme: proved,
+                    paged,
+                };
+            }
+            let ((target_audible, unrelated_programme), _) =
+                with_keepalives(&socket, contact, || {
+                    caller.barge_during_greeting(&mut other)
+                });
+            other.hangup();
+            caller.hangup();
+            return Evidence::LoginBarge {
+                target_audible,
+                unrelated_programme,
+            };
+        }
+        let mut caller = Caller::connect(&socket, contact, DIALOG, true);
+        if case.as_deref() == Ok("standalone-managed-phone-prompt-clock") {
+            let ((rtp_ticks, wall_ms), _) =
+                with_keepalives(&socket, contact, || caller.private_prompt_gap());
+            caller.hangup();
+            return Evidence::PromptClock { rtp_ticks, wall_ms };
+        }
+        let witness = std::path::PathBuf::from(
+            std::env::var_os("RPTADV_TEST_PHONE_AUDIO")
+                .expect("isolated station programme witness"),
+        );
+        if case.as_deref() == Ok("standalone-managed-phone-login-timers") {
+            let ((retry_ms, attached), _) = with_keepalives(&socket, contact, || {
+                let retry_ms = caller.wait_before_login();
+                caller.digits("*99#");
+                assert!(fs::read_to_string(&witness).unwrap().is_empty());
+                caller.audio(65, false);
+                let attached = fs::read_to_string(&witness).unwrap() == "500Hz\n";
+                (retry_ms, attached)
+            });
+            caller.hangup();
+            return Evidence::LoginTimers { retry_ms, attached };
+        }
+        let account_status = account.headers["location"].replacen("/configuration/", "/status/", 1);
+        let status = port.replacen("/configuration/", "/status/", 1);
+        let calls = format!("{status}calls/?limit=1");
+        let peers = format!("{status}peers/?limit=1");
+        let ((station_to_phone, phone_to_station, registered, private, attached), options_answered) =
+            with_keepalives(&socket, contact, || {
+                assert!(
+                    caller.receive_private_audio() > 0,
+                    "expected incoming login prompt"
+                );
+                let private = live_status::wait_for(&client, &calls, |doc| {
+                    let call = &doc["_embedded"]["item"][0];
+                    call["attached"] == false
+                        && call["direction"] == "incoming"
+                        && call["call_id"].is_string()
+                }) && client.get(&peers).body["_embedded"]["item"] == json!([]);
+                caller.digits("741#1234#");
+
+                // The independent station tone must arrive while this caller is still muted.
+                let station_to_phone = caller.fresh_station_audio();
+                let initially_muted = live_status::wait_for(&client, &calls, |doc| {
+                    let call = &doc["_embedded"]["item"][0];
+                    call["attached"] == true
+                        && call["phase"] == "attached"
+                        && call["muted"] == true
+                        && call["active"] == false
+                });
+                assert!(
+                    fs::read_to_string(&witness).unwrap().is_empty(),
+                    "caller tone witness was already set"
+                );
+                caller.audio(25, false);
+                let inaudible_while_muted = fs::read_to_string(&witness).unwrap().is_empty();
+                caller.digits("*99#");
+                caller.audio(65, false);
+                let phone_to_station = fs::read_to_string(&witness).unwrap() == "500Hz\n";
+                let registered = live_status::wait_for(&client, &account_status, |doc| {
+                    doc["status"]["registration"]["state"] == "registered"
+                });
+                let attached = initially_muted
+                    && inaudible_while_muted
+                    && live_status::wait_for(&client, &calls, |doc| {
+                        let call = &doc["_embedded"]["item"][0];
+                        call["attached"] == true
+                            && call["direction"] == "incoming"
+                            && call["call_id"].is_string()
+                            && call["muted"] == false
+                    });
+                (
+                    station_to_phone,
+                    phone_to_station,
+                    registered,
+                    private,
+                    attached,
+                )
+            });
+        eprintln!(
+            "INCOMING_SIP_PCM station_to_phone={station_to_phone} phone_to_station={phone_to_station} options_answered={options_answered}"
+        );
+        caller.hangup();
+        Evidence::Programme {
+            station_to_phone,
+            phone_to_station,
+            registered,
+            private,
+            attached,
+        }
+    }));
+
+    process.signal("-TERM");
+    withdraw(&socket, contact, barge || mix_minus);
+    wait_stopped(&mut process);
+    assert!(
+        WorkingFiles::open(&scenario.fixture.0)
+            .unwrap()
+            .try_writer_lease()
+            .is_ok()
+    );
+    match checked.unwrap_or_else(|failure| resume_unwind(failure)) {
+        Evidence::Programme {
+            station_to_phone,
+            phone_to_station,
+            registered,
+            private,
+            attached,
+        } => {
+            eprintln!(
+                "INCOMING_SIP_CLOSED digest_registered=true confirmed=true invite_200=true ack=true station_to_phone={station_to_phone} phone_to_station={phone_to_station} bye_200=true withdrawal_200=true foreground_joined=true writer_released=true"
+            );
+            assert!(
+                station_to_phone && phone_to_station,
+                "attached incoming SIP must exchange both PCM directions"
+            );
+            assert!(
+                registered && private && attached,
+                "HAL must track SIP registration and the private-to-attached call transition"
+            );
+        }
+        Evidence::PromptClock { rtp_ticks, wall_ms } => {
+            let rtp_ms = u128::from(rtp_ticks / 8);
+            eprintln!(
+                "PRIVATE_PROMPT_CLOCK rtp_ms={rtp_ms} wall_ms={wall_ms} bye_200=true withdrawal_200=true foreground_joined=true writer_released=true"
+            );
+            assert!(
+                wall_ms >= 1000,
+                "insufficient measured pause between private prompts"
+            );
+            assert!(
+                rtp_ms.abs_diff(wall_ms) <= 250,
+                "private SIP RTP timestamps lost the elapsed time between prompts"
+            );
+        }
+        Evidence::LoginTimers { retry_ms, attached } => {
+            let mailbox_timer = retry_ms.is_some_and(|ms| (2750..=4500).contains(&ms));
+            eprintln!(
+                "PRIVATE_LOGIN_TIMERS mailbox_timer={mailbox_timer} attached_after_pin_prompt={attached} retry_ms={retry_ms:?} bye_200=true withdrawal_200=true foreground_joined=true writer_released=true"
+            );
+            assert!(
+                mailbox_timer && attached,
+                "login timers must begin after the respective private prompts"
+            );
+        }
+        Evidence::MixMinus {
+            programme: proved,
+            paged,
+        } => {
+            eprintln!(
+                "PRIVATE_CALL_MIX_CLOSED proved={proved} both_byes_200=true withdrawal_200=true foreground_joined=true writer_released=true"
+            );
+            assert!(
+                proved,
+                "private calls must remain isolated until attachment and then receive per-call mix-minus"
+            );
+            assert!(
+                paged,
+                "both actual attached callers must be reachable on separate HAL pages"
+            );
+        }
+        Evidence::LoginBarge {
+            target_audible,
+            unrelated_programme,
+        } => {
+            eprintln!(
+                "PRIVATE_LOGIN_BARGE target_audible={target_audible} unrelated_programme={unrelated_programme} both_byes_200=true withdrawal_200=true foreground_joined=true writer_released=true"
+            );
+            assert!(
+                unrelated_programme,
+                "unrelated SIP station programme must continue"
+            );
+            assert!(
+                !target_audible,
+                "the first mailbox digit must stop its playing prompt"
+            );
+        }
+    }
+}

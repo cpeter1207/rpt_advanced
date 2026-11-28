@@ -75,7 +75,7 @@ impl Preparation {
         ]);
         command.stdin(std::process::Stdio::from(input));
         let child = process::ChildStream::spawn(&self.config, &mut command, None, cancelled)?;
-        process::PcmStream::f32_wave(child, cancelled)
+        Ok(process::PcmStream::f32_wave(child))
     }
     #[cfg(speech_adapter)]
     fn open_speech(
@@ -95,12 +95,11 @@ impl Preparation {
         }
         let model_config = model_config_path(model);
         let bytes = std::fs::read(model_config).map_err(process::io_error)?;
-        let config: serde_json::Value =
-            serde_json::from_slice(&bytes).map_err(|_| MediaError::ProcessFailed)?;
+        let config = rptadv_json::decode_value(&bytes).map_err(|_| MediaError::ProcessFailed)?;
         let sample_rate_hz = config
             .get("audio")
             .and_then(|audio| audio.get("sample_rate"))
-            .and_then(serde_json::Value::as_u64)
+            .and_then(|rate| rate.as_u64())
             .and_then(|rate| u32::try_from(rate).ok())
             .filter(|rate| (8_000..=192_000).contains(rate))
             .ok_or(MediaError::InvalidOutput)?;

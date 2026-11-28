@@ -1,22 +1,28 @@
 use super::*;
 use crate::bindings as ffi;
 use crate::services::echo_tests::support::Fixture as EchoFixture;
-use std::{
-    cell::{Cell, RefCell},
-    ffi::c_void,
-    mem::size_of,
-    ptr,
-};
+use std::{cell::Cell, ffi::c_void, mem::size_of, ptr};
 
 thread_local! {
     static START_RESULT: Cell<i32> = const { Cell::new(0) };
     static STOP_RESULT: Cell<i32> = const { Cell::new(0) };
     static INCOMING_RESULT: Cell<i32> = const { Cell::new(0) };
-    static RELOAD_DOCUMENTS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+    static REENTRANT_UNLOAD: Cell<Option<i32>> = const { Cell::new(None) };
+    static RELOAD_RESULT: Cell<i32> = const { Cell::new(0) };
+    static POLLS: Cell<usize> = const { Cell::new(0) };
+    static UNLOAD_WARNING: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
 }
 
 #[unsafe(no_mangle)]
 static mut ast_config_AST_CONFIG_DIR: *const std::ffi::c_char = ptr::null();
+
+pub(crate) fn record_unload_warning(level: i32, format: &CStr, reason: &CStr) {
+    assert_eq!(level, ffi::__LOG_WARNING as i32);
+    assert_eq!(format, c"rpt_advanced: unload deferred: %s\n");
+    UNLOAD_WARNING.with(|warning| {
+        *warning.borrow_mut() = Some(reason.to_str().unwrap().to_owned());
+    });
+}
 
 pub(crate) fn incoming_result(result: i32) {
     INCOMING_RESULT.set(result);
@@ -55,7 +61,7 @@ unsafe extern "C" fn site_command(
 }
 
 unsafe extern "C" fn start(
-    _: *const ffi::rptadv_host_services_v10,
+    _: *const ffi::rptadv_host_services_v11,
     _: *const ffi::rptadv_control_descriptor_v1,
     _: *const ffi::rptadv_file_descriptor,
     _: *const ffi::rptadv_speech_descriptor,
@@ -65,20 +71,9 @@ unsafe extern "C" fn start(
     START_RESULT.get()
 }
 
-unsafe extern "C" fn reload(configuration: *const std::ffi::c_char, length: usize) -> i32 {
-    let text = unsafe {
-        std::str::from_utf8(std::slice::from_raw_parts(
-            configuration.cast::<u8>(),
-            length,
-        ))
-    }
-    .unwrap();
-    RELOAD_DOCUMENTS.with_borrow_mut(|documents| documents.push(text.to_owned()));
-    match text {
-        "pending-candidate" => 1,
-        "rejected-candidate" => -1,
-        _ => 0,
-    }
+unsafe extern "C" fn reload_working() -> i32 {
+    REENTRANT_UNLOAD.set(Some(super::unload()));
+    1
 }
 
 unsafe extern "C" fn stop() -> i32 {
@@ -189,72 +184,33 @@ unsafe extern "C" fn digit(
 
 static DESCRIPTOR: ffi::rptadv_product_descriptor_v1 = ffi::rptadv_product_descriptor_v1 {
     struct_size: size_of::<ffi::rptadv_product_descriptor_v1>() as u32,
-    abi_version: 7,
-    capability: *b"rptadv.prod7\0\0\0\0",
-    start: Some(start),
-    reload: Some(reload),
+    abi_version: 8,
+    capability: *b"rptadv.prod8\0\0\0\0",
+    reload_working: Some(reload_working),
     stop: Some(stop),
     authorize_incoming: Some(authorize_incoming),
     incoming: Some(incoming),
     link_command: Some(link_command),
     link_status: Some(link_status),
     digit: Some(digit),
-    inspect_configuration: Some(inspect_configuration),
-    inspect_secrets: Some(inspect_secrets),
     site_command: Some(site_command),
-    radio_control: None,
     reload_poll: Some(reload_ready),
 };
 unsafe extern "C" fn reload_ready() -> i32 {
-    0
+    POLLS.set(POLLS.get() + 1);
+    RELOAD_RESULT.get()
 }
 
-unsafe extern "C" fn inspect_configuration(
-    text: *const std::ffi::c_char,
-    length: usize,
-    sink: ffi::rptadv_configuration_sink,
-    context: *mut std::ffi::c_void,
-    _: ffi::rptadv_text_sink_v1,
-    _: *mut std::ffi::c_void,
-) -> i32 {
-    let text = unsafe { std::slice::from_raw_parts(text.cast::<u8>(), length) };
-    if let Some(number) = std::str::from_utf8(text)
-        .unwrap()
-        .strip_prefix("fixture-echo:")
-    {
-        use rptadv_peer_support::echolink::abi as echo;
-        let number = number.parse::<u32>().unwrap();
-        let config = echo::AccountConfig {
-            enabled: u32::from(number != 0),
-            node_number: number,
-            local_node: echo::ByteSpan {
-                data: b"524950".as_ptr(),
-                length: 6,
-            },
-            ..Default::default()
-        };
-        let mut node: ffi::rptadv_node_host_configuration = unsafe { std::mem::zeroed() };
-        node.struct_size = size_of::<ffi::rptadv_node_host_configuration>() as u32;
-        node.echolink = ptr::from_ref(&config).cast();
-        return unsafe { sink.unwrap()(context, &node) };
-    }
-    i32::from(text == b"inspection-failure")
-}
-
-unsafe extern "C" fn inspect_secrets(
-    _: *const std::ffi::c_char,
-    _: usize,
-    _: ffi::rptadv_secret_sink,
-    _: *mut std::ffi::c_void,
-    _: ffi::rptadv_text_sink_v1,
-    _: *mut std::ffi::c_void,
-) -> i32 {
-    0
-}
-
+static MANAGEMENT: ffi::rptadv_product_management_v1 = ffi::rptadv_product_management_v1 {
+    struct_size: size_of::<ffi::rptadv_product_management_v1>() as u32,
+    abi_version: 1,
+    capability: *b"rptadv.mgmt1\0\0\0\0",
+    start: Some(start),
+};
 struct Clear;
 impl Drop for Clear {
     fn drop(&mut self) {
+        let _selected = STATE.lock().unwrap_or_else(|e| e.into_inner()).take();
         *TEST_PRODUCT
             .lock()
             .unwrap_or_else(|error| error.into_inner()) = None;
@@ -268,6 +224,10 @@ impl Drop for Clear {
 }
 
 pub(crate) fn with_running(operation: impl FnOnce()) {
+    with_running_asl(|_| operation());
+}
+
+fn with_running_asl(operation: impl FnOnce(&ffi::rptadv_asl_admission_v1)) {
     let _serial = crate::fixture::LIFECYCLE
         .lock()
         .unwrap_or_else(|error| error.into_inner());
@@ -275,30 +235,89 @@ pub(crate) fn with_running(operation: impl FnOnce()) {
     *TEST_PRODUCT
         .lock()
         .unwrap_or_else(|error| error.into_inner()) = Some(product);
+    let mut services = crate::services::HostServicesOwner::new();
+    services.install_asl_fixture();
+    let host = services.descriptor();
+    let group = unsafe { &*host.asl_provider };
+    unsafe extern "C" fn authorize(
+        id: *const ffi::rptadv_asl_identity_v1,
+        remote: ffi::rptadv_peer_bytes_v1,
+        source: ffi::rptadv_peer_bytes_v1,
+        out: *mut *mut c_void,
+    ) -> i32 {
+        if unsafe { (*id).wire } != 1000
+            || unsafe { std::slice::from_raw_parts(remote.data, remote.length) } != b"2000"
+            || unsafe { std::slice::from_raw_parts(source.data, source.length) } != b"192.0.2.1"
+        {
+            return -1;
+        }
+        unsafe { out.write(ptr::dangling_mut::<u8>().cast()) };
+        0
+    }
+    unsafe extern "C" fn complete(_: *mut c_void, peer: *mut c_void) -> i32 {
+        if peer.is_null() {
+            0
+        } else {
+            unsafe { incoming(ptr::null(), peer) }
+        }
+    }
+    let admission = ffi::rptadv_asl_admission_v1 {
+        struct_size: size_of::<ffi::rptadv_asl_admission_v1>() as u32,
+        abi_version: 1,
+        authorize: Some(authorize),
+        complete: Some(complete),
+    };
+    let mut row: ffi::rptadv_asl_account_v2 = unsafe { std::mem::zeroed() };
+    row.struct_size = size_of::<ffi::rptadv_asl_account_v2>() as u32;
+    row.abi_version = 2;
+    row.id.station_uuid = [1; 16];
+    row.id.account_uuid = [2; 16];
+    row.id.generation = 1;
+    row.id.wire = 1000;
+    row.id.udp_port = 4569;
+    let mut token = ptr::null_mut();
+    assert_eq!(
+        unsafe { group.prepare.unwrap()(host.context, 0, 1, &row, 1, &admission, &mut token) },
+        0
+    );
+    for phase in [1, 2, 4] {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let code = unsafe { group.step.unwrap()(host.context, token, phase) };
+            if code != 1 {
+                assert_eq!(code, 0);
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::yield_now();
+        }
+    }
+    *STATE.lock().unwrap() = Some(State {
+        product,
+        services,
+        registration: None,
+    });
     let _clear = Clear;
-    operation();
+    operation(&admission);
 }
 
 #[test]
 fn product_descriptor_rejects_every_incompatible_prefix_and_missing_operation() {
     assert!(unsafe { Product::open(ptr::null()) }.is_none());
-    for field in 0..15 {
+    for field in 0..12 {
         let mut descriptor = DESCRIPTOR;
         match field {
             0 => descriptor.struct_size -= 1,
             1 => descriptor.abi_version += 1,
             2 => descriptor.capability[0] = b'x',
-            3 => descriptor.start = None,
-            4 => descriptor.reload = None,
-            5 => descriptor.stop = None,
-            6 => descriptor.authorize_incoming = None,
-            7 => descriptor.incoming = None,
-            8 => descriptor.link_command = None,
-            9 => descriptor.link_status = None,
-            10 => descriptor.digit = None,
-            11 => descriptor.inspect_configuration = None,
-            12 => descriptor.inspect_secrets = None,
-            13 => descriptor.site_command = None,
+            3 => descriptor.reload_working = None,
+            4 => descriptor.stop = None,
+            5 => descriptor.authorize_incoming = None,
+            6 => descriptor.incoming = None,
+            7 => descriptor.link_command = None,
+            8 => descriptor.link_status = None,
+            9 => descriptor.digit = None,
+            10 => descriptor.site_command = None,
             _ => descriptor.reload_poll = None,
         }
         assert!(
@@ -311,26 +330,83 @@ fn product_descriptor_rejects_every_incompatible_prefix_and_missing_operation() 
 #[test]
 fn product_reload_waits_for_pending_completion() {
     let product = unsafe { Product::open(ptr::from_ref(&DESCRIPTOR)) }.unwrap();
-    assert!(product.reload("pending-candidate"));
+    let _serial = crate::fixture::LIFECYCLE.lock().unwrap();
+    let _retained = TRANSITION.lock().unwrap();
+    POLLS.set(0);
+    RELOAD_RESULT.set(0);
+    assert!(product.reload_working());
+    assert_eq!(POLLS.get(), 1);
+}
+
+#[test]
+fn adapter_declines_an_ini_only_configuration_before_registration() {
+    let serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let root = std::env::temp_dir().join(format!("rpt-asterisk-ini-only-{}", std::process::id()));
+    std::fs::create_dir(&root).unwrap();
+    let ini = root.join("rpt_advanced.conf");
+    std::fs::write(&ini, "[1000]\nnode_enabled=no\n").unwrap();
+    let directory = std::ffi::CString::new(root.to_str().unwrap()).unwrap();
+    START_RESULT.set(0);
+    STOP_RESULT.set(0);
+    crate::module::tests::fail_registration(0);
+
+    // SAFETY: the fixture serializes the adapter and keeps both config storage
+    // and the product descriptor alive through the public unload callback.
+    unsafe { ast_config_AST_CONFIG_DIR = directory.as_ptr() };
+    let adapter = unsafe { &*rptadv_asterisk_descriptor_v2() };
+    let status = unsafe {
+        adapter.load.unwrap()(
+            ptr::dangling_mut(),
+            &DESCRIPTOR,
+            &MANAGEMENT,
+            ptr::null(),
+            ptr::null(),
+            ptr::null(),
+        )
+    };
+    let registered = STATE
+        .lock()
+        .unwrap()
+        .as_ref()
+        .is_some_and(|state| state.registration.is_some());
+    let unloaded = adapter.unload.unwrap()();
+    let empty = STATE.lock().unwrap().is_none();
+    unsafe { ast_config_AST_CONFIG_DIR = ptr::null() };
+    std::fs::remove_file(ini).unwrap();
+    std::fs::remove_dir(root).unwrap();
+    drop(serial);
+
+    eprintln!(
+        "INI_ONLY_CLOSED load={status} registered={registered} unload={unloaded} empty={empty}"
+    );
     assert_eq!(
-        RELOAD_DOCUMENTS.with_borrow(|documents| documents.last().cloned()),
-        Some("pending-candidate".to_owned())
+        (unloaded, empty),
+        (0, true),
+        "adapter must release the fixture"
+    );
+    assert_eq!(
+        (status, registered),
+        (1, false),
+        "an INI-only directory must not start or register the Asterisk adapter"
     );
 }
 
 #[test]
 fn lifecycle_retains_live_product_on_failed_stop_and_rolls_back_registration() {
     let _serial = crate::fixture::LIFECYCLE.lock().unwrap();
-    RELOAD_DOCUMENTS.with_borrow_mut(Vec::clear);
+    RELOAD_RESULT.set(0);
     let root = std::env::temp_dir().join(format!("rpt-adapter-lifecycle-{}", std::process::id()));
     std::fs::create_dir_all(&root).unwrap();
     let directory = std::ffi::CString::new(root.to_str().unwrap()).unwrap();
-    let descriptor = rptadv_asterisk_descriptor_v1();
-    assert_eq!(unsafe { (*descriptor).abi_version }, 1);
+    let descriptor = rptadv_asterisk_descriptor_v2();
+    assert_eq!(unsafe { (*descriptor).abi_version }, 2);
     let load_selected = |product| unsafe {
         load(
             ptr::dangling_mut(),
             product,
+            &MANAGEMENT,
             ptr::null(),
             ptr::null(),
             ptr::null(),
@@ -341,13 +417,10 @@ fn lifecycle_retains_live_product_on_failed_stop_and_rolls_back_registration() {
     assert_eq!(load_selected(&DESCRIPTOR), 1);
     assert_eq!(super::reload(), -1);
     unsafe { ast_config_AST_CONFIG_DIR = c"\xff".as_ptr() };
-    assert!(configuration().is_none());
+    assert!(configuration_path("rpt_advanced.service.json").is_none());
     unsafe { ast_config_AST_CONFIG_DIR = directory.as_ptr() };
-    assert!(configuration().is_none());
-    std::fs::write(root.join("rpt_advanced.conf"), "inspection-failure").unwrap();
     assert_eq!(load_selected(&DESCRIPTOR), 1);
-    assert!(STATE.lock().unwrap().is_none());
-    std::fs::write(root.join("rpt_advanced.conf"), "[1000]\nnode_enabled=no\n").unwrap();
+    std::fs::write(root.join("rpt_advanced.service.json"), "{}").unwrap();
     START_RESULT.set(-1);
     assert_eq!(load_selected(&DESCRIPTOR), 1);
     START_RESULT.set(0);
@@ -371,96 +444,93 @@ fn lifecycle_retains_live_product_on_failed_stop_and_rolls_back_registration() {
     crate::module::tests::fail_registration(0);
     assert_eq!(load_selected(&DESCRIPTOR), 0);
     assert_eq!(super::reload(), 0);
-    std::fs::rename(root.join("rpt_advanced.conf"), root.join("saved.conf")).unwrap();
+    RELOAD_RESULT.set(-1);
     assert_eq!(super::reload(), -1);
-    assert!(STATE.lock().unwrap().is_some());
-    std::fs::rename(root.join("saved.conf"), root.join("rpt_advanced.conf")).unwrap();
-    std::fs::write(root.join("rpt_advanced.conf"), "accepted-candidate").unwrap();
+    assert!(
+        STATE
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .registration
+            .is_some()
+    );
+    RELOAD_RESULT.set(0);
     assert_eq!(super::reload(), 0);
-    std::fs::write(root.join("rpt_advanced.conf"), "rejected-candidate").unwrap();
-    assert_eq!(super::reload(), -1);
-    RELOAD_DOCUMENTS.with_borrow(|documents| {
-        assert_eq!(
-            documents,
-            &[
-                "[1000]\nnode_enabled=no\n",
-                "accepted-candidate",
-                "rejected-candidate",
-                "accepted-candidate"
-            ]
-        )
-    });
     assert_eq!(unload(), 0);
     assert_eq!(super::reload(), -1);
     unsafe { ast_config_AST_CONFIG_DIR = ptr::null() };
-    std::fs::remove_file(root.join("rpt_advanced.conf")).unwrap();
+    std::fs::remove_file(root.join("rpt_advanced.service.json")).unwrap();
     std::fs::remove_dir(root).unwrap();
 }
 
 #[test]
 fn real_echo_account_failures_preserve_the_running_lifecycle_owner() {
-    use std::os::unix::fs::{PermissionsExt, symlink};
+    use std::os::unix::fs::symlink;
     const CHILD: &str = "RPTADV_TEST_ASTERISK_ECHO_FIXTURE";
     if let Some(mode) = std::env::var_os(CHILD) {
-        let directory =
-            std::path::PathBuf::from(std::env::var_os("RPTADV_TEST_ASTERISK_ECHO_DIR").unwrap());
-        let path = directory.join("rpt_advanced.conf");
-        let secrets = directory.join("echolink-secrets.conf");
-        std::fs::write(&secrets, "[524950]\ndirectory_password=fixture-value\n").unwrap();
-        std::fs::set_permissions(&secrets, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let directory = PathBuf::from(std::env::var_os("RPTADV_TEST_ASTERISK_ECHO_DIR").unwrap());
+        std::fs::write(directory.join("rpt_advanced.service.json"), "{}").unwrap();
         let config_directory = std::ffi::CString::new(directory.to_str().unwrap()).unwrap();
         unsafe { ast_config_AST_CONFIG_DIR = config_directory.as_ptr() };
         let control = rptadv_control_standalone_adapter::rptadv_control_standalone_descriptor_v1();
-        let load_selected = || unsafe {
-            load(
-                ptr::dangling_mut(),
-                &DESCRIPTOR,
-                control.cast(),
-                ptr::null(),
-                ptr::null(),
-            )
-        };
-        if mode == "rollback-stop" {
-            std::fs::write(&path, "fixture-echo:99").unwrap();
-            crate::module::tests::fail_registration(1);
-            assert_eq!(
-                load_selected(),
-                0,
-                "failed stop must retain loaded callback code"
-            );
-            assert!(STATE.lock().unwrap().is_some());
-            assert_eq!(unload(), -1);
-            // This intentionally failed owner remains retained until this
-            // isolated child exits; it cannot be safely abandoned/unloaded.
-            return;
-        }
-        std::fs::write(&path, "fixture-echo:42").unwrap();
-        assert_eq!(load_selected(), 1);
-        assert!(STATE.lock().unwrap().is_none());
-        std::fs::write(&path, "fixture-echo:7").unwrap();
-        assert_eq!(load_selected(), 0);
-        std::fs::write(&path, "fixture-echo:0").unwrap();
-        assert_eq!(super::reload(), 0);
+        let adapter = unsafe { &*rptadv_asterisk_descriptor_v2() };
+        assert_eq!(
+            unsafe {
+                adapter.load.unwrap()(
+                    ptr::dangling_mut(),
+                    &DESCRIPTOR,
+                    &MANAGEMENT,
+                    control.cast(),
+                    ptr::null(),
+                    ptr::null(),
+                )
+            },
+            0
+        );
+        let host = *STATE
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .services
+            .descriptor();
+        crate::services::echo_tests::accounts::check(
+            &host,
+            if mode == "rollback-stop" { 99 } else { 7 },
+        );
         let library =
             unsafe { libloading::Library::new(directory.join("librptadv_echolink.so.1")) }.unwrap();
-        let fail =
-            unsafe { library.get::<unsafe extern "C" fn(u32)>(b"fixture_disabled_stop_failure\0") }
+        let fault =
+            unsafe { library.get::<unsafe extern "C" fn(usize)>(b"fixture_record_fault\0") }
                 .unwrap();
-        unsafe { fail(1) };
-        std::fs::write(&path, "fixture-empty").unwrap();
-        assert_eq!(
-            super::reload(),
-            0,
-            "retirement failure does not undo the committed reload"
-        );
-        assert_eq!(unload(), -1);
-        unsafe { fail(0) };
-        assert_eq!(unload(), 0);
+        unsafe { fault(80) };
+        let refused =
+            unsafe { library.get::<unsafe extern "C" fn() -> usize>(b"fixture_stop_rejections\0") }
+                .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while unsafe { refused() } == 0 {
+            assert_ne!(unload(), 0);
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::yield_now();
+        }
+        assert_ne!(unload(), 0);
+        assert!(STATE.lock().unwrap().is_some());
+        if mode == "rollback-stop" {
+            return;
+        }
+        unsafe { fault(0) };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while unload() != 0 {
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::yield_now();
+        }
+        assert!(STATE.lock().unwrap().is_none());
         unsafe { ast_config_AST_CONFIG_DIR = ptr::null() };
         return;
     }
     for mode in ["retirement", "rollback-stop"] {
-        let fixture = EchoFixture::new("network");
+        let fixture = EchoFixture::new("managed");
         let directory = fixture.0.parent().unwrap();
         symlink(&fixture.0, directory.join("librptadv_echolink.so.1")).unwrap();
         let mut search = vec![directory.to_owned()];
@@ -486,4 +556,339 @@ fn real_echo_account_failures_preserve_the_running_lifecycle_owner() {
             String::from_utf8_lossy(&result.stderr)
         );
     }
+}
+
+#[test]
+fn managed_entry_rejects_null_and_short_groups_before_start() {
+    let module = std::ptr::NonNull::<u8>::dangling().as_ptr().cast();
+    #[repr(C, align(8))]
+    struct Prefix(u32);
+    let prefix = Prefix(4);
+    for table in [std::ptr::null(), std::ptr::from_ref(&prefix).cast()] {
+        // SAFETY: the checked entry requires a readable length word only when non-null.
+        // The missing product and control groups cannot be used by this failed admission.
+        let status = unsafe {
+            super::load(
+                module,
+                std::ptr::null(),
+                table,
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+            )
+        };
+        assert_ne!(status, 0);
+    }
+}
+
+#[test]
+fn managed_reload_holds_module_until_receipt_and_uncertain_boot_drains() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let root = std::env::temp_dir().join(format!("rpt-managed-adapter-{}", std::process::id()));
+    std::fs::create_dir(&root).unwrap();
+    let path = root.join("rpt_advanced.service.json");
+    std::fs::write(&path, b"{}").unwrap();
+    let directory = std::ffi::CString::new(root.to_str().unwrap()).unwrap();
+    // SAFETY: the serialized fixture retains this CString through final unload.
+    unsafe { ast_config_AST_CONFIG_DIR = directory.as_ptr() };
+    let load = || {
+        // SAFETY: both complete fixture tables and opaque module outlive all calls.
+        // The fixture product ignores providers and returns its selected startup disposition.
+        unsafe {
+            super::load(
+                ptr::dangling_mut(),
+                &DESCRIPTOR,
+                &MANAGEMENT,
+                ptr::null(),
+                ptr::null(),
+                ptr::null(),
+            )
+        }
+    };
+    crate::module::tests::fail_registration(0);
+    START_RESULT.set(-1);
+    assert_eq!(load(), 1);
+    assert!(STATE.lock().unwrap().is_none());
+    START_RESULT.set(-2);
+    STOP_RESULT.set(-1);
+    assert_eq!(load(), 0);
+    assert!(
+        STATE
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .registration
+            .is_none()
+    );
+    assert_eq!(load(), 1);
+    assert_eq!(super::unload(), -1);
+    assert_eq!(
+        UNLOAD_WARNING.with(|warning| warning.take()).as_deref(),
+        Some("controller did not quiesce before the unload deadline"),
+    );
+    STOP_RESULT.set(0);
+    assert_eq!(super::unload(), 0);
+    START_RESULT.set(0);
+    assert_eq!(load(), 0);
+    {
+        let state = STATE.lock().unwrap();
+        let host = state.as_ref().unwrap().services.descriptor();
+        assert!(host.struct_size as usize >= size_of::<ffi::rptadv_host_services_v11>());
+        // SAFETY: the retained frontend owns both the checked table and its context.
+        let group = unsafe { host.phone_provider.as_ref() }
+            .expect("managed Asterisk must offer its private-call owner before account selection");
+        assert_eq!(group.abi_version, 2);
+        assert!(group.struct_size as usize >= size_of::<ffi::rptadv_phone_provider_v2>());
+        let mut clock = ffi::rptadv_media_clock_reader_v1 {
+            struct_size: size_of::<ffi::rptadv_media_clock_reader_v1>() as u32,
+            abi_version: 1,
+            clock_kind: 0,
+            reserved: 0,
+            read_ns: None,
+        };
+        // SAFETY: the group stays retained and the caller provides the full output record.
+        assert_eq!(
+            unsafe { group.media_clock_reader.unwrap()(host.context, &mut clock) },
+            0
+        );
+        assert_eq!(clock.clock_kind, 1);
+        let read = clock.read_ns.expect("native monotonic clock");
+        // SAFETY: both reads complete while the owning frontend code is still loaded.
+        let (first, second) = unsafe { (read(), read()) };
+        assert!(first != 0 && second >= first);
+    }
+    assert_eq!(super::reload(), 0);
+    assert_eq!(REENTRANT_UNLOAD.get(), Some(-1));
+    assert_eq!(
+        UNLOAD_WARNING.with(|warning| warning.take()).as_deref(),
+        Some("another lifecycle operation is in progress"),
+    );
+    assert!(
+        STATE
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .registration
+            .is_some()
+    );
+    assert_eq!(super::unload(), 0);
+    // SAFETY: Asterisk no longer holds the test configuration directory.
+    unsafe { ast_config_AST_CONFIG_DIR = ptr::null() };
+    std::fs::remove_file(path).unwrap();
+    std::fs::remove_dir(root).unwrap();
+}
+
+#[path = "../../private-phone-host/tests/support/frontend_account.rs"]
+mod test_phone_group;
+#[test]
+fn frontend_phone_group_authenticates_and_withdraws_the_actual_sip_socket() {
+    let mut host = crate::services::HostServicesOwner::new();
+    host.install_private(&DESCRIPTOR);
+    let table = host.descriptor();
+    unsafe { test_phone_group::register(table.context, table.phone_provider.cast()) };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(4);
+    while !host.private_stopped() {
+        assert!(std::time::Instant::now() < deadline);
+        std::thread::yield_now();
+    }
+}
+
+#[test]
+fn managed_asterisk_prepares_and_cancels_an_asl_account_before_opening_a_listener() {
+    thread_local! { static STAGE: Cell<(bool,bool)> = const {Cell::new((false,false))}; }
+    unsafe extern "C" fn authorize(
+        _: *const ffi::rptadv_asl_identity_v1,
+        _: ffi::rptadv_peer_bytes_v1,
+        _: ffi::rptadv_peer_bytes_v1,
+        _: *mut *mut c_void,
+    ) -> i32 {
+        -1
+    }
+    unsafe extern "C" fn complete(_: *mut c_void, _: *mut c_void) -> i32 {
+        1
+    }
+    unsafe extern "C" fn start(
+        host: *const ffi::rptadv_host_services_v11,
+        _: *const ffi::rptadv_control_descriptor_v1,
+        _: *const ffi::rptadv_file_descriptor,
+        _: *const ffi::rptadv_speech_descriptor,
+        _: *const std::ffi::c_char,
+        _: usize,
+    ) -> i32 {
+        let host = unsafe { &*host };
+        if let Some(provider) = unsafe { host.asl_provider.as_ref() } {
+            let mut row: ffi::rptadv_asl_account_v2 = unsafe { std::mem::zeroed() };
+            row.struct_size = size_of::<ffi::rptadv_asl_account_v2>() as u32;
+            row.abi_version = 2;
+            row.id.station_uuid = [1; 16];
+            row.id.account_uuid = [2; 16];
+            row.id.generation = 1;
+            row.id.wire = 1000;
+            row.id.udp_port = 4570;
+            row.jitter_min_ms = 20;
+            row.jitter_initial_ms = 40;
+            row.jitter_max_ms = 100;
+            let admission = ffi::rptadv_asl_admission_v1 {
+                struct_size: size_of::<ffi::rptadv_asl_admission_v1>() as u32,
+                abi_version: 1,
+                authorize: Some(authorize),
+                complete: Some(complete),
+            };
+            let mut token = ptr::null_mut();
+            let prepared = unsafe {
+                provider.prepare.unwrap()(host.context, 0, 1, &row, 1, &admission, &mut token)
+            } == 0
+                && !token.is_null();
+            let mut cancelled = false;
+            if prepared {
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                loop {
+                    let result = unsafe { provider.step.unwrap()(host.context, token, 4) };
+                    if result != 1 {
+                        cancelled = result == 0;
+                        break;
+                    }
+                    if std::time::Instant::now() >= deadline {
+                        break;
+                    }
+                    std::thread::yield_now();
+                }
+            }
+            STAGE.set((prepared, cancelled));
+        }
+        0
+    }
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let root =
+        std::env::temp_dir().join(format!("rpt-asterisk-asl-dormant-{}", std::process::id()));
+    std::fs::create_dir(&root).unwrap();
+    let path = root.join("rpt_advanced.service.json");
+    std::fs::write(&path, b"{}").unwrap();
+    let directory = std::ffi::CString::new(root.to_str().unwrap()).unwrap();
+    unsafe { ast_config_AST_CONFIG_DIR = directory.as_ptr() };
+    crate::module::tests::fail_registration(0);
+    STOP_RESULT.set(0);
+    let management = ffi::rptadv_product_management_v1 {
+        struct_size: size_of::<ffi::rptadv_product_management_v1>() as u32,
+        abi_version: 1,
+        capability: *b"rptadv.mgmt1\0\0\0\0",
+        start: Some(start),
+    };
+    let loaded = unsafe {
+        super::load(
+            ptr::dangling_mut(),
+            &DESCRIPTOR,
+            &management,
+            ptr::null(),
+            ptr::null(),
+            ptr::null(),
+        )
+    };
+    let stopped = super::unload();
+    let empty = STATE.lock().unwrap().is_none();
+    unsafe { ast_config_AST_CONFIG_DIR = ptr::null() };
+    std::fs::remove_file(path).unwrap();
+    std::fs::remove_dir(root).unwrap();
+    assert_eq!((loaded, stopped, empty), (0, 0, true));
+    let (prepared, cancelled) = STAGE.get();
+    eprintln!("ASL_PBX_DORMANT prepared={prepared} cancelled={cancelled} unloaded={empty}");
+    assert_eq!(
+        (prepared, cancelled),
+        (true, true),
+        "managed Asterisk must own the dormant ASL account transaction through cancellation"
+    );
+}
+
+#[test]
+fn one_module_unload_drains_the_active_asl_withdrawal() {
+    thread_local! {
+        static SAW_PENDING: Cell<bool> = const { Cell::new(false) };
+        static WITHDRAWAL: Cell<(*mut c_void, usize)> = const { Cell::new((ptr::null_mut(), 0)) };
+    }
+    // The fixture Product's stop callback consumes the actual ASL owner's phase receipts.
+    unsafe extern "C" fn stop_withdrawing() -> i32 {
+        let Ok(selected) = STATE.try_lock() else {
+            return -1;
+        };
+        let Some(state) = selected.as_ref() else {
+            return -1;
+        };
+        let host = state.services.descriptor();
+        // SAFETY: the installed owner retains this selection until phase 4 completes.
+        let group = unsafe { &*host.asl_provider };
+        loop {
+            let (token, index) = WITHDRAWAL.get();
+            let Some(&phase) = [1, 2, 4].get(index) else {
+                return 0;
+            };
+            let receipt = unsafe { group.step.unwrap()(host.context, token, phase) };
+            if receipt != 0 {
+                if receipt == 1 {
+                    SAW_PENDING.set(true);
+                }
+                return -1;
+            }
+            WITHDRAWAL.set((if phase == 4 { ptr::null_mut() } else { token }, index + 1));
+        }
+    }
+    static WITHDRAWING_PRODUCT: ffi::rptadv_product_descriptor_v1 =
+        ffi::rptadv_product_descriptor_v1 {
+            stop: Some(stop_withdrawing),
+            ..DESCRIPTOR
+        };
+    with_running_asl(|admission| {
+        {
+            let mut selected = STATE.lock().unwrap();
+            let state = selected.as_mut().unwrap();
+            assert!(state.services.asl_incoming("1000").is_some());
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while !state.services.close_asl_ingress() {
+                assert!(std::time::Instant::now() < deadline);
+                std::thread::yield_now();
+            }
+            let host = state.services.descriptor();
+            let group = unsafe { &*host.asl_provider };
+            let mut token = ptr::null_mut();
+            // SAFETY: the actual published basis is 1. Empty rows withdraw it; the
+            // fixture's static callbacks and host remain live through final release.
+            let code = unsafe {
+                group.prepare.unwrap()(host.context, 1, 2, ptr::null(), 0, admission, &mut token)
+            };
+            assert_eq!(code, 0);
+            assert!(!token.is_null());
+            SAW_PENDING.set(false);
+            WITHDRAWAL.set((token, 0));
+            state.product = unsafe { Product::open(&WITHDRAWING_PRODUCT) }.unwrap();
+        }
+
+        let first = super::unload();
+        let saw_pending_in_first = SAW_PENDING.get();
+        let retained = STATE.lock().unwrap().is_some();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while STATE.lock().unwrap().is_some() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "ASL withdrawal failed to drain"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(2));
+            let _ = super::unload();
+        }
+        assert!(
+            saw_pending_in_first,
+            "Product stop saw the pending ASL phase"
+        );
+        assert_eq!(WITHDRAWAL.get(), (ptr::null_mut(), 3));
+        eprintln!("ASL_PBX_UNLOAD first={first} retained={retained} withdrew=true empty=true");
+        assert_eq!(
+            (first, retained),
+            (0, false),
+            "one ordinary module unload must drain the active ASL withdrawal"
+        );
+    });
 }

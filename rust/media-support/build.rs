@@ -8,5 +8,5 @@ fn main() {
     println!("cargo:rustc-check-cfg=cfg(file_adapter)");
     println!("cargo:rustc-check-cfg=cfg(speech_adapter)");
     println!("cargo:rustc-cfg={capability}_adapter");
-    println!("cargo:rustc-cdylib-link-arg=-Wl,-soname,librptadv_{capability}_adapter.so.1");
+    println!("cargo:rustc-cdylib-link-arg=-Wl,-soname,librptadv_{capability}_adapter.so.2");
 }

@@ -67,16 +67,7 @@ impl Drop for Resolver {
 }
 
 unsafe fn resolver<'a>(context: *mut c_void) -> Option<&'a Resolver> {
-    // Borrow only this immutable field: radio staging in other host callbacks is independent.
-    if context.is_null() {
-        return None;
-    }
-    unsafe {
-        &*std::ptr::addr_of!(
-            (*context.cast::<crate::host_services::StandaloneHostContext>()).resolver
-        )
-    }
-    .as_ref()
+    unsafe { crate::host_services::StandaloneHostContext::resolver_from_context(context) }
 }
 
 fn file_record(path: &str, remote: &str) -> Option<String> {
@@ -339,12 +330,7 @@ mod tests {
         let mut resolver = *providers.resolver_descriptor().unwrap();
         resolver.resolve_addresses = Some(fake_addresses);
         resolver.resolve_srv = Some(selected_srv);
-        let owner = crate::host_services::HostServicesOwner::new(
-            Vec::new(),
-            None,
-            crate::secrets::SecretsFile::parse("").unwrap(),
-        )
-        .unwrap();
+        let owner = crate::host_services::HostServicesOwner::new(None).unwrap();
         let host = owner.descriptor();
         unsafe {
             (*host
@@ -437,12 +423,7 @@ mod tests {
     #[test]
     fn callbacks_forward_through_the_packaged_resolver() {
         let providers = Box::leak(Box::new(crate::providers::ProviderSet::load().unwrap()));
-        let owner = crate::host_services::HostServicesOwner::new(
-            Vec::new(),
-            Some(providers),
-            crate::secrets::SecretsFile::parse("").unwrap(),
-        )
-        .unwrap();
+        let owner = crate::host_services::HostServicesOwner::new(Some(providers)).unwrap();
         let host = owner.descriptor();
         let mut results = Vec::<String>::new();
         let context = ptr::from_mut(&mut results).cast();

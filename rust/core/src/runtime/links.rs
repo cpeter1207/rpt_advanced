@@ -33,6 +33,11 @@ pub struct RetryWork {
     work: GenerationWork,
 }
 impl RetryWork {
+    /// The original caller of an unfinished initial dial, absent for ordinary recovery.
+    pub fn phone_reply(&self) -> Option<&PeerReply> {
+        pending_phone_reply(self.pending_source.as_ref())
+    }
+
     /// Destination for external directory lookup and dialing.
     pub fn remote(&self) -> &str {
         self.attempt.name()
@@ -51,6 +56,19 @@ impl RetryWork {
     }
 }
 impl ConnectAttempt {
+    /// A directly issued receiver command retains a local result through the initial dial.
+    pub fn local_receiver(&self) -> bool {
+        self.pending_source
+            .as_ref()
+            .and_then(|source| source.action_permit.as_ref())
+            .is_some_and(|permit| permit.receiver && permit.deadline.is_none())
+    }
+
+    /// The private caller entitled to the completed dial result.
+    pub fn phone_reply(&self) -> Option<&PeerReply> {
+        pending_phone_reply(self.pending_source.as_ref())
+    }
+
     /// Exact destination requested by current policy.
     pub fn remote(&self) -> &str {
         &self.remote
@@ -73,21 +91,69 @@ impl ConnectAttempt {
     }
 }
 
+fn pending_phone_reply(source: Option<&DigitOperation>) -> Option<&PeerReply> {
+    source
+        .and_then(|source| source.reply.as_ref())
+        .filter(|reply| reply.phone_source().is_some())
+}
+
 fn pending_source_current(source: Option<&DigitOperation>, now_ms: Option<u64>) -> bool {
     source.is_none_or(|source| {
-        source.reply.as_ref().is_none_or(|reply| !reply.ended())
+        source
+            .action_permit
+            .as_ref()
+            .is_none_or(|p| p.current(now_ms))
+            && source.reply.as_ref().is_none_or(|reply| !reply.ended())
             && source.macro_permit.as_ref().is_none_or(|permit| {
                 now_ms.map_or_else(|| permit.active(), |now| permit.current_at(now))
             })
     })
 }
 
+/// Effective per-ingress receive state, sampled without altering its raw qualifiers.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ReceiveStatus {
+    /// Operator mute on this exact source.
+    pub muted: bool,
+    /// Healthy qualified reception after applying this source's mute.
+    pub active: bool,
+}
 /// Adapter-facing consequence of one serialized existing link command.
 pub enum LinkEffect {
+    /// The actual command owner can retain and poll this individual macro's result.
+    CommandQueued(super::CommandResponse),
+    /// Prepared reply for one authenticated caller, without controller TX or peer fanout.
+    PrivatePhoneMedia(PeerReply, Box<dyn crate::audio::PcmStreamReader>),
+    /// A private phone action with the exact source token and its execution-time grant.
+    PrivatePhoneControl(
+        PeerReply,
+        crate::command_language::HostAction,
+        super::dtmf::ActionPermit,
+    ),
+    /// Start a retained private outgoing call outside the control owner.
+    PhoneDial(
+        crate::command_language::ProtectedOperand<String>,
+        super::dtmf::ActionPermit,
+    ),
+    /// End the unique outgoing call on the initiating station under this permit.
+    PhoneHangup(super::dtmf::ActionPermit),
+    /// Complete source-owned command mode selection using the host's actual directory.
+    VerifyCommandTarget(DigitOperation),
+    /// Apply through the existing station site controller and its physical submission owner.
+    SiteCommand(crate::site::SiteCommand, super::dtmf::ActionPermit),
     /// Dial outside the serialized owner, then return the token before attaching resources.
     Connect(ConnectAttempt),
     /// Unpublished identities whose external channels/readers must be stopped and drained.
     Detach(Vec<String>),
+    /// Drain a caller's requested links and return the command outcome only to that caller.
+    PrivateDetach {
+        /// Connected links to release.
+        remotes: Vec<String>,
+        /// Exact requesting call.
+        reply: PeerReply,
+    },
+    /// Fixed result of a command that already completed on the serialized owner.
+    PrivatePhoneResult(PeerReply, crate::messages::OperationResult),
     /// Advisory keyed-source messages, queued on the destination channel owner.
     Text(Vec<(String, String)>),
     /// Addressed command envelopes; delivery failures are not advisory.
@@ -120,6 +186,8 @@ pub enum LinkEffect {
     RemoteBase(DigitOperation),
     /// Cancel only the currently admitted message attempt on the audio owner.
     CancelMessage,
+    /// Dispatch already queued the specific source response.
+    SpecificReplyQueued,
     /// No physical operation is needed (for example resumed retry intent).
     None,
 }
@@ -131,6 +199,7 @@ pub struct NodeLinkControl {
     policy: AccessPolicy,
     commands: DtmfCommands,
     peer_commands: Vec<(String, PeerReply, DtmfCommands)>,
+    ingress: Vec<(PeerIdentity, PeerReply)>,
     pending_source_retries: Vec<(String, DigitOperation)>,
     digit_sequence: i32,
     schedule: Option<LinkScheduler>,
@@ -208,6 +277,7 @@ impl NodeLinkControl {
             policy,
             commands: DtmfCommands::new(commands),
             peer_commands: Vec::new(),
+            ingress: Vec::new(),
             pending_source_retries: Vec::new(),
             digit_sequence: 0,
             schedule,
@@ -234,11 +304,196 @@ impl NodeLinkControl {
         self.peer_commands.clear();
         self.schedule = schedule;
     }
+    pub(super) fn install_profile(
+        &mut self,
+        profile: std::sync::Arc<super::dtmf::CommandProfile>,
+        generation: u64,
+    ) {
+        self.manager
+            .configure_wire_node(profile.network_node.as_deref());
+        self.commands.install_profile(profile, generation);
+        self.peer_commands.clear();
+    }
+    pub(super) fn radio_commands_enabled(&self) -> bool {
+        self.commands.radio_enabled()
+    }
+    pub(super) fn command_profile(&self) -> Option<&std::sync::Arc<super::dtmf::CommandProfile>> {
+        self.commands.profile()
+    }
+    pub(super) fn command_source(
+        &mut self,
+        source: &crate::command_language::CommandSource,
+    ) -> Option<&mut DtmfCommands> {
+        use crate::command_language::CommandSource;
+        match source {
+            CommandSource::Receiver => Some(&mut self.commands),
+            CommandSource::Connection { origin, reply } if !reply.ended() => self
+                .peer_commands
+                .iter_mut()
+                .find(|(name, token, _)| name == origin && token == reply)
+                .map(|(_, _, commands)| commands),
+            _ => None,
+        }
+    }
+    /// Observe only currently attached incarnations, including private callers on this port.
+    pub fn ingress_receive_status(&self) -> impl Iterator<Item = (&PeerIdentity, ReceiveStatus)> {
+        self.ingress
+            .iter()
+            .filter(|(_, token)| !token.ended())
+            .map(|(id, token)| {
+                let muted = token.rx_muted();
+                (
+                    id,
+                    ReceiveStatus {
+                        muted,
+                        active: !muted && token.active(),
+                    },
+                )
+            })
+    }
+    /// Resolve the actual ingress endpoint, even when a relayed command names another source.
+    pub(super) fn command_peer(&self, reply: &PeerReply) -> Option<&PeerIdentity> {
+        self.ingress
+            .iter()
+            .find(|(_, token)| token == reply && !token.ended())
+            .map(|(identity, _)| identity)
+    }
+
+    /// Register the confirmed transport endpoint after attachment or an acknowledged ring redirect.
+    /// Numeric peers must already be admitted. Phone and WebRTC media require a
+    /// source token issued by their authorized attachment owner.
+    pub fn attach_ingress(
+        &mut self,
+        identity: PeerIdentity,
+        reply: PeerReply,
+    ) -> Result<(), AdmissionError> {
+        if !self.admitting || reply.ended() {
+            return Err(AdmissionError::Stale);
+        }
+        if let Some(call) = identity.call_id() {
+            if !reply.phone_media_allowed()
+                || reply.phone_source().is_none_or(|p| p.call_id() != call)
+            {
+                return Err(AdmissionError::Denied);
+            }
+        } else if let Some(session) = identity.webrtc_binding() {
+            if reply.webrtc_binding() != Some(session) {
+                return Err(AdmissionError::Denied);
+            }
+        } else if reply.phone_source().is_some()
+            || reply.webrtc_binding().is_some()
+            || !identity.operator_alias().is_some_and(|alias| {
+                self.manager
+                    .snapshot()
+                    .iter()
+                    .any(|p| p.name == alias && !p.ended && !p.retrying)
+            })
+        {
+            return Err(AdmissionError::Denied);
+        }
+        self.ingress.retain(|(_, r)| !r.ended());
+        if let Some((_, r)) = self.ingress.iter().find(|(id, _)| id == &identity) {
+            return if *r == reply {
+                Ok(())
+            } else {
+                Err(AdmissionError::Stale)
+            };
+        }
+        self.ingress
+            .try_reserve(1)
+            .map_err(|_| AdmissionError::Invalid)?;
+        self.ingress.push((identity, reply));
+        Ok(())
+    }
+    pub(super) fn toggle_ingress(
+        &mut self,
+        target: &crate::command_language::MuteTarget,
+        source: &crate::command_language::CommandSource,
+    ) -> Result<(), AdmissionError> {
+        use crate::command_language::{CommandSource, MuteTarget as T};
+        self.ingress.retain(|(_, r)| !r.ended());
+        let select = |s: &PeerReply| {
+            s.set_rx_muted(!s.rx_muted());
+            Ok(())
+        };
+        match target {
+            T::Port => Err(AdmissionError::Invalid),
+            T::Peer(input) => {
+                let id = PeerIdentity::mute_target(input).map_err(|_| AdmissionError::Identity)?;
+                select(
+                    &self
+                        .ingress
+                        .iter()
+                        .find(|(i, _)| i == &id)
+                        .ok_or(AdmissionError::Denied)?
+                        .1,
+                )
+            }
+            T::Peers(protocol) => {
+                let selected = || {
+                    self.ingress
+                        .iter()
+                        .filter(|(id, _)| protocol.is_none_or(|p| p == id.protocol()))
+                };
+                let muted = !selected().all(|(_, r)| r.rx_muted());
+                for (_, r) in selected() {
+                    r.set_rx_muted(muted);
+                }
+                Ok(())
+            }
+            T::PhonePatch(call) => {
+                if let CommandSource::Connection { reply, .. } = source
+                    && let Some(actual) = reply.phone_source()
+                {
+                    if !reply.phone_authenticated()
+                        || call
+                            .as_ref()
+                            .is_some_and(|p| p.as_str() != actual.call_id().to_string())
+                    {
+                        return Err(AdmissionError::Denied);
+                    }
+                    reply.toggle_caller_rx_mute();
+                    return Ok(());
+                }
+                let mut callers = self.ingress.iter().filter(|(i, r)| {
+                    r.phone_authenticated()
+                        && i.call_id().is_some_and(|id| {
+                            call.as_ref().is_none_or(|p| p.as_str() == id.to_string())
+                        })
+                });
+                let (_, reply) = callers.next().ok_or(AdmissionError::Denied)?;
+                if callers.next().is_some() {
+                    Err(AdmissionError::Denied)
+                } else {
+                    select(reply)
+                }
+            }
+        }
+    }
     /// Configure per-node Argon2id credentials; missing either digest disables admin DTMF.
     pub fn configure_admin(&mut self, unlock_hash: &str, lock_hash: &str, timeout_ms: u64) {
         self.commands
             .configure_admin(unlock_hash, lock_hash, timeout_ms);
         self.peer_commands.clear();
+    }
+    pub(super) fn bind_admin(
+        &mut self,
+        codes: Option<std::sync::Arc<super::dtmf::AdminCodes>>,
+        timeout_ms: u64,
+    ) {
+        self.commands.bind_admin(codes, timeout_ms);
+        self.peer_commands.clear();
+    }
+    /// Bind the prepared port radio independently of the legacy digit family.
+    pub fn configure_radio_owner(
+        &mut self,
+        owner: Option<&crate::remote_base_command::RemoteCommandConfiguration>,
+    ) -> Result<(), crate::command::CommandMapError> {
+        self.commands.configure_radio_owner(owner)?;
+        for (_, _, commands) in &mut self.peer_commands {
+            commands.configure_radio_owner(owner)?;
+        }
+        Ok(())
     }
     /// Install the shared radio's resolved DTMF family on every source collector.
     pub fn configure_remote(
@@ -299,6 +554,13 @@ impl NodeLinkControl {
     }
 
     fn macro_operation_current(&mut self, operation: &DigitOperation, now_ms: u64) -> bool {
+        if operation
+            .action_permit
+            .as_ref()
+            .is_some_and(|p| !p.current(Some(now_ms)))
+        {
+            return false;
+        }
         if operation.macro_permit.is_none() {
             return true;
         }
@@ -387,11 +649,11 @@ impl NodeLinkControl {
     pub fn manager(&self) -> &LinkManager {
         &self.manager
     }
-    /// Whether an exact peer belongs to a configured permanent group.
-    pub fn is_group_member(&self, remote: &str) -> bool {
+    /// Whether group telemetry handles this peer transition at the owning station.
+    pub(super) fn suppresses_member_notice(&self, remote: &str, connected: bool) -> bool {
         self.schedule
             .as_ref()
-            .is_some_and(|schedule| schedule.is_group_member(remote))
+            .is_some_and(|schedule| schedule.suppresses_member_notice(remote, connected))
     }
     /// Resolve the peer's currently desired group, not an inactive same-peer schedule.
     pub fn group_member(&self, remote: &str) -> Option<GroupMemberSelection> {
@@ -437,11 +699,10 @@ impl NodeLinkControl {
                         })
                         .map(|(_, peer)| peer.clone())
                 });
-                let any_reachable = group.members.iter().any(|(_, remote)| reachable(remote));
-                let all_attempted = group
+                let unavailable = group
                     .members
                     .iter()
-                    .all(|(_, remote)| peers.iter().any(|peer| peer.name == *remote));
+                    .all(|(_, remote)| self.manager.member_unavailable(remote));
                 PriorityGroupStatus {
                     label: group.label.clone(),
                     name: group.name.clone(),
@@ -451,7 +712,7 @@ impl NodeLinkControl {
                         .map(|(_, remote)| remote.clone())
                         .collect(),
                     selected,
-                    unavailable: all_attempted && !any_reachable,
+                    unavailable,
                 }
             })
             .collect()
@@ -467,6 +728,26 @@ impl NodeLinkControl {
         remote: &str,
         bytes: &[u8],
         reply: PeerReply,
+        local_receiving: bool,
+        transitioned_ms: u64,
+        now_ms: u64,
+    ) -> Result<LinkEffect, AdmissionError> {
+        let regeneration = reply.regeneration_origin();
+        self.peer_text_received(
+            remote,
+            bytes,
+            (reply, regeneration),
+            local_receiving,
+            transitioned_ms,
+            now_ms,
+        )
+    }
+    /// Preserve receipt-time signaling authority during deferred directory selection.
+    pub fn peer_text_received(
+        &mut self,
+        remote: &str,
+        bytes: &[u8],
+        (reply, regeneration): (PeerReply, Option<crate::link::RegenerationOrigin>),
         local_receiving: bool,
         transitioned_ms: u64,
         now_ms: u64,
@@ -490,11 +771,13 @@ impl NodeLinkControl {
                 digit,
                 ..
             } => {
-                if !self.manager.remote_digit(remote, *digit, &self.policy) {
+                if !self.admits_digit_source(remote, &reply)
+                    || !self.manager.remote_digit(remote, *digit, &self.policy)
+                {
                     return Err(AdmissionError::Denied);
                 }
-                return Ok(if destination == &self.local {
-                    self.source_digit(source, *digit, now_ms, reply)
+                return Ok(if self.manager.wire_node() == Some(destination.as_str()) {
+                    self.source_digit(source, *digit, now_ms, reply, regeneration)
                         .map_or(LinkEffect::None, LinkEffect::Digit)
                 } else {
                     LinkEffect::ForwardDigits(self.manager.relay_digit(remote, &message))
@@ -552,6 +835,28 @@ impl NodeLinkControl {
             self.group_member(&remote),
         )
     }
+    pub(super) fn apply_event_groups(
+        &mut self,
+        local: &str,
+        events: &super::scheduler::EventScheduler,
+    ) -> bool {
+        let Some(links) = self.schedule.as_mut() else {
+            return false;
+        };
+        if let Some(profile) = self.commands.profile() {
+            profile.route_generation.is_some_and(|generation| {
+                events.apply_owned_group_holds(
+                    profile.public_key.as_str(),
+                    local,
+                    Some(profile.owner),
+                    generation,
+                    links,
+                )
+            })
+        } else {
+            events.apply_group_holds(local, links)
+        }
+    }
     pub(super) fn schedule(&self) -> Option<&LinkScheduler> {
         self.schedule.as_ref()
     }
@@ -572,6 +877,9 @@ impl NodeLinkControl {
     }
     /// Interpret radio events on the same serialized owner as reload and incoming admission.
     pub fn digit(&mut self, event: DigitEvent) -> Option<DigitOutcome> {
+        if self.commands.hold_selection_input(event, None) {
+            return None;
+        }
         self.commands.feed(event)
     }
     /// Submission loss revokes every source's queued expansion and partial command.
@@ -581,6 +889,25 @@ impl NodeLinkControl {
             commands.feed(DigitEvent::Lost);
         }
     }
+    /// Adapt the legacy session timer only for legacy command profiles.
+    pub fn legacy_peer_boundary(
+        &mut self,
+        remote: &str,
+        now_ms: u64,
+        reply: PeerReply,
+    ) -> Option<DigitOutcome> {
+        if self.command_profile().is_some() {
+            return None;
+        }
+        self.peer_digit(remote, '#', now_ms, reply)
+    }
+    fn admits_digit_source(&self, remote: &str, reply: &PeerReply) -> bool {
+        !reply.ended()
+            && (self.command_profile().is_none()
+                || self.ingress.iter().any(|(id, token)| {
+                    id.operator_alias().as_deref() == Some(remote) && token == reply
+                }))
+    }
     /// Interpret a peer digit only while its direct connection and current policy allow it.
     pub fn peer_digit(
         &mut self,
@@ -589,14 +916,27 @@ impl NodeLinkControl {
         now_ms: u64,
         reply: PeerReply,
     ) -> Option<DigitOutcome> {
-        if reply.ended() || !self.manager.remote_digit(remote, digit, &self.policy) {
+        let regeneration = reply.regeneration_origin();
+        self.peer_digit_received(remote, digit, now_ms, reply, regeneration)
+    }
+    /// Collect one symbol with the original receipt's mute fence.
+    pub fn peer_digit_received(
+        &mut self,
+        remote: &str,
+        digit: char,
+        now_ms: u64,
+        reply: PeerReply,
+        regeneration: Option<crate::link::RegenerationOrigin>,
+    ) -> Option<DigitOutcome> {
+        if !self.admits_digit_source(remote, &reply)
+            || !self.manager.remote_digit(remote, digit, &self.policy)
+        {
             return None;
         }
-        self.source_digit(remote, digit, now_ms, reply)
+        self.source_digit(remote, digit, now_ms, reply, regeneration)
     }
-    /// Collect only an admitted private call's selected-node commands. No link
-    /// membership or RF attachment is created, and idle phone digits never regenerate.
-    /// The caller checks phone/destination selection permissions before this entry.
+    /// Collect an authenticated private call's commands on its account's port.
+    /// The caller checks the owning port before dispatch. Idle digits never regenerate.
     pub fn phone_digit(
         &mut self,
         source: &crate::link::PhoneSource,
@@ -611,9 +951,22 @@ impl NodeLinkControl {
         {
             return None;
         }
-        self.source_digit(&source.call_id().to_string(), digit, now_ms, reply)
-            .filter(|outcome| !matches!(outcome, DigitOutcome::Regenerate(_)))
+        self.source_digit(&source.call_id().to_string(), digit, now_ms, reply, None)
+            .filter(|outcome| {
+                !matches!(
+                    outcome,
+                    DigitOutcome::Regenerate(_) | DigitOutcome::ReceivedDigit(..)
+                )
+            })
     }
+    /// A retained grant or paused macro can outlive the actual partial input.
+    /// Check only the collector of this exact private call when releasing digit muting.
+    pub fn phone_input_active(&self, reply: &PeerReply) -> bool {
+        self.peer_commands
+            .iter()
+            .any(|(_, source, input)| source == reply && input.collecting_input())
+    }
+
     /// Retire an actual private ingress before reclaiming its collectors and grants.
     /// Already queued work retains this ended token and fails its dispatch fence.
     pub fn retire_source(&mut self, reply: &PeerReply) {
@@ -626,6 +979,7 @@ impl NodeLinkControl {
         digit: char,
         now_ms: u64,
         reply: PeerReply,
+        regeneration: Option<crate::link::RegenerationOrigin>,
     ) -> Option<DigitOutcome> {
         self.retain_peer_commands(now_ms);
         let index = if let Some(index) = self
@@ -637,8 +991,10 @@ impl NodeLinkControl {
         } else {
             // Idle link digits need no collector. Bound claimed origins per ingress
             // without evicting another source's command, selection or admin state.
-            if digit != '*' {
-                return Some(DigitOutcome::Regenerate(digit));
+            if self.commands.profile().is_none() && digit != '*' {
+                return reply
+                    .regeneration_origin()
+                    .map(|origin| DigitOutcome::ReceivedDigit(digit, origin));
             }
             if self
                 .peer_commands
@@ -653,13 +1009,24 @@ impl NodeLinkControl {
                 .push((origin.into(), reply.clone(), self.commands.for_source()));
             self.peer_commands.len() - 1
         };
-        self.peer_commands[index]
-            .2
-            .feed(DigitEvent::Digit { digit, now_ms })
-            .map(|outcome| Self::source_outcome(outcome, origin, reply))
+        let commands = &mut self.peer_commands[index].2;
+        let event = DigitEvent::Digit { digit, now_ms };
+        if commands.hold_selection_input(event, regeneration) {
+            return None;
+        }
+        let outcome = commands.feed(event);
+        match outcome {
+            Some(DigitOutcome::Regenerate(symbol)) => reply
+                .regeneration_origin()
+                .map(|token| DigitOutcome::ReceivedDigit(symbol, token)),
+            other => other.map(|o| Self::source_outcome(o, origin, reply)),
+        }
     }
     /// Attach source identity only to outcomes that carry a command.
     fn source_outcome(mut outcome: DigitOutcome, origin: &str, reply: PeerReply) -> DigitOutcome {
+        if let DigitOutcome::Mapped(input) = &mut outcome {
+            input.connection = Some((origin.to_owned(), reply.clone()));
+        }
         if let DigitOutcome::MacroStopped { reply: target } = &mut outcome {
             *target = Some(reply.clone());
         }
@@ -676,10 +1043,30 @@ impl NodeLinkControl {
         self.peer_commands
             .retain(|(_, source, commands)| !source.ended() && commands.retains_state(now_ms));
     }
+    /// Complete overdue local modular input before collecting the next RF event.
+    pub fn expire_receiver_digits(&mut self, at: u64) -> Option<DigitOutcome> {
+        self.commands.profile()?;
+        self.commands.expire(at)
+    }
+    /// Complete overdue candidates on this exact transport before feeding its next received symbol.
+    pub fn expire_connection_digits(&mut self, source: &PeerReply, at: u64) -> Vec<DigitOutcome> {
+        if source.ended() {
+            return Vec::new();
+        }
+        self.peer_commands
+            .iter_mut()
+            .filter(|(_, r, _)| r == source)
+            .filter_map(|(name, reply, commands)| {
+                commands
+                    .expire(at)
+                    .map(|o| Self::source_outcome(o, name, reply.clone()))
+            })
+            .collect()
+    }
     /// Expire peer commands independently, preserving their exact reply connection.
     pub fn expire_peer_digits(&mut self, now_ms: u64) -> Vec<DigitOutcome> {
         self.peer_commands.retain(|(_, source, _)| !source.ended());
-        let outcomes = self
+        let mut outcomes: Vec<_> = self
             .peer_commands
             .iter_mut()
             .filter_map(|(origin, reply, commands)| {
@@ -688,6 +1075,9 @@ impl NodeLinkControl {
                     .map(|outcome| Self::source_outcome(outcome, origin, reply.clone()))
             })
             .collect();
+        if self.commands.profile().is_some() {
+            outcomes.extend(self.commands.expire(now_ms));
+        }
         self.retain_peer_commands(now_ms);
         outcomes
     }
@@ -699,13 +1089,116 @@ impl NodeLinkControl {
         }
         self.peer_commands
             .iter_mut()
-            .filter(|(_, source, commands)| source == &reply && commands.remote_collecting())
+            .filter(|(_, source, _)| source == &reply)
             .filter_map(|(origin, reply, commands)| {
+                if commands.hold_selection_input(DigitEvent::Unkey { now_ms }, None)
+                    || !commands.remote_collecting()
+                {
+                    return None;
+                }
                 commands
                     .feed(DigitEvent::Unkey { now_ms })
                     .map(|outcome| Self::source_outcome(outcome, origin, reply.clone()))
             })
             .collect()
+    }
+    fn selection_source(&mut self, op: &DigitOperation) -> Option<&mut DtmfCommands> {
+        if let Some(reply) = &op.reply {
+            self.peer_commands
+                .iter_mut()
+                .find(|(name, source, _)| {
+                    !reply.ended() && source == reply && Some(name.as_str()) == op.origin.as_deref()
+                })
+                .map(|(_, _, input)| input)
+        } else {
+            Some(&mut self.commands)
+        }
+    }
+    /// Reserve only this collector while its selected ASL directory is consulted.
+    pub fn begin_command_selection(
+        &mut self,
+        op: &DigitOperation,
+        now: u64,
+    ) -> Option<std::sync::Arc<()>> {
+        if !self.admitting
+            || op.command.action != LinkAction::Command
+            || op.digit.is_some()
+            || op
+                .reply
+                .as_ref()
+                .is_some_and(|r| r.phone_source().is_some())
+            || self.manager.is_wire_self(&op.command.node)
+            || !self.policy.allows(&op.command.node, true)
+            || !self.macro_operation_current(op, now)
+        {
+            return None;
+        }
+        self.selection_source(op)?.begin_selection()
+    }
+    /// Retirement, loss, permit expiry and collector replacement invalidate the request.
+    pub fn command_selection_current(
+        &mut self,
+        op: &DigitOperation,
+        ticket: &std::sync::Arc<()>,
+        now: u64,
+    ) -> bool {
+        self.admitting
+            && self.macro_operation_current(op, now)
+            && self
+                .selection_source(op)
+                .is_some_and(|c| c.owns_selection(ticket))
+    }
+    /// Return only the receipt-time input owned by this completing request.
+    pub fn finish_command_selection(
+        &mut self,
+        op: &DigitOperation,
+        ticket: &std::sync::Arc<()>,
+    ) -> Option<Vec<super::dtmf::HeldDigit>> {
+        self.selection_source(op)?.finish_selection(ticket)
+    }
+    /// Close any earlier prefix on this exact collector at the next buffered symbol's receipt time.
+    pub fn expire_command_input(&mut self, op: &DigitOperation, at: u64) -> Option<DigitOutcome> {
+        let outcome = self.selection_source(op)?.expire(at)?;
+        Some(match (&op.origin, &op.reply) {
+            (Some(origin), Some(reply)) => Self::source_outcome(outcome, origin, reply.clone()),
+            _ => outcome,
+        })
+    }
+    /// Revisit an admitted symbol after selection. A nested lookup may pause it again.
+    pub fn replay_command_input(
+        &mut self,
+        op: &DigitOperation,
+        input: &super::dtmf::HeldDigit,
+    ) -> Option<DigitOutcome> {
+        match (&op.origin, &op.reply, input.event) {
+            (Some(origin), Some(reply), DigitEvent::Digit { digit, now_ms }) if !reply.ended() => {
+                // A relayed D origin can differ from its direct ingress. Recheck the actual connection.
+                let peer = self.command_peer(reply)?;
+                if !peer
+                    .operator_alias()
+                    .is_some_and(|remote| self.manager.remote_digit(&remote, digit, &self.policy))
+                {
+                    return None;
+                }
+                self.source_digit(
+                    origin,
+                    digit,
+                    now_ms,
+                    reply.clone(),
+                    input.regeneration.clone(),
+                )
+            }
+            (Some(origin), Some(reply), event @ DigitEvent::Unkey { .. }) => {
+                let c = self.selection_source(op)?;
+                if c.hold_selection_input(event, None) || !c.remote_collecting() {
+                    return None;
+                }
+                c.feed(event)
+                    .map(|o| Self::source_outcome(o, origin, reply.clone()))
+            }
+            (None, None, event) => self.digit(event),
+            _ => None,
+        }
     }
     /// Apply policy, returning external work without doing a dial, media operation, or write.
     /// `directory_verified` is needed only when selecting a remote-command peer.
@@ -726,6 +1219,7 @@ impl NodeLinkControl {
         if !self.macro_operation_current(&operation, now_ms) {
             return Err(AdmissionError::Stale);
         }
+        let private_reply = pending_phone_reply(Some(&operation)).cloned();
         if let Some((reply, source)) = operation
             .reply
             .as_ref()
@@ -790,7 +1284,7 @@ impl NodeLinkControl {
                 if !self.policy.allows(&remote, true) {
                     return Err(AdmissionError::Denied);
                 }
-                if remote == self.local {
+                if self.manager.is_wire_self(&remote) {
                     return Err(AdmissionError::Loop);
                 }
                 let mode = match operation.command.action {
@@ -806,6 +1300,18 @@ impl NodeLinkControl {
                         | LinkAction::PermanentLocalMonitor
                         | LinkAction::PermanentTransceive
                 );
+                if permanent && operation.action_permit.is_some() {
+                    if self
+                        .schedule
+                        .as_ref()
+                        .is_some_and(|s| s.owns_target(&remote))
+                    {
+                        return Err(AdmissionError::Loop);
+                    }
+                    if self.manager.active_permanent(&remote, mode) {
+                        return Ok(LinkEffect::None);
+                    }
+                }
                 if permanent
                     && !self.manager.reaches(&remote, false)
                     && self.manager.resume_permanent_retry(&remote, mode, now_ms)
@@ -816,7 +1322,8 @@ impl NodeLinkControl {
                     return Err(AdmissionError::Loop);
                 }
                 LinkEffect::Connect(ConnectAttempt {
-                    pending_source: (operation.macro_permit.is_some()
+                    pending_source: (operation.action_permit.is_some()
+                        || operation.macro_permit.is_some()
                         || operation
                             .reply
                             .as_ref()
@@ -908,7 +1415,7 @@ impl NodeLinkControl {
                 {
                     return Err(AdmissionError::UnsupportedRoute);
                 }
-                if remote == self.local
+                if self.manager.is_wire_self(&remote)
                     || !self.policy.allows(&remote, true)
                     || (operation.digit.is_none() && !directory_verified)
                 {
@@ -916,7 +1423,11 @@ impl NodeLinkControl {
                 }
                 let message = Protocol::RemoteDigit {
                     destination: remote.clone(),
-                    source: self.local.clone(),
+                    source: self
+                        .manager
+                        .wire_node()
+                        .ok_or(AdmissionError::Denied)?
+                        .to_owned(),
                     sequence: self.digit_sequence.wrapping_add(1),
                     digit: operation.digit.unwrap_or('*'),
                 };
@@ -986,7 +1497,12 @@ impl NodeLinkControl {
                 return Err(AdmissionError::Denied);
             }
         };
-        Ok(effect)
+        Ok(match (effect, private_reply) {
+            (LinkEffect::Detach(remotes), Some(reply)) => {
+                LinkEffect::PrivateDetach { remotes, reply }
+            }
+            (effect, _) => effect,
+        })
     }
     /// Abandon an externally invalidated dial without adding retry intent or changing topology.
     /// Only its still-matching schedule reservation is released for a later current attempt.
@@ -1181,12 +1697,22 @@ impl NodeLinkControl {
             return None;
         }
         let schedule = self.schedule.as_mut()?;
-        let reservation = schedule.next_operation()?;
+        let reservation = schedule.next_operation_with_members(|remote, label| {
+            self.manager.attached_group_member(remote, label)
+        })?;
         if reservation.action() == LinkTransition::Detach {
             let remote = reservation.remote().to_owned();
-            self.manager.disconnect_permanent(&remote);
-            self.commands.disconnect(&remote);
+            let detach = if let Some(label) = schedule.held_group(&reservation) {
+                self.manager.withdraw_held_member(&remote, label)
+            } else {
+                self.manager.disconnect_permanent(&remote);
+                true
+            };
             schedule.complete(&reservation, true);
+            if !detach {
+                return Some(LinkEffect::None);
+            }
+            self.commands.disconnect(&remote);
             return Some(LinkEffect::Detach(vec![remote]));
         }
         Some(LinkEffect::Connect(ConnectAttempt {
@@ -1218,6 +1744,7 @@ impl NodeLinkControl {
     /// Gate old dials and return every external identity to stop/drain before host reclamation.
     pub fn close(&mut self) -> Vec<String> {
         self.admitting = false;
+        self.ingress.clear();
         self.commands.cancel_macro();
         for (_, _, commands) in &mut self.peer_commands {
             commands.cancel_macro();

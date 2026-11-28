@@ -1,6 +1,6 @@
-//! Sample-timed traffic watchdog and local-only, producer-backed recovery notices.
+//! Sample-timed traffic watchdog and producer-backed station recovery notices.
 
-use super::{NodeController, PeerReplySample, PreparedMedia, ProgramSample};
+use super::{NodeController, PeerReplySample, PreparedMedia, ProgramSample, PublicTelemetry};
 
 #[derive(Default)]
 enum Phase {
@@ -70,7 +70,7 @@ impl NodeController {
         self.release_hang = 0;
     }
 
-    /// Priority notices never repeat input, route to peers, duck, or select Morse on receive.
+    /// Priority notices never repeat input, broadcast to ordinary links, duck, or select Morse on receive.
     /// Detection and ring consumption have already advanced before this local RF gate.
     pub(super) fn timeout_sample(
         &mut self,
@@ -79,7 +79,8 @@ impl NodeController {
         input: Option<f32>,
         output: Option<ProgramSample<'_>>,
     ) -> f32 {
-        let _ = self.courtesy.pop();
+        self.courtesy
+            .cancel_waiting(self.now, &mut self.telemetry.trace, "transmit_timeout");
         if matches!(self.timeout.phase, Phase::Waiting) && !activity {
             self.timeout.phase = Phase::Cleared;
         }
@@ -93,12 +94,23 @@ impl NodeController {
         let mut continuing = false;
         if let Some(index) = index {
             if let Some(media) = &mut self.timeout_media {
-                let playback = &mut media[index].0;
+                let media = &mut media[index];
+                media.observe_queue(&mut self.telemetry.trace, self.now, "timeout");
+                let playback = &mut media.0;
+                let first_output = !playback.has_output();
                 if !inhibited && input.is_some() {
                     made = playback.render(false, &mut sample);
                 }
+                if first_output
+                    && made != 0
+                    && let Some(ticket) = &mut media.9
+                {
+                    self.telemetry.trace.started(ticket, self.now);
+                }
                 continuing = playback.has_output() && !playback.is_finished();
                 if playback.is_finished() {
+                    let outcome = playback.outcome();
+                    media.observe_completion(&mut self.telemetry.trace, self.now, outcome, None);
                     self.timeout.phase = if index == 0 {
                         Phase::Waiting
                     } else {
@@ -133,11 +145,21 @@ impl NodeController {
             self.tails.unkeyed(self.now);
         }
         if let Some(output) = output {
+            if let Some(branches) = output.branches {
+                *branches.voice = 0.0;
+                *branches.public_telemetry_input = sample[0];
+                *branches.public_telemetry = sample[0];
+                *branches.incoming_text = 0.0;
+                *branches.regeneration = 0.0;
+            }
             *output.parrot = 0.0;
             if let Some(reply) = output.reply {
-                *reply = PeerReplySample::default();
+                *reply = PeerReplySample {
+                    broadcast: (made != 0).then_some(PublicTelemetry::StationMonitor(sample[0])),
+                    ..Default::default()
+                };
             }
         }
-        sample[0].clamp(-1.0, 1.0)
+        sample[0]
     }
 }

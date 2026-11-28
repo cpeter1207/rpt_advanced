@@ -6,13 +6,19 @@ use std::time::Duration;
 fn setup() -> (Runtime<Audio>, RadioWorker) {
     let (runtime, owners) = audio_owners_with_config(
         4096,
-        "[1000]\nradio_channel=usb\nduplex=full\nsquelch_delay_ms=160\n",
+        &[
+            (ResourceKind::Radio, json!({"duplex_mode":"full"})),
+            (
+                ResourceKind::RxSignaling,
+                json!({"timing":{"squelch_delay_ms":160}}),
+            ),
+        ],
     );
     crate::fixture::RADIO_READY.store(0, Ordering::Release);
     // SAFETY: the fixture descriptor and callbacks live for the test process.
     let services = unsafe { HostServices::open(crate::fixture::host_descriptor()) }.unwrap();
     let mut worker = RadioWorker::prepare(
-        services.radio("1000", "usb", 4096).unwrap(),
+        crate::fixture::station::radio(services, 4096),
         Instant::now(),
         RadioStatus::default(),
         160,
@@ -390,7 +396,9 @@ unsafe extern "C" fn paused_render(
         // SAFETY: the caller owns count writable samples; the real render has returned.
         let samples = unsafe { std::slice::from_raw_parts(output, count as usize) };
         RENDER_HAD_AUDIO.store(
-            samples.iter().any(|sample| sample.abs() > 0.05),
+            samples
+                .iter()
+                .any(|sample| sample.abs() > 0.05 / crate::link::ring::RING_HEADROOM),
             Ordering::Release,
         );
         let gate = RENDER_GATE.get().unwrap();
@@ -610,7 +618,7 @@ fn reopened_radio_stream_cannot_inherit_previous_speech_admission() {
     // SAFETY: the fixture descriptor and callbacks live for the test process.
     let services = unsafe { HostServices::open(crate::fixture::host_descriptor()) }.unwrap();
     let mut reopened = RadioWorker::prepare(
-        services.radio("1000", "usb", 4096).unwrap(),
+        crate::fixture::station::radio(services, 4096),
         Instant::now(),
         status,
         160,
@@ -777,7 +785,7 @@ fn failed_receive_policy_query_returns_the_unactivated_radio_reservation() {
     let services = unsafe { HostServices::open(&table) }.unwrap();
     let before = crate::fixture::RADIO_DROPS.load(Ordering::Acquire);
     let failure = RadioWorker::prepare(
-        services.radio("1000", "usb", 4096).unwrap(),
+        crate::fixture::station::radio(services, 4096),
         Instant::now(),
         RadioStatus::default(),
         160,
@@ -848,4 +856,128 @@ fn same_ring_rx_cancellation_during_render_mutes_the_completed_tx_frame() {
     assert_eq!(output, [0.0; 960]);
     assert!(CANCEL_DURING_RENDER.get().is_null());
     drop(worker.stop());
+}
+
+fn received_echo_dials(speech_latched: bool, explicit_hash: bool) -> (Vec<String>, Vec<String>) {
+    use rpt_advanced_core::runtime::{dtmf::DigitOutcome, links::LinkEffect};
+
+    let (mut runtime, worker) = setup();
+    crate::host::tests::commands::install_with_other(
+        &mut runtime,
+        station::LOCAL,
+        "North",
+        Some(1000),
+        serde_json::json!({}),
+        &[],
+        None,
+    )
+    .unwrap();
+    let mut first = 0_u64;
+    let mut chunk = |raw: bool, frequencies: Option<(f32, f32)>| {
+        let mut pcm = std::array::from_fn::<_, 960, _>(|offset| {
+            frequencies.map_or(0.0, |(row, column)| {
+                let phase = std::f32::consts::TAU * (first + offset as u64) as f32 / 48_000.0;
+                0.031 * ((row * phase).sin() + (column * phase).sin())
+            })
+        });
+        let admitted = raw && speech_latched;
+        let info = metadata(
+            first,
+            pcm.len(),
+            raw,
+            admitted,
+            1,
+            admitted.then_some(959),
+            1,
+        );
+        assert_eq!(deliver(&worker, &info, &mut pcm), 0);
+        assert_eq!(tx(&worker, &mut [0.0; 960]).0, 0);
+        first += 960;
+    };
+    chunk(true, None);
+    let symbols = if explicit_hash {
+        "*33009999#"
+    } else {
+        "*33009999"
+    };
+    for (index, symbol) in symbols.chars().enumerate() {
+        if index > 0 {
+            for _ in 0..3 {
+                chunk(true, None);
+            }
+        }
+        let tone = match symbol {
+            '*' => (941.0, 1209.0),
+            '3' => (697.0, 1477.0),
+            '0' => (941.0, 1336.0),
+            '9' => (852.0, 1477.0),
+            '#' => (941.0, 1477.0),
+            _ => unreachable!(),
+        };
+        for _ in 0..4 {
+            chunk(true, Some(tone));
+        }
+    }
+    if explicit_hash {
+        for _ in 0..3 {
+            chunk(true, None);
+        }
+    }
+    let keyed = runtime.node(station::LOCAL).unwrap().drain_digits();
+    chunk(false, None);
+    chunk(false, None);
+    let released = runtime.node(station::LOCAL).unwrap().drain_digits();
+
+    let mut collect = |events: Vec<_>| {
+        let mut dials = Vec::new();
+        for event in events {
+            if let Some(DigitOutcome::Mapped(input)) = runtime.digit(station::LOCAL, event) {
+                let clock = RuntimeClock {
+                    now_ms: first / 48,
+                    wall_seconds: 0,
+                    wall_subsecond_ms: 0,
+                    civil: None,
+                };
+                let LinkEffect::Connect(dial) = runtime
+                    .dispatch_mapping(station::LOCAL, input, clock)
+                    .unwrap()
+                else {
+                    panic!("expected an RF connect operation");
+                };
+                dials.push(dial.remote().to_owned());
+            }
+        }
+        dials
+    };
+    let dials = (collect(keyed), collect(released));
+    drop(worker.stop());
+    assert!(runtime.stop(first / 48));
+    dials
+}
+
+#[test]
+fn latched_rf_connect_finishes_once_on_hash_or_actual_receiver_release() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let (while_keyed, on_release) = received_echo_dials(true, false);
+    assert!(while_keyed.is_empty());
+    assert_eq!(on_release, ["3009999"]);
+    let (while_keyed, on_release) = received_echo_dials(true, true);
+    assert_eq!(while_keyed, ["3009999"]);
+    assert!(on_release.is_empty());
+}
+
+#[test]
+fn raw_qualified_rf_keypad_finishes_on_release_without_speech_onset() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let (while_keyed, on_release) = received_echo_dials(false, false);
+    assert!(while_keyed.is_empty());
+    assert_eq!(
+        on_release,
+        ["3009999"],
+        "a raw-qualified RF keypad command must survive an unlatched speech gate"
+    );
 }
