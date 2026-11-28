@@ -131,7 +131,7 @@ fn webrtc_station_telemetry_follows_each_mix_minus_and_preserves_reply_privacy()
         talker_signals.set_radio_keyed(keyed);
         let mut rf = [0.0; 4];
         links
-            .process(
+            .process_with_branches(
                 node,
                 false,
                 &mut rf,
@@ -139,6 +139,8 @@ fn webrtc_station_telemetry_follows_each_mix_minus_and_preserves_reply_privacy()
                     born_ns: Some(0),
                     ..Default::default()
                 },
+                None,
+                |mix| assert_eq!(mix, if keyed { &[0.125; 4] } else { &[0.0; 4] }),
             )
             .unwrap();
         assert_eq!(dispatcher.dispatch(1), 1);

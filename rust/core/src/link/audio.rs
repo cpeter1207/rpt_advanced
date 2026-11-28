@@ -754,11 +754,12 @@ impl<P: PeerInput> LinkAudio<P> {
         audio: &mut [f32],
         source: SourcePosition,
     ) -> Result<bool, AdmissionError> {
-        self.process_with_branches(controller, receiving, audio, source, None)
+        self.process_with_branches(controller, receiving, audio, source, None, |_| {})
     }
 
     /// Render normally and copy the admitted station and transmit branches into matching
-    /// callback-owned scratch spans when requested.
+    /// callback-owned scratch spans when requested. Lend the selected peer sum to
+    /// the observer before that buffer is reused for per-destination routing.
     pub fn process_with_branches(
         &mut self,
         controller: &mut NodeController,
@@ -766,6 +767,7 @@ impl<P: PeerInput> LinkAudio<P> {
         audio: &mut [f32],
         source: SourcePosition,
         branches: Option<crate::controller::LocalTransmitBranches<'_>>,
+        observe_link_mix: impl FnOnce(&[f32]),
     ) -> Result<bool, AdmissionError> {
         let count = audio.len();
         if count > self.local.len() {
@@ -967,6 +969,7 @@ impl<P: PeerInput> LinkAudio<P> {
         });
         self.peer_source_active = any_peer_active || text_active;
         controller.set_nonlocal_source_activity(self.peer_source_active);
+        observe_link_mix(&self.mix[..count]);
         let keyed = controller.process_audio_with_parrot(
             receiving,
             linked_active,

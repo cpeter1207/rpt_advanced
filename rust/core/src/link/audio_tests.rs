@@ -331,9 +331,18 @@ fn attached_phone_destinations_receive_mix_minus_without_expanding_public_forwar
         linked.signals.publish_pcm();
         linked.signals.set_radio_keyed(true);
         let mut local = LOCAL;
+        let mut link_mix = [f32::NAN; 4];
         graph
-            .process(&mut node, true, &mut local, SourcePosition::default())
+            .process_with_branches(
+                &mut node,
+                true,
+                &mut local,
+                SourcePosition::default(),
+                None,
+                |mix| link_mix.copy_from_slice(mix),
+            )
             .unwrap();
+        assert_eq!(link_mix, std::array::from_fn(|i| A[i] + B[i] + LINK[i]));
         dispatcher.dispatch(1);
         let mixed_a = std::array::from_fn(|i| LOCAL[i] + LINK[i] + B[i]);
         let mixed_b = std::array::from_fn(|i| LOCAL[i] + LINK[i] + A[i]);
@@ -350,8 +359,16 @@ fn attached_phone_destinations_receive_mix_minus_without_expanding_public_forwar
             .set_rx_muted(true);
         let mut local = LOCAL;
         graph
-            .process(&mut node, true, &mut local, SourcePosition::default())
+            .process_with_branches(
+                &mut node,
+                true,
+                &mut local,
+                SourcePosition::default(),
+                None,
+                |mix| link_mix.copy_from_slice(mix),
+            )
             .unwrap();
+        assert_eq!(link_mix, both_callers);
         dispatcher.dispatch(1);
         let muted_a = std::array::from_fn(|i| LOCAL[i] + B[i]);
         let muted_b = std::array::from_fn(|i| LOCAL[i] + A[i]);

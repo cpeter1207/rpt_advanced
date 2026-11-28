@@ -908,6 +908,7 @@ fn local_status_taps_measure_before_and_after_the_receive_gate() {
         telemetry_input,
         incoming_text,
         regeneration,
+        link_mix,
     ] = worker.status_meters();
     assert!(incoming_text.is_none());
     assert!(regeneration.is_none());
@@ -920,6 +921,7 @@ fn local_status_taps_measure_before_and_after_the_receive_gate() {
         telemetry,
         station,
         telemetry_input,
+        link_mix,
     ] {
         let meter = meter.unwrap();
         assert_eq!(meter.quality, crate::status_meter::Quality::Valid);

@@ -670,7 +670,7 @@ struct TransmitContext {
     maximum: usize,
     status: RadioStatus,
     meter: UnsafeCell<MeterPublisher>,
-    status_taps: UnsafeCell<[Tap; 8]>,
+    status_taps: UnsafeCell<[Tap; 9]>,
     /// Borrowed only while measuring the serial TX callback's programme inputs.
     status_pcm: UnsafeCell<[Box<[f32]>; 6]>,
     remote_controls: UnsafeCell<u32>,
@@ -1355,6 +1355,7 @@ unsafe fn transmit(
         telemetry_input_level,
         text_level,
         regeneration_level,
+        link_mix_level,
     ] = unsafe { &mut *context.status_taps.get() };
     // SAFETY: these buffers are allocated before publication and shared only by this TX turn.
     let [
@@ -1412,6 +1413,7 @@ unsafe fn transmit(
             incoming_text,
             regeneration,
         }),
+        |mix| link_mix_level.observe(span, mix),
     );
     // SAFETY: this callback owns both adapter and metadata state.
     unsafe {
@@ -1710,6 +1712,7 @@ impl RadioWorker {
             (tx_telemetry_input, tx_telemetry_input_reader),
             (tx_text, tx_text_reader),
             (tx_regeneration, tx_regeneration_reader),
+            (tx_link_mix, tx_link_mix_reader),
         ] = std::array::from_fn(|_| Tap::new());
         let active = Arc::new(AtomicBool::new(false));
         status.source_clock.restart();
@@ -1757,6 +1760,7 @@ impl RadioWorker {
                 tx_telemetry_input,
                 tx_text,
                 tx_regeneration,
+                tx_link_mix,
             ]),
             status_pcm: UnsafeCell::new(std::array::from_fn(|_| {
                 vec![0.0; maximum].into_boxed_slice()
@@ -1797,6 +1801,7 @@ impl RadioWorker {
                 tx_telemetry_input_reader,
                 tx_text_reader,
                 tx_regeneration_reader,
+                tx_link_mix_reader,
             ],
             last_physical_receive: None,
             reported_faults: [0; 6],

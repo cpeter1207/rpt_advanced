@@ -12,7 +12,7 @@ const RMS_BLOCKS: usize = 2;
 const LUFS_BLOCKS: usize = 8;
 const HOLD_BLOCKS: usize = 40;
 const QUEUE: usize = 4;
-pub(crate) const LOCAL_TAP_COUNT: usize = 10;
+pub(crate) const LOCAL_TAP_COUNT: usize = 11;
 
 /// The original mono span and its owner identifiers, copied by the audio callback.
 #[derive(Clone, Copy)]
@@ -159,7 +159,8 @@ pub(crate) const LOCAL_CHAINS: &[Chain] = &[
         id: "local_tx",
         direction: "transmit",
         stages: &[
-            stage("voice", "voice_branch", &[], Some(4)),
+            stage("link_mix_input", "admitted_peer_mix", &[], Some(10)),
+            stage("voice", "voice_branch", &["link_mix_input"], Some(4)),
             stage(
                 "telemetry_input",
                 "public_telemetry_before_ducking",
