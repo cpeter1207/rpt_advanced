@@ -105,6 +105,16 @@ addressed replies, and one-copy delivery for each configured message audience.
 The decoded two-peer Opus fixture includes a distinct local telemetry marker.
 Its matching native Product3 verification remains open.
 
+A live linked-audio sample reached full scale at the decode and native ring
+observations. The active WebRTC encoder input peaked near minus 2 dBFS.
+A native alpha6 ring experiment reproduced full-scale truncation when
+resampling a near-full-scale DTMF signal. It retained the peaks with 6 dB
+of internal headroom. The released alpha37 float DSP accepted over-range
+working PCM. Scoped native checks reproduced the signed narrowing and ring
+loss, then passed with float dispatch and internal headroom. Peer DSP is
+prepared at the 48 kHz rate it receives. The native Product3 and on-air
+follow-up checks remain open.
+
 The Debian 13 arm64 proof built on Rust 1.88.0. `str0m` 0.24.1 with dynamic
 OpenSSL negotiated direct Trickle ICE, DTLS fingerprint verification, both
 DCEP modes and Opus RTP with the actual SSRC, extended timestamp and receiver
