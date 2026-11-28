@@ -98,6 +98,13 @@ Start with the existing routes, HAL discovery, OpenAPI, runtime coordinator, HTT
 
 ### Transport evidence
 
+The native Core integration fixture reproduced the missing station telemetry
+and passed with the per-session WebRTC output addition. It verified local
+courtesy during idle and concurrent voice, ordinary audience handling,
+addressed replies, and one-copy delivery for each configured message audience.
+The decoded two-peer Opus fixture includes a distinct local telemetry marker.
+Its matching native Product3 verification remains open.
+
 The Debian 13 arm64 proof built on Rust 1.88.0. `str0m` 0.24.1 with dynamic
 OpenSSL negotiated direct Trickle ICE, DTLS fingerprint verification, both
 DCEP modes and Opus RTP with the actual SSRC, extended timestamp and receiver
