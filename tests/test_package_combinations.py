@@ -117,6 +117,28 @@ def test_radio_product_dependency_does_not_require_the_asterisk_integration() ->
     )
 
 
+def test_codec_packages_require_the_provenance_release() -> None:
+    stanzas = package_stanzas()
+    source = (ROOT / "debian/control").read_text().split("\n\n", 1)[0]
+    minimum = "0.1.0~alpha2"
+    assert f"librptadv-codec-dev (>= {minimum})" in source
+    runtime = depends(stanzas["rpt-advanced"])
+    for codec in (
+        "g711",
+        "pcm",
+        "gsm",
+        "speex",
+        "opus",
+        "ffmpeg",
+        "bcg729",
+        "ilbc",
+        "spandsp",
+        "dialogic",
+    ):
+        assert f"librptadv-codec-{codec}1 (>= {minimum})" in runtime
+    assert f"librptadv-codec-opus1 (>= {minimum})" in depends(stanzas["librptadv-product3"])
+
+
 def test_jitter_runtime_and_development_manifests() -> None:
     stanzas = package_stanzas()
     runtime = stanzas["librptadv-jitter-adapter1"]
@@ -204,6 +226,7 @@ if __name__ == "__main__":
         test_operator_cli_installs_independently_from_radio_hosts,
         test_each_install_set_contains_only_its_entrypoint,
         test_standalone_package_declares_its_native_runtime_providers,
+        test_codec_packages_require_the_provenance_release,
         test_either_host_installs_the_dynamically_loaded_echolink_runtime,
         test_radio_product_dependency_does_not_require_the_asterisk_integration,
         test_standalone_package_declares_its_service_account_provisioner,

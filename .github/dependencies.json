@@ -16,7 +16,7 @@
   },
   {
     "repository": "rptadv-codec-adapters",
-    "sha": "d6f7e5b3a99a340f64b1ab503f5127b170497b28",
+    "sha": "4f5d885af9d593b333671953a65343aca0d6204e",
     "packages": [
       "librptadv-codec-dev", "librptadv-codec-g7111", "librptadv-codec-pcm1",
       "librptadv-codec-gsm1", "librptadv-codec-speex1", "librptadv-codec-opus1",
