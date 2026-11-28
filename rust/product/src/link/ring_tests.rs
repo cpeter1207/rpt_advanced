@@ -1488,3 +1488,119 @@ fn direct_peer_ring_meter_follows_the_native_mixer_sample_clock() {
     assert_eq!(meter.valid_samples, 4_800);
     assert!(meter.peak_dbfs.unwrap() > -20.0);
 }
+
+#[test]
+fn linked_resampling_preserves_intersample_peaks_at_unity_across_native_read_paths() {
+    for (rate, policy) in [(8_000, InboundPolicy::Peer), (16_000, InboundPolicy::Echo)] {
+        let (mut full, mut high) = InboundRing::open(rate, policy).unwrap();
+        let (mut half, mut low) = InboundRing::open(rate, policy).unwrap();
+        // Sub-rail, band-limited by the actual linked SRC at playout. Its step
+        // response has peaks above unity that a normalised ring would flatten.
+        let wave: Vec<_> = (0..5120)
+            .map(|i| if i % 16 < 8 { 0.9375 } else { -0.9375 })
+            .collect();
+        let reference: Vec<_> = wave.iter().map(|v| v * 0.5).collect();
+        for (producer, pcm) in [(&mut full, &wave), (&mut half, &reference)] {
+            for (i, block) in pcm.chunks(2560).enumerate() {
+                let written = match policy {
+                    InboundPolicy::Echo => producer.write_tagged(block, 1, (i * 2560) as u64, &[]),
+                    _ => producer.write(block),
+                };
+                assert_eq!(written, Ok(block.len()));
+            }
+        }
+        let check = |pairs: &[(f32, f32)]| {
+            let peak = pairs.iter().map(|(a, _)| a.abs()).fold(0.0f32, f32::max);
+            assert!((1.01..1.5).contains(&peak), "{rate} Hz, peak {peak}");
+            assert!(pairs.iter().all(|(a, b)| (a - 2.0 * b).abs() < 0.00001));
+        };
+        let mut a = [0.0; 2048];
+        let mut b = [0.0; 2048];
+        assert_eq!(high.render(&mut a), low.render(&mut b));
+        check(&a.into_iter().zip(b).collect::<Vec<_>>());
+
+        let mut direct = Vec::new();
+        let mut timed = Vec::new();
+        for _ in 0..256 {
+            direct.push((
+                high.render_sample().unwrap().unwrap(),
+                low.render_sample().unwrap().unwrap(),
+            ));
+            let a = high.render_timed_sample().unwrap();
+            let b = low.render_timed_sample().unwrap();
+            assert_eq!(a.provenance, b.provenance);
+            timed.push((a.sample, b.sample));
+        }
+        check(&direct);
+        check(&timed);
+    }
+}
+
+#[test]
+fn producer_headroom_only_encodes_low_rate_links_and_retries_original_pcm() {
+    thread_local! { static FIRST: std::cell::Cell<f32> = const { std::cell::Cell::new(0.0) }; }
+    unsafe extern "C" fn accept_one(
+        _: *mut ffi::rpcr3_ring,
+        pcm: *const f32,
+        count: u64,
+        accepted: *mut u64,
+    ) -> i32 {
+        // The fixture always offers at least one readable sample.
+        FIRST.set(unsafe { *pcm });
+        unsafe {
+            *accepted = count.min(1);
+        }
+        0
+    }
+
+    unsafe extern "C" fn accept_tagged(
+        ring: *mut ffi::rpcr3_ring,
+        pcm: *const f32,
+        count: u64,
+        _: u64,
+        _: u64,
+        _: *const MuteSpan,
+        _: u32,
+        accepted: *mut u64,
+    ) -> i32 {
+        unsafe { accept_one(ring, pcm, count, accepted) }
+    }
+
+    for (policy, rate, encoded) in [
+        (InboundPolicy::Peer, 8_000, true),
+        (InboundPolicy::Peer, 16_000, true),
+        (InboundPolicy::Echo, 8_000, true),
+        (InboundPolicy::Echo, 16_000, true),
+        (InboundPolicy::Peer, 32_000, false),
+        (InboundPolicy::Peer, 48_000, false),
+        (InboundPolicy::Echo, 48_000, false),
+        (InboundPolicy::Phone, 8_000, false),
+        (
+            InboundPolicy::Local {
+                squelch_delay_ms: 0,
+            },
+            16_000,
+            false,
+        ),
+        (InboundPolicy::Media, 8_000, false),
+    ] {
+        // The ring copies this table and retains the original create/destroy pair.
+        let mut api = unsafe { *ffi::rpcr3_descriptor() };
+        api.ring_producer_push = Some(accept_one);
+        api.ring_producer_push_tagged = Some(accept_tagged);
+        let (mut producer, _consumer) =
+            unsafe { InboundRing::from_descriptor(rate, policy, &api) }.unwrap();
+        let pcm = [0.75, -0.625];
+        for tagged in [false, true] {
+            for i in 0..pcm.len() {
+                let accepted = if tagged {
+                    producer.write_tagged(&pcm[i..], 3, i as u64, &[])
+                } else {
+                    producer.write(&pcm[i..])
+                };
+                assert_eq!(accepted, Ok(1));
+                assert_eq!(FIRST.get(), if encoded { pcm[i] * 0.5 } else { pcm[i] });
+            }
+        }
+    }
+}

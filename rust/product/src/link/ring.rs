@@ -130,7 +130,7 @@ impl Drop for Shared {
 /// Ring constructor assigning exactly one owner to each endpoint.
 pub struct InboundRing;
 /// Unique network producer; its owner serializes every publish operation.
-pub struct InboundProducer(Arc<Shared>);
+pub struct InboundProducer(Arc<Shared>, Option<Box<[f32]>>);
 /// Unique native 48 kHz consumer, independent of producer progress.
 pub struct InboundConsumer(Arc<Shared>, Option<Box<MarkerReader>>);
 struct OriginMarker {
@@ -391,8 +391,11 @@ impl InboundRing {
                 provider_output: OnceLock::new(),
                 native_ingress: OnceLock::new(),
             });
+            let scratch = shared
+                .link_headroom()
+                .then(|| vec![0.0; config.max_producer_samples as usize].into_boxed_slice());
             Ok((
-                InboundProducer(shared.clone()),
+                InboundProducer(shared.clone(), scratch),
                 InboundConsumer(shared, None),
             ))
         }
@@ -468,7 +471,27 @@ impl InboundProducer {
             Ok(n)
         }
     }
-    fn push(&self, samples: &[f32]) -> Result<usize, RingError> {
+    // Keep the caller's decoded PCM intact for detectors, metering and prefix retries.
+    // Both tagged and untagged offers use the same normalized provider boundary.
+    fn ring_input<'a>(
+        scratch: &'a mut Option<Box<[f32]>>,
+        samples: &'a [f32],
+    ) -> Result<&'a [f32], RingError> {
+        let Some(scratch) = scratch else {
+            return Ok(samples);
+        };
+        let output = scratch.get_mut(..samples.len()).ok_or(RingError)?;
+        for (target, &source) in output.iter_mut().zip(samples) {
+            *target = if source.is_finite() {
+                source.clamp(-1.0, 1.0) * 0.5
+            } else {
+                0.0
+            };
+        }
+        Ok(output)
+    }
+    fn push(&mut self, samples: &[f32]) -> Result<usize, RingError> {
+        let samples = Self::ring_input(&mut self.1, samples)?;
         let mut accepted = 0;
         // SAFETY: this noncloneable endpoint is the only producer; the slice is live.
         let code = unsafe {
@@ -535,7 +558,7 @@ impl InboundProducer {
         Ok(accepted)
     }
     fn push_tagged(
-        &self,
+        &mut self,
         samples: &[f32],
         generation: u64,
         start: u64,
@@ -575,6 +598,7 @@ impl InboundProducer {
         } else {
             spans
         };
+        let samples = Self::ring_input(&mut self.1, samples)?;
         let mut accepted = 0;
         let code = unsafe {
             operation(
@@ -855,6 +879,7 @@ impl InboundConsumer {
             provenance.real = false;
             provenance.muted = true;
         }
+        self.0.restore_link_level(std::slice::from_mut(&mut sample));
         Ok(TimedPeerSample {
             sample,
             provenance: Some(provenance),
@@ -900,6 +925,8 @@ impl InboundConsumer {
             }
             if self.0.signals.dtmf_muted() {
                 samples.fill(0.0);
+            } else {
+                self.0.restore_link_level(samples);
             }
             Ok(real as usize)
         } else {
@@ -935,6 +962,8 @@ impl InboundConsumer {
             }
             if self.0.signals.dtmf_muted() {
                 sample = 0.0;
+            } else {
+                self.0.restore_link_level(std::slice::from_mut(&mut sample));
             }
             Ok(real.then_some(sample))
         } else {
@@ -952,6 +981,21 @@ impl InboundConsumer {
     }
 }
 impl Shared {
+    // The released ring clips its resampler output to normalized PCM. Half-level
+    // input leaves room for intersample peaks. Restore unity before metering or DSP.
+    fn link_headroom(&self) -> bool {
+        matches!(self.policy, InboundPolicy::Peer | InboundPolicy::Echo)
+            && matches!(self.input_rate, 8_000 | 16_000)
+    }
+
+    fn restore_link_level(&self, output: &mut [f32]) {
+        if self.link_headroom() {
+            for sample in output {
+                *sample *= 2.0;
+            }
+        }
+    }
+
     fn producer_prefix(&self, samples: u64) -> u64 {
         if matches!(self.policy, InboundPolicy::Phone) {
             samples.min(u64::from(self.input_rate) / 50)
