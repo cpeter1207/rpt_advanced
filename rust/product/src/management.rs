@@ -543,33 +543,6 @@ impl Drop for SaveAttempt<'_> {
     }
 }
 
-#[cfg(test)]
-mod save_progress_tests {
-    use super::*;
-
-    #[test]
-    fn warnings_follow_only_an_active_overdue_phase() {
-        let progress = SaveProgress::default();
-        let start = Instant::now();
-        {
-            let save = progress.track();
-            assert_eq!(progress.overdue(start), None);
-            let overdue = Instant::now() + std::time::Duration::from_secs(2);
-            assert_eq!(progress.overdue(overdue), Some("validate candidate"));
-            assert_eq!(progress.overdue(overdue), None);
-
-            save.enter("prepare credential owners");
-            let overdue = Instant::now() + std::time::Duration::from_secs(2);
-            assert_eq!(progress.overdue(overdue), Some("prepare credential owners"));
-            save.enter("publish selected revision");
-        }
-        assert_eq!(
-            progress.overdue(Instant::now() + std::time::Duration::from_secs(2)),
-            None
-        );
-    }
-}
-
 struct Backend<R> {
     stopping: std::sync::atomic::AtomicBool,
     save_progress: SaveProgress,
@@ -1757,4 +1730,31 @@ fn pagination(
         }
     }
     Ok(Some((offset.unwrap_or(0), limit.unwrap_or(20))))
+}
+
+#[cfg(test)]
+mod save_progress_tests {
+    use super::*;
+
+    #[test]
+    fn warnings_follow_only_an_active_overdue_phase() {
+        let progress = SaveProgress::default();
+        let start = Instant::now();
+        {
+            let save = progress.track();
+            assert_eq!(progress.overdue(start), None);
+            let overdue = Instant::now() + std::time::Duration::from_secs(2);
+            assert_eq!(progress.overdue(overdue), Some("validate candidate"));
+            assert_eq!(progress.overdue(overdue), None);
+
+            save.enter("prepare credential owners");
+            let overdue = Instant::now() + std::time::Duration::from_secs(2);
+            assert_eq!(progress.overdue(overdue), Some("prepare credential owners"));
+            save.enter("publish selected revision");
+        }
+        assert_eq!(
+            progress.overdue(Instant::now() + std::time::Duration::from_secs(2)),
+            None
+        );
+    }
 }

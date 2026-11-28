@@ -162,9 +162,8 @@ fn provision_turn(provision: &mut Value, fixture: &Path) {
 }
 
 fn check_relay_candidate(candidate: &str) {
-    let candidate = rtc::Candidate::from_sdp_string(candidate)
-        .ok()
-        .expect("fixture relay candidate parses");
+    let candidate =
+        rtc::Candidate::from_sdp_string(candidate).expect("fixture relay candidate parses");
     assert_eq!(candidate.kind().to_string(), "relay");
     assert_eq!(candidate.addr().ip(), std::net::Ipv4Addr::LOCALHOST);
 }
@@ -413,17 +412,12 @@ async fn connect(
             let candidate = rows[relay]["candidate"].as_str().unwrap();
             if turn.is_some() {
                 let host = rtc::Candidate::from_sdp_string(rows[0]["candidate"].as_str().unwrap())
-                    .ok()
                     .expect("fixture host candidate parses");
                 assert_eq!(host.addr().ip().to_string(), RELAY_FIXTURE_HOST);
                 check_relay_candidate(candidate);
             }
-            break (
-                SdpAnswer::from_sdp_string(sdp)
-                    .ok()
-                    .expect("fixture answer parses"),
-                candidate.to_owned(),
-            );
+            let answer = SdpAnswer::from_sdp_string(sdp).expect("fixture answer parses");
+            break (answer, candidate.to_owned());
         }
         assert!(
             Instant::now() < deadline,
@@ -508,10 +502,10 @@ async fn connect(
     if let Some(reason) = failure {
         let transport = driver.connection_state();
         let reply = browser(client, "GET", &session, None);
-        let phase = match reply.body["phase"].as_str() {
-            Some(phase @ ("pending" | "active" | "closed")) => phase,
-            _ => "unavailable",
-        };
+        let phase = reply.body["phase"]
+            .as_str()
+            .filter(|phase| matches!(*phase, "pending" | "active" | "closed"))
+            .unwrap_or("unavailable");
         panic!(
             "WebRTC setup {reason}; ice={:?}, dtls={}, negotiated={}, opus={}, control={}, timing={}, ready={}, hal_http={}, hal_phase={phase}",
             transport.ice,
