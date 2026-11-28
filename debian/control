@@ -85,7 +85,7 @@ Depends: ${misc:Depends}, ${shlibs:Depends},
  librptadvmorse1 (>= 0.1.0~alpha1-1),
  librptadvdtmf1 (>= 0.1.0~alpha3-1),
  librptadv-codec-opus1 (>= 0.1.0~alpha1),
- librptadv-jitter-adapter1 (= \${binary:Version}),
+ librptadv-jitter-adapter1 (= ${binary:Version}),
  librptadvtemplate1 (>= 0.1.0~alpha1-1),
  librptadvschedule1 (>= 0.1.0~alpha3-1)
 Description: portable controller product for rpt_advanced

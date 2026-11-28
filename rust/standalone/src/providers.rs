@@ -9,7 +9,7 @@ use std::{
     sync::OnceLock,
 };
 
-const PROVIDERS: [ProviderSpec; 13] = [
+const PROVIDERS: [ProviderSpec; 14] = [
     inline(
         "librptadv_product.so.3",
         "rptadv_product_descriptor_v1",
@@ -93,6 +93,13 @@ const PROVIDERS: [ProviderSpec; 13] = [
         "rptadv_rnnoise_adapter_descriptor",
         1,
         b"rptadv.rnnoise",
+        DescriptorLayout::Named,
+    ),
+    pointer(
+        "librptadvschedule.so.1",
+        "rptadv_recurrence_descriptor",
+        1,
+        b"rptadv.recurrence",
         DescriptorLayout::Named,
     ),
 ];
@@ -2131,6 +2138,7 @@ pub(crate) mod tests {
             NAMED(ffmpeg, rptadv_ffmpeg_adapter_descriptor, 1, "rptadv.ffmpeg")
             NAMED(gpio, rptadv_gpio_adapter_descriptor, 1, "rptadv.cm119-hid-gpio")
             NAMED(rnnoise, rptadv_rnnoise_adapter_descriptor, 1, "rptadv.rnnoise")
+            NAMED(recurrence, rptadv_recurrence_descriptor, 1, "rptadv.recurrence")
         "#
     }
 }
